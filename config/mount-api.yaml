@@ -1,0 +1,319 @@
+# ============================================================================
+# Mount API — language-agnostic interface definition
+#
+# Shared contract for all four implementations (Rust, JS/WASM, Python, Kotlin).
+# Defines the vocabulary (scalars, enums, records), the closed error set, and
+# the operations with their semantic annotations. Expressed in the common
+# denominator of the target languages: flat functions over opaque ids and
+# plain records, errors as a closed enum, no language-native abstractions
+# (iterators, streams, exceptions, context managers) in the surface. Those are
+# added per-binding as wrappers.
+#
+# Type notation: a trailing "?" in a quoted type means optional/nullable
+# (e.g. "string?"). Lists are written [Type]. Operation annotations are the
+# behaviors the conformance suite asserts:
+#   mutates  - writes to the database
+#   atomic   - the whole operation is one transaction (all-or-nothing)
+#   locks    - acquires/holds a lock row scoped to the mount
+#   addr     - how the target is named: path | id | both
+#             (path resolves against the mount point; path addresses only
+#              VISIBLE nodes, so hidden same-name siblings need an id variant)
+# ============================================================================
+
+meta:
+  interface: mount_api
+  version: 1
+  notes: >
+    Paths are resolved relative to the mount's mount_point (ACC-2), '/' being
+    the mount point itself. Path resolution sees only visible nodes (NODE-5);
+    operations that must reach a hidden sibling use the *_by_id form. All ids
+    are opaque uuid7 strings; consumers never construct them.
+
+# ----------------------------------------------------------------------------
+# Scalars — opaque or primitive value types
+# ----------------------------------------------------------------------------
+scalars:
+  NodeId:    { base: string, opaque: true, note: "uuid7 of a node" }
+  EdgeId:    { base: string, opaque: true, note: "uuid7 of an edge" }
+  VolumeId:  { base: string, opaque: true, note: "uuid7 of a volume" }
+  MountId:   { base: string, opaque: true, note: "uuid7 of a mount/session" }
+  LockId:    { base: string, opaque: true, note: "uuid7 of a lock" }
+  FdId:      { base: string, opaque: true, note: "opaque streaming descriptor handle" }
+  FsHandle:  { base: opaque, note: "the file/session root object; mounts (rows) broker access (ACC-1)" }
+  DbRef:     { base: opaque, note: "platform db reference: path, OPFS handle, etc." }
+  Path:      { base: string, note: "mount-relative, slash-separated" }
+  Bytes:     { base: binary }
+  Timestamp: { base: int,    note: "unix epoch milliseconds" }
+
+# ----------------------------------------------------------------------------
+# Enums — all closed
+# ----------------------------------------------------------------------------
+enums:
+  NodeType: [container, entry]
+  MountState: [new, active, unmounted]   # new = under construction; active = in use; unmounted = terminal/invalid
+  Whence: [set, cur, end]
+  WriteMode:
+    values: [truncate, append]
+    note: "open_write start position; exclusive lock either way"
+  LockMode:
+    values: [exclusive]
+    note: "only exclusive in this iteration (ACC-7); reserved for future modes"
+
+# ----------------------------------------------------------------------------
+# Records — plain data returned across the boundary
+# ----------------------------------------------------------------------------
+records:
+  VolumeInfo:
+    { id: VolumeId, name: "string?", root: "NodeId?", api_version: int, created_at: Timestamp }
+  NodeInfo:
+    { id: NodeId, type: NodeType, name: string, created_at: Timestamp,
+      modified_at: Timestamp, volume: "VolumeId?",
+      note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it)" }
+  DirEntry:
+    { node: NodeId, name: string, type: NodeType, visible: bool, edge: EdgeId }
+  MountInfo:
+    { id: MountId, volume: VolumeId, mount_point: NodeId, mount_path: Path,
+      state: MountState, expires_at: "Timestamp?", created_at: Timestamp,
+      note: "mount_path is the mount point's volume-absolute path, recomputed on read" }
+  LockInfo:
+    { id: LockId, mount: MountId, node: NodeId, expires_at: "Timestamp?" }
+  Anomaly:
+    { kind: string, id: string, note: "rows from health_check; empty = healthy" }
+  PruneReport:
+    { nodes_pruned: int, locks_pruned: int }
+  Descriptor:
+    { fd: FdId, node: NodeId, writable: bool }
+
+# ----------------------------------------------------------------------------
+# Errors — closed set. Every operation's `raises` draws only from these.
+# ----------------------------------------------------------------------------
+errors:
+  not_found:            "path or id does not resolve"
+  not_a_container:      "operation needs a container, target is an entry"
+  not_an_entry:         "operation needs an entry, target is a container"
+  nameless:             "a name was required and was empty (NODE-3)"
+  would_cycle:          "reparent would place a container under its own descendant (PI-5)"
+  volume_mismatch:      "operation would span volumes (PI-6)"
+  not_empty:            "container delete policy forbids removing non-empty (caller policy)"
+  mount_invalid:        "mount is unmounted, expired, or its mount point vanished (ACC-4/5)"
+  mount_point_archived: "mount point node is archived; reads may still proceed (ACC-5)"
+  lock_held:            "an exclusive lock is held by another mount (ACC-7)"
+  lock_invalid:         "the descriptor's lock has expired or its mount ended (ACC-9)"
+  corrupt:              "an invariant the schema cannot enforce was found violated"
+  unsupported:          "operation not available in this build/target"
+
+# ----------------------------------------------------------------------------
+# Operations
+# ----------------------------------------------------------------------------
+operations:
+
+  # --- session / lifecycle -------------------------------------------------
+  session:
+    open:
+      params:  { db: DbRef }
+      returns: FsHandle
+      flags:   { mutates: false, atomic: false, locks: false }
+      note:    "opens and exclusively owns the connection"
+    close:
+      params:  { fs: FsHandle }
+      returns: void
+    create_volume:
+      params:  { fs: FsHandle, name: "string?" }
+      returns: VolumeInfo
+      flags:   { mutates: true, atomic: true, locks: false }
+      note:    "creates volume + its root container, links root (bootstrap)"
+    list_volumes:
+      params:  { fs: FsHandle }
+      returns: [VolumeInfo]
+    mount:
+      params:  { fs: FsHandle, volume: VolumeId, at: "Path?", ttl_ms: "int?" }
+      returns: MountId
+      flags:   { mutates: true, atomic: true, locks: false }
+      raises:  [not_found]
+      note:    "`at` defaults to the volume root; ttl per ACC-3"
+    unmount:
+      params:  { mount: MountId }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false }
+      note:    "marks mount invalid; lock reclamation deferred to prune (ACC-10)"
+    renew_mount:
+      params:  { mount: MountId, ttl_ms: "int?" }
+      returns: MountInfo
+      flags:   { mutates: true, atomic: true }
+      raises:  [mount_invalid]
+      note:    "heartbeat: extend ttl on a live mount"
+    mount_info:
+      params:  { mount: MountId }
+      returns: MountInfo
+      raises:  [not_found]
+
+  # --- structural (path-first, all atomic + mutating) ----------------------
+  structural:
+    create_container:
+      params:  { mount: MountId, path: Path }
+      returns: NodeId
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_a_container, nameless, mount_invalid]
+    create_entry:
+      params:  { mount: MountId, path: Path, data: "Bytes?" }
+      returns: NodeId
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_a_container, nameless, mount_invalid]
+    write_all:
+      params:  { mount: MountId, path: Path, data: Bytes }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
+      note:    "atomic full-content replace (IO-2)"
+    move:
+      params:  { mount: MountId, from: Path, to: Path }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_a_container, would_cycle, volume_mismatch, mount_invalid]
+      note:    "archive old edge + create new edge (OP-3)"
+    copy:
+      params:  { mount: MountId, from: Path, to: Path }
+      returns: NodeId
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_a_container, mount_invalid]
+      note: >
+        fresh uuid7, preserves source created_at (OP-4). Traverses ACTIVE edges
+        only (the detached graveyard is not copied). Host-side top-down walk in
+        canonical order (subtree view) threading an old->new id map; walk order
+        is a conformance requirement so two implementations produce identical
+        new-id sequences.
+    rename:
+      params:  { mount: MountId, path: Path, name: string }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, nameless, mount_invalid]
+    remove:
+      params:  { mount: MountId, path: Path }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_empty, mount_invalid]
+      note: >
+        detach a leaf or empty container: archive active edge; node becomes
+        detached, not yet purged (OP-5). Refuses a non-empty container with
+        not_empty.
+    remove_recursive:
+      params:  { mount: MountId, path: Path }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: >
+        archive the whole ACTIVE subtree in one transaction (CTE-driven set
+        archive via the subtree view); detached children are not re-touched.
+    pack:
+      params:  { mount: MountId, path: Path }
+      returns: NodeId
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_a_container, mount_invalid]
+      note: >
+        MsgPack-consolidate a subtree into an entry (OP-6, TX-2). ACTIVE edges
+        only. Host-side top-down walk in canonical order (subtree view);
+        serialized child order must match the walk so unpack reproduces it.
+    unpack:
+      params:  { mount: MountId, path: Path }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_an_entry, mount_invalid]
+      note: >
+        inverse of pack: reinsert the serialized subtree top-down through the
+        generation path, remapping serialized refs to freshly minted ids.
+
+  # --- read / resolution (read-only) ---------------------------------------
+  read:
+    resolve:
+      params:  { mount: MountId, path: Path }
+      returns: NodeId
+      raises:  [not_found, mount_invalid]
+    path_of:
+      params:  { mount: MountId, node: NodeId }
+      returns: Path
+      flags:   { addr: id }
+      raises:  [not_found, mount_invalid]
+    stat:
+      params:  { mount: MountId, path: Path }
+      returns: NodeInfo
+      flags:   { addr: both }
+      raises:  [not_found, mount_invalid]
+    exists:
+      params:  { mount: MountId, path: Path }
+      returns: bool
+    list:
+      params:  { mount: MountId, path: Path }
+      returns: [DirEntry]
+      flags:   { addr: path }
+      raises:  [not_found, not_a_container, mount_invalid]
+      note:    "visibility already resolved (NODE-5); includes hidden as visible:false"
+    read_all:
+      params:  { mount: MountId, path: Path }
+      returns: Bytes
+      flags:   { addr: both }
+      raises:  [not_found, not_an_entry, mount_invalid]
+
+  # --- streaming (descriptor lifecycle) ------------------------------------
+  streaming:
+    note: >
+      The flat primitives below back a per-binding wrapper (Rust Read/Write,
+      Python file-like, JS stream, Kotlin InputStream). open_write takes an
+      exclusive mount-scoped lock (ACC-6/7) held until close. A long stream is
+      an ordinary lock with a generous ttl, not a special case. Must not hold a
+      write transaction open for the stream's life (IO-4/5); writes batch behind
+      a single commit at close.
+    open_read:
+      params:  { mount: MountId, path: Path }
+      returns: Descriptor
+      flags:   { locks: false, addr: both }
+      raises:  [not_found, not_an_entry, mount_invalid, mount_point_archived]
+    open_write:
+      params:  { mount: MountId, path: Path, mode: WriteMode }
+      returns: Descriptor
+      flags:   { mutates: true, locks: true, addr: both }
+      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
+    read:
+      params:  { fd: FdId, len: int }
+      returns: Bytes
+      raises:  [lock_invalid]
+    write:
+      params:  { fd: FdId, data: Bytes }
+      returns: int
+      flags:   { mutates: true }
+      raises:  [lock_invalid]
+    seek:
+      params:  { fd: FdId, offset: int, whence: Whence }
+      returns: int
+    tell:
+      params:  { fd: FdId }
+      returns: int
+    close:
+      params:  { fd: FdId }
+      returns: void
+      flags:   { mutates: true }
+      note:    "flushes, commits the staged content atomically, releases the lock"
+
+  # --- maintenance ---------------------------------------------------------
+  maintenance:
+    prune:
+      params:  { fs: FsHandle, volume: "VolumeId?" }
+      returns: PruneReport
+      flags:   { mutates: true, atomic: true }
+      note:    "lazy sweep: volatile nodes (PI-3) + invalid locks (ACC-10)"
+    health_check:
+      params:  { fs: FsHandle }
+      returns: [Anomaly]
+      note:    "surfaces health_anomaly rows; empty list = consistent"
+
+# ----------------------------------------------------------------------------
+# id-addressed variants
+# ----------------------------------------------------------------------------
+id_variants:
+  note: >
+    Every structural and read operation whose `addr` is `path` or `both` has a
+    parallel *_by_id form taking a NodeId in place of the leading Path, for
+    reaching hidden same-name siblings (NODE-5) and for callers that already
+    hold a resolved id. Same returns, same raises minus not_found-by-path.
+  applies_to:
+    [stat, list, read_all, move, copy, rename, remove, remove_recursive,
+     pack, unpack, open_read, open_write, path_of]

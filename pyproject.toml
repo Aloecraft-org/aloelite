@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aloelite"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography",
+    "pydantic",
+    "pyyaml",
+    "msgpack",
+    "pyfuse3",
+    "trio",
+    "flask",         # or fastapi + uvicorn
+]
+
+[project.scripts]
+aloelite-fuse = "aloelite.fuse:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aloelite*", "manager*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

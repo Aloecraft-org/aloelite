@@ -1,0 +1,14 @@
+{
+  "TECHNO_VERSION": {
+    "major": 0,
+    "minor": 1,
+    "patch": 0,
+    "build": 0
+  },
+  "TECHNO_INIT_DIRS": [
+    ".nogit",
+    ".dump",
+    "script"
+  ],
+  "TECHNO_COPYRIGHT": "Copyright Michael Godfrey [2026] | aloecraft.org [michael@aloecraft.org]"
+}

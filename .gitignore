@@ -1,0 +1,6 @@
+.dump
+.xtrpatch
+.xtrshow_manifest
+x.md
+x.patch
+*/**/__pycache__

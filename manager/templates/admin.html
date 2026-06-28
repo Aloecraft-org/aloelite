@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aloelite — volume manager</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
+  <style>
+    body { background: #f8f9fa; }
+    .vol-card { transition: box-shadow .15s; }
+    .vol-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+    .mono { font-family: monospace; font-size: .78rem; color: #6c757d; word-break: break-all; }
+    .log-box { background: #212529; color: #adb5bd; font-family: monospace; font-size: .78rem;
+               border-radius: .375rem; padding: .75rem; max-height: 130px; overflow-y: auto; }
+    .log-box div { line-height: 1.6; }
+    .stat-mini { font-size: .78rem; color: #495057; }
+    [x-cloak] { display: none !important; }
+    .spin { animation: spin .8s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body x-data="app()" x-init="init()">
+
+<header class="container py-3 mb-2 border-bottom d-flex align-items-center justify-content-between">
+  <div class="d-flex align-items-center gap-2">
+    <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6"
+         viewBox="0 0 24 24" aria-hidden="true">
+      <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/>
+      <path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/>
+    </svg>
+    <span class="fw-semibold">Volume manager</span>
+    <span class="badge bg-secondary fw-normal" x-text="apiBase"></span>
+  </div>
+  <button class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1"
+          @click="refresh()" :disabled="loading">
+    <span :class="loading ? 'spin' : ''">&#8635;</span>
+    Refresh
+  </button>
+</header>
+
+<main class="container pb-5">
+
+  <!-- api status banner -->
+  <div x-show="!apiOk" x-cloak class="alert alert-danger py-2 mb-3" role="alert">
+    Cannot reach API at <strong x-text="apiBase"></strong>. Check that the manager is running.
+  </div>
+
+  <!-- summary stats -->
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+      <div class="card text-center py-3">
+        <div class="fs-2 fw-semibold" x-text="volumes.length"></div>
+        <div class="text-muted small">volumes</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card text-center py-3">
+        <div class="fs-2 fw-semibold text-success" x-text="volumes.filter(v=>v.mounted).length"></div>
+        <div class="text-muted small">mounted</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card text-center py-3">
+        <div class="fs-2 fw-semibold text-primary" x-text="volumes.filter(v=>v.encrypted).length"></div>
+        <div class="text-muted small">encrypted</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="card text-center py-3">
+        <div class="fs-5 fw-semibold" :class="apiOk ? 'text-success' : 'text-danger'"
+             x-text="apiOk ? 'reachable' : 'unreachable'"></div>
+        <div class="text-muted small">API status</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- volumes header -->
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <h6 class="mb-0 text-muted text-uppercase" style="letter-spacing:.05em; font-size:.75rem;">Volumes</h6>
+    <button class="btn btn-sm btn-outline-primary" @click="showCreate = true">+ New volume</button>
+  </div>
+
+  <!-- empty state -->
+  <div x-show="volumes.length === 0 && apiOk" x-cloak
+       class="text-center text-muted py-5 border rounded bg-white">
+    <div class="fs-4 mb-1">&#128190;</div>
+    No volumes yet. Create one to get started.
+  </div>
+
+  <!-- volume cards -->
+  <div class="d-flex flex-column gap-3">
+    <template x-for="v in volumes" :key="v.id">
+      <div class="card vol-card">
+        <div class="card-body">
+
+          <!-- title row -->
+          <div class="d-flex align-items-start justify-content-between gap-2 mb-1">
+            <div>
+              <span class="fw-semibold me-2" x-text="v.name"></span>
+              <span class="badge me-1" :class="v.mounted ? 'bg-success' : 'bg-secondary'"
+                    x-text="v.mounted ? 'mounted' : 'unmounted'"></span>
+              <span x-show="v.encrypted" class="badge bg-primary">encrypted</span>
+            </div>
+            <button class="btn btn-sm btn-outline-danger flex-shrink-0"
+                    @click="confirmDelete(v)" title="Delete volume">&#128465;</button>
+          </div>
+
+          <div class="mono mb-1" x-text="v.id"></div>
+          <div x-show="v.mountpoint" class="mono" x-text="'&#8594; ' + v.mountpoint"></div>
+
+          <!-- stat inline -->
+          <div x-show="v._stat" x-cloak class="mt-2 stat-mini d-flex gap-3">
+            <span><strong>Size:</strong> <span x-text="v._stat ? fmtBytes(v._stat.size_bytes) : ''"></span></span>
+            <span><strong>Modified:</strong> <span x-text="v._stat ? fmtTime(v._stat.mtime) : ''"></span></span>
+          </div>
+
+          <!-- per-card log line -->
+          <div x-show="v._log" x-cloak class="mt-2">
+            <div class="alert alert-secondary py-1 px-2 mb-0" style="font-size:.78rem;" x-text="v._log"></div>
+          </div>
+
+          <!-- action row -->
+          <div class="d-flex flex-wrap gap-2 mt-3 pt-3 border-top">
+            <template x-if="!v.mounted">
+              <button class="btn btn-sm btn-outline-success" @click="mountVol(v)" :disabled="v._busy">
+                <span x-text="v._busy ? 'Mounting…' : 'Mount'"></span>
+              </button>
+            </template>
+            <template x-if="v.mounted">
+              <button class="btn btn-sm btn-outline-warning" @click="unmountVol(v)" :disabled="v._busy">
+                <span x-text="v._busy ? 'Unmounting…' : 'Unmount'"></span>
+              </button>
+            </template>
+            <button class="btn btn-sm btn-outline-secondary" @click="doCheckpoint(v)"
+                    :disabled="v._busy" title="WAL checkpoint (safe while unmounted)">
+              Checkpoint
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" @click="doExport(v)">
+              Export
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" @click="doStat(v)">
+              Stat
+            </button>
+          </div>
+
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- activity log -->
+  <template x-if="log.length">
+    <div class="mt-4">
+      <h6 class="text-muted text-uppercase mb-2" style="letter-spacing:.05em; font-size:.75rem;">Activity log</h6>
+      <div class="log-box">
+        <template x-for="(line, i) in log" :key="i">
+          <div x-text="line"></div>
+        </template>
+      </div>
+    </div>
+  </template>
+
+</main>
+
+<!-- create volume modal -->
+<div class="modal fade" id="createModal" tabindex="-1" aria-labelledby="createModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title" id="createModalLabel">Create volume</h6>
+        <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label small">Name</label>
+          <input type="text" class="form-control form-control-sm" x-model="newName"
+                 placeholder="my-volume" @keydown.enter="doCreate()">
+        </div>
+        <div class="mb-3 form-check">
+          <input type="checkbox" class="form-check-input" id="encCheck" x-model="newEnc">
+          <label class="form-check-label small" for="encCheck">Encrypted</label>
+        </div>
+        <div x-show="newEnc" class="mb-3">
+          <label class="form-label small">PIN</label>
+          <input type="password" class="form-control form-control-sm" x-model="newPin"
+                 placeholder="passphrase" @keydown.enter="doCreate()">
+        </div>
+        <div x-show="createErr" class="alert alert-danger py-1 px-2 small" x-text="createErr"></div>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal"
+                @click="createErr=''">Cancel</button>
+        <button type="button" class="btn btn-sm btn-primary" @click="doCreate()" :disabled="creating">
+          <span x-text="creating ? 'Creating…' : 'Create volume'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- mount PIN modal -->
+<div class="modal fade" id="mountModal" tabindex="-1" aria-labelledby="mountModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title" id="mountModalLabel">Mount volume</h6>
+        <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted mb-3" x-text="mountTarget?.name"></p>
+        <div class="mb-2">
+          <label class="form-label small">PIN</label>
+          <input type="password" class="form-control form-control-sm" x-model="mountPin"
+                 @keydown.enter="doMount()" autofocus>
+        </div>
+        <div x-show="mountErr" class="alert alert-danger py-1 px-2 small" x-text="mountErr"></div>
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal"
+                @click="mountPin=''; mountErr=''">Cancel</button>
+        <button type="button" class="btn btn-sm btn-success" @click="doMount()" :disabled="mounting">
+          <span x-text="mounting ? 'Mounting…' : 'Mount'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- delete confirm modal -->
+<div class="modal fade" id="delModal" tabindex="-1" aria-labelledby="delModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title" id="delModalLabel">Delete volume?</h6>
+        <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body small">
+        <strong x-text="delTarget?.name"></strong> and its backing file will be permanently removed.
+        This cannot be undone.
+      </div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-sm btn-danger" @click="doDelete()">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function app() {
+  return {
+    apiBase: '',   // empty = same origin; set to 'http://localhost:8080' for cross-origin dev
+    volumes: [],
+    log: [],
+    loading: false,
+    apiOk: false,
+
+    showCreate: false,
+    newName: '', newEnc: false, newPin: '',
+    createErr: '', creating: false,
+
+    mountTarget: null,
+    mountPin: '', mountErr: '', mounting: false,
+
+    delTarget: null,
+
+    _modal(id) { return bootstrap.Modal.getOrCreateInstance(document.getElementById(id)); },
+
+    async init() {
+      await this.refresh();
+      // reopen showCreate watcher so Alpine show/hide still works alongside BS modals
+      this.$watch('showCreate', v => v ? this._modal('createModal').show() : this._modal('createModal').hide());
+    },
+
+    addLog(msg) {
+      const t = new Date().toLocaleTimeString();
+      this.log.unshift(`[${t}]  ${msg}`);
+      if (this.log.length > 60) this.log.pop();
+    },
+
+    async api(method, path, body) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const r = await fetch(this.apiBase + path, opts);
+      const ct = r.headers.get('content-type') || '';
+      const data = ct.includes('application/json') ? await r.json() : null;
+      return { ok: r.ok, status: r.status, data };
+    },
+
+    async refresh() {
+      this.loading = true;
+      try {
+        const r = await this.api('GET', '/volumes');
+        this.apiOk = r.ok;
+        if (r.ok) {
+          const prev = Object.fromEntries(this.volumes.map(v => [v.id, v]));
+          this.volumes = (r.data || []).map(v => ({
+            ...v,
+            _stat: prev[v.id]?._stat ?? null,
+            _log:  prev[v.id]?._log  ?? null,
+            _busy: false,
+          }));
+        }
+      } catch { this.apiOk = false; }
+      this.loading = false;
+    },
+
+    async doCreate() {
+      if (!this.newName.trim()) { this.createErr = 'Name is required.'; return; }
+      if (this.newEnc && !this.newPin) { this.createErr = 'PIN is required for encrypted volumes.'; return; }
+      this.creating = true; this.createErr = '';
+      try {
+        const body = { name: this.newName.trim(), encrypted: this.newEnc };
+        if (this.newEnc) body.pin = this.newPin;
+        const r = await this.api('POST', '/volumes', body);
+        if (r.ok) {
+          this.addLog(`Created "${this.newName.trim()}" (${r.data.id.slice(0,8)}…)`);
+          this._modal('createModal').hide();
+          this.newName = ''; this.newEnc = false; this.newPin = '';
+          await this.refresh();
+        } else {
+          this.createErr = r.data?.error || 'Failed to create volume.';
+        }
+      } catch { this.createErr = 'Could not reach API.'; }
+      this.creating = false;
+    },
+
+    mountVol(v) {
+      if (v.encrypted) {
+        this.mountTarget = v; this.mountPin = ''; this.mountErr = '';
+        this._modal('mountModal').show();
+      } else {
+        this._doMountRequest(v, null);
+      }
+    },
+
+    async doMount() {
+      if (!this.mountTarget) return;
+      this.mounting = true; this.mountErr = '';
+      await this._doMountRequest(this.mountTarget, this.mountPin || null);
+      this.mounting = false;
+    },
+
+    async _doMountRequest(v, pin) {
+      v._busy = true;
+      try {
+        const body = pin ? { pin } : {};
+        const r = await this.api('POST', `/volumes/${v.id}/mount`, body);
+        if (r.ok) {
+          this.addLog(`Mounted "${v.name}" → ${r.data.mountpoint}`);
+          this._modal('mountModal').hide();
+          this.mountPin = ''; this.mountErr = '';
+          await this.refresh();
+        } else {
+          const msg = r.data?.error || 'Mount failed.';
+          if (this.mountTarget?.id === v.id) this.mountErr = msg;
+          else this.addLog(`Error mounting "${v.name}": ${msg}`);
+        }
+      } catch {
+        const msg = 'Could not reach API.';
+        if (this.mountTarget?.id === v.id) this.mountErr = msg;
+        else this.addLog(msg);
+      }
+      v._busy = false;
+    },
+
+    async unmountVol(v) {
+      v._busy = true;
+      try {
+        const r = await this.api('DELETE', `/volumes/${v.id}/mount`);
+        if (r.ok) { this.addLog(`Unmounted "${v.name}"`); await this.refresh(); }
+        else { this.addLog(`Error unmounting "${v.name}": ${r.data?.error}`); }
+      } catch { this.addLog('Could not reach API.'); }
+      v._busy = false;
+    },
+
+    confirmDelete(v) {
+      this.delTarget = v;
+      this._modal('delModal').show();
+    },
+
+    async doDelete() {
+      if (!this.delTarget) return;
+      const v = this.delTarget;
+      this._modal('delModal').hide();
+      try {
+        const r = await this.api('DELETE', `/volumes/${v.id}`);
+        if (r.ok) { this.addLog(`Deleted "${v.name}"`); await this.refresh(); }
+        else { this.addLog(`Error deleting "${v.name}": ${r.data?.error}`); }
+      } catch { this.addLog('Could not reach API.'); }
+    },
+
+    async doCheckpoint(v) {
+      v._busy = true;
+      try {
+        const r = await this.api('POST', `/volumes/${v.id}/checkpoint`);
+        if (r.ok) {
+          const d = r.data;
+          v._log = `Checkpoint: ${d.wal_frames_checkpointed} frames written, ${d.wal_frames_remaining} remaining.`;
+          this.addLog(`Checkpoint "${v.name}": ${d.wal_frames_checkpointed} frames, ${d.wal_frames_remaining} remaining`);
+        } else {
+          v._log = `Checkpoint error: ${r.data?.error}`;
+        }
+      } catch { v._log = 'Could not reach API.'; }
+      v._busy = false;
+    },
+
+    doExport(v) {
+      this.addLog(`Downloading export for "${v.name}"…`);
+      const a = document.createElement('a');
+      a.href = `${this.apiBase}/volumes/${v.id}/export`;
+      a.download = `${v.id}.sqlite`;
+      a.click();
+    },
+
+    async doStat(v) {
+      try {
+        const r = await this.api('GET', `/volumes/${v.id}/stat`);
+        if (r.ok) { v._stat = r.data; }
+        else { this.addLog(`Stat error for "${v.name}": ${r.data?.error}`); }
+      } catch { this.addLog('Could not reach API.'); }
+    },
+
+    fmtBytes(n) {
+      if (n < 1024) return `${n} B`;
+      if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / 1048576).toFixed(2)} MB`;
+    },
+
+    fmtTime(ts) { return new Date(ts * 1000).toLocaleString(); },
+  };
+}
+</script>
+
+</body>
+</html>

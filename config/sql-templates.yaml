@@ -1,0 +1,700 @@
+# ============================================================================
+# SQL templates — the shared leaf statements
+#
+# Each template is one parameterized SQL statement. The host code (each of the
+# four implementations) owns everything BETWEEN templates: transactions,
+# branching, the resolve fold, the copy/pack walk, and the old->new id map.
+# A template never contains control flow.
+#
+# BINDING CONVENTION
+#   * Values use named bind parameters ":name" — injection-safe, driver-cached,
+#     and the one bind syntax all four drivers accept (Python, rusqlite,
+#     wa-sqlite, Android). Never string-interpolate a value.
+#   * Optional filters use a nullable bind: "(:x IS NULL OR col = :x)" — no
+#     conditional templating needed.
+#   * Variable-length sets use a subquery over a view
+#     ("IN (SELECT ... FROM subtree WHERE root_id = :root)") — no host-built
+#     IN lists.
+#   * Result: every template below is static SQL. Mustache ({{ }}) is reserved
+#     for a future genuinely-structural variation; none is needed today.
+#
+# id RETRIEVAL
+#   last_insert_rowid() is NOT usable: an INSERT performed inside an INSTEAD OF
+#   trigger (our insert-views) does not update the connection's
+#   last_insert_rowid() once the view-insert returns. So:
+#     * node / edge ids are minted monotonically per volume in SQL; the row just
+#       inserted is the MAX uuid7 in that volume (single-owning-connection model
+#       => unambiguous). create_* then get_generated_*_id (volume-scoped max).
+#     * volume / mount / lock ids are stateless: the host SELECTs new_uuid7 and
+#       passes the id INTO the create explicitly, so no read-back is needed.
+#
+# Field meanings per template:
+#   sql          - the statement
+#   params       - bind name -> meaning (mark optional/nullable)
+#   returns      - row shape, or 'rowcount' / 'none'
+#   consumed_by  - Mount API operations that use it
+#   notes        - guards, error mapping, ordering, gotchas
+# ============================================================================
+
+meta:
+  templates_for: mount_api
+  version: 1
+  bind_style: named            # ":name"
+
+# ----------------------------------------------------------------------------
+# Resolution & lookup (read leaves)
+# ----------------------------------------------------------------------------
+resolution:
+
+  resolve_segment:
+    sql: |
+      SELECT n.node_id, n.type
+      FROM active_edge ae
+      JOIN node n ON n.node_id = ae.to_id
+      WHERE ae.from_id = :container AND n.name = :name
+      ORDER BY n.node_id DESC
+      LIMIT 1
+    params:
+      container: "NodeId of the container to look inside"
+      name:      "child name to resolve"
+    returns: "{ node_id, type } or empty"
+    consumed_by: [resolve, "resolve_parent (host fold)", every path-addressed op]
+    notes: >
+      The single reusable primitive. The host resolve() function folds this over
+      path segments starting at the mount point; resolve_parent folds all-but-last
+      and keeps the final name. ORDER BY node_id DESC LIMIT 1 applies NODE-5
+      visibility (greatest uuid7 wins), so hidden same-name siblings are
+      unreachable by path — that is the contract, and why *_by_id variants exist.
+      Empty result at any segment => not_found.
+
+  get_node:
+    sql: |
+      SELECT n.node_id, n.type, n.name, n.created_at,
+             coalesce(n.modified_at, n.created_at) AS modified_at, n.volume_id,
+             c.size as size, json(n.metadata) AS metadata
+      FROM node n
+      LEFT JOIN content c ON c.node_id = n.node_id
+      WHERE n.node_id = :node
+    params: { node: "NodeId" }
+    returns: "NodeInfo row or empty"
+    consumed_by: [stat, "stat_by_id", "type checks"]
+    notes: >
+      modified_at coalesces to created_at for raw-imported nodes that never set
+      it. metadata (NODE-6) returns as a JSON string via json() — NULL stays NULL
+      (host reads as empty map); the host parses/serializes the JSON text and the
+      stored form is JSONB.
+
+  get_active_parent:
+    sql: |
+      SELECT from_id AS parent_id, edge_id, volume_id
+      FROM active_edge
+      WHERE to_id = :node
+    params: { node: "NodeId" }
+    returns: "{ parent_id, edge_id, volume_id } or empty"
+    consumed_by: [move, remove, "path_of (host-loop alternative)"]
+    notes: "Empty => node is a volume root or volatile/detached. PI-1 guarantees at most one row."
+
+  list_children:
+    sql: |
+      SELECT node_id, name, type, edge_id, visible
+      FROM directory_listing
+      WHERE container_id = :container
+      ORDER BY edge_id, node_id
+    params: { container: "NodeId of the container" }
+    returns: "[{ node_id, name, type, edge_id, visible }]"
+    consumed_by: [list, "list_by_id"]
+    notes: >
+      Visibility already resolved (NODE-5): hidden same-name siblings appear with
+      visible = 0. Ordered per EXT-3 (edge_id, then node_id).
+
+  get_content_meta:
+    sql: |
+      SELECT version, size, retention_keep FROM content WHERE node_id = :node
+    params: { node: "NodeId of an entry" }
+    returns: "{ version, size, retention_keep } or empty"
+    consumed_by: [read_all, open_read, copy, "content reassembly"]
+    notes: "The manifest row: committed version (current bytes), materialized size, retention policy. Empty => no content row (e.g. a container)."
+
+  read_chunks:
+    sql: |
+      SELECT cc.data, cc.N_c, cc.enc_tag
+      FROM content_version cv
+      JOIN content_chunk cc ON cc.chunk_hash = cv.chunk_hash
+      WHERE cv.content_id = :node AND cv.version = :version
+      ORDER BY cv.chunk_index
+    params:
+      node:    "NodeId of an entry"
+      version: "the version to reassemble (typically the committed version)"
+    returns: "[{ data }] in chunk_index order"
+    consumed_by: [read_all, open_read]
+    notes: "Reassembly of a version's bytes: concatenate data in chunk_index order. Empty result => empty content (zero chunks)."
+
+  read_chunks_range:
+    sql: |
+      SELECT cv.chunk_index, cc.data, cc.N_c, cc.enc_tag
+      FROM content_version cv
+      JOIN content_chunk cc ON cc.chunk_hash = cv.chunk_hash
+      WHERE cv.content_id = :node AND cv.version = :version
+        AND cv.chunk_index BETWEEN :lo AND :hi
+      ORDER BY cv.chunk_index
+    params:
+      node:    "NodeId of an entry"
+      version: "version to read from"
+      lo:      "first chunk_index (inclusive)"
+      hi:      "last chunk_index (inclusive)"
+    returns: "[{ chunk_index, data }] in order"
+    consumed_by: ["ranged streaming reads (FUSE/SAF)"]
+    notes: "Byte-range access maps onto chunk_index range; the host trims the first/last chunk to the exact offset. Reserved for the streaming refinement."
+
+  read_chunk_size:
+    sql: |
+      SELECT chunk_size FROM volume WHERE volume_id = :volume
+    params: { volume: "VolumeId" }
+    returns: "{ chunk_size }"
+    consumed_by: ["every chunked write (read the volume's fixed chunk size)"]
+    notes: "CV-1: chunk size is a per-volume property read from the volume row on every write — never a host constant."
+
+  path_of:
+    sql: |
+      WITH RECURSIVE up (node_id, name, parent_id, depth, is_root) AS (
+        SELECT n.node_id, n.name, np.parent_id, 0,
+               EXISTS (SELECT 1 FROM volume v WHERE v.root_node_id = n.node_id)
+        FROM node n
+        LEFT JOIN node_parent np ON np.node_id = n.node_id
+        WHERE n.node_id = :node
+        UNION ALL
+        SELECT p.node_id, p.name, np.parent_id, up.depth + 1,
+               EXISTS (SELECT 1 FROM volume v WHERE v.root_node_id = p.node_id)
+        FROM up
+        JOIN node p ON p.node_id = up.parent_id
+        LEFT JOIN node_parent np ON np.node_id = p.node_id
+        WHERE up.is_root = 0 AND up.depth < 256
+      )
+      SELECT node_id, name, depth, is_root, parent_id
+      FROM up
+      ORDER BY depth
+    params: { node: "NodeId" }
+    returns: "[{ node_id, name, depth, is_root, parent_id }] ordered deepest-last"
+    consumed_by: [path_of, "mount_path (MountInfo)"]
+    notes: >
+      The ancestor chain from :node up toward its volume root. Host assembles the
+      path by reversing names (root -> node). TERMINATION CHECK (required): the
+      last row must have is_root = 1. If the walk stopped because depth hit 256
+      (last row is_root = 0, depth = 256) OR a row has parent_id NULL with
+      is_root = 0, the chain does NOT reach a root -> map to `corrupt`, do not
+      return a truncated path. The depth < 256 bound is the cycle guard. For a
+      mount-relative path_of, the host trims the chain at the mount point; for
+      MountInfo.mount_path it keeps the full chain to root.
+
+  get_mount:
+    sql: |
+      SELECT mount_id, volume_id, mount_point, state, expires_at, created_at
+      FROM mount WHERE mount_id = :mount
+    params: { mount: "MountId" }
+    returns: "MountInfo (minus mount_path) or empty"
+    consumed_by: [mount_info]
+    notes: "mount_path is computed separately via path_of on mount_point."
+
+  get_valid_mount:
+    sql: |
+      SELECT mount_id, volume_id, mount_point, state, expires_at
+      FROM valid_mount WHERE mount_id = :mount
+    params: { mount: "MountId" }
+    returns: "row or empty"
+    consumed_by: ["every mount-scoped op (precondition)"]
+    notes: "Empty => mount_invalid. Run as the first step of any operation taking a mount."
+
+  get_volume:
+    sql: |
+      SELECT volume_id, root_node_id, name, api_version, created_at
+      FROM volume WHERE volume_id = :volume
+    params: { volume: "VolumeId" }
+    returns: "VolumeInfo or empty"
+    consumed_by: [mount, list_volumes, "migration (reads api_version)"]
+
+  get_volume_crypto:
+    sql: |
+      SELECT volume_id, root_node_id, enc_mode, wrapped_key, wrap_nonce
+      FROM volume WHERE volume_id = :volume
+    params: { volume: "VolumeId" }
+    returns: "{ volume_id, root_node_id, enc_mode, wrapped_key, wrap_nonce } or empty"
+    consumed_by: [mount]
+    notes: "Crypto-bearing columns for the mount key ladder. H_v is derived from volume_id||root_node_id, never stored."
+
+  list_volumes:
+    sql: |
+      SELECT volume_id, root_node_id, name, api_version, created_at
+      FROM volume
+      ORDER BY volume_id
+    params: {}
+    returns: "[VolumeInfo]"
+    consumed_by: [list_volumes]
+
+  get_lock_valid:
+    sql: |
+      SELECT valid FROM mount_lock WHERE lock_id = :lock
+    params: { lock: "LockId" }
+    returns: "{ valid: 0|1 } or empty"
+    consumed_by: ["descriptor.close (re-validate before commit, ACC-9)"]
+    notes: "Empty => the lock row is gone (already released/pruned); caller treats that as invalid."
+
+# ----------------------------------------------------------------------------
+# Mutation (write leaves)
+# ----------------------------------------------------------------------------
+mutation:
+
+  create_node:
+    sql: |
+      INSERT INTO node_new (type, name, created_at, modified_at, volume_id, metadata)
+      VALUES (:type, :name, :created_at, :modified_at, :volume, jsonb(:metadata))
+    params:
+      type:        "'container' | 'entry'"
+      name:        "node name"
+      created_at:  "ms epoch, or NULL to let the trigger set now (NODE-4: copy passes the source value)"
+      modified_at: "ms epoch, or NULL to default to created_at"
+      volume:      "VolumeId, or NULL for import/recovery (non-monotonic id)"
+      metadata:    "JSON string of a shallow {string:string} map, or NULL for empty (NODE-6)"
+    returns: none
+    consumed_by: [create_container, create_entry, copy, unpack, "volume bootstrap"]
+    notes: >
+      Fires the INSTEAD OF id-generation trigger. With a non-null volume the id is
+      monotonic from that volume's watermark; with NULL it is stateless. Follow
+      immediately with get_generated_node_id on the same connection. metadata is
+      passed as a JSON string and stored as JSONB via jsonb(); NULL => empty map.
+
+  get_generated_node_id:
+    sql: |
+      SELECT node_id FROM node
+      WHERE volume_id = :volume
+      ORDER BY node_id DESC
+      LIMIT 1
+    params: { volume: "VolumeId the node was created in" }
+    returns: "{ node_id }"
+    consumed_by: [create_container, create_entry, copy, unpack, "volume bootstrap"]
+    notes: >
+      Retrieves the id minted by create_node. Generation is monotonic per volume,
+      so the newest node is the MAX uuid7 in that volume; under the single-owning-
+      connection model (ACC-1) that is unambiguously the row just inserted.
+      last_insert_rowid() does NOT work here: an INSERT inside an INSTEAD OF trigger
+      does not update the connection's last_insert_rowid() after the view-insert
+      returns. Threads the old->new id map in copy/unpack.
+
+  create_content:
+    sql: |
+      INSERT INTO content (node_id, version, size, content_hash)
+      VALUES (:node, :version, :size, :hash)
+    params:
+      node:    "NodeId of the entry"
+      version: "committed version to establish at birth (0 for empty; >0 if created with data)"
+      size:    "materialized total bytes"
+      hash:    "content hash bytes, or NULL (reserved for Merkle)"
+    returns: none
+    consumed_by: [create_entry, copy, pack, unpack]
+    notes: >
+      Establishes the manifest row. This is an INSERT, so it does NOT fire
+      node_touch_content (which keys off UPDATE OF version) — a fresh file keeps
+      modified_at == created_at. Chunk references for a non-empty initial version
+      are staged separately (insert_chunk_ref / copy_chunk_refs).
+
+  upsert_chunk:
+    sql: |
+      INSERT INTO content_chunk (chunk_hash, data, length, N_c, enc_tag)
+      VALUES (:hash, :data, :length, :n_c, :tag)
+      ON CONFLICT(chunk_hash) DO NOTHING
+    params:
+      hash:   "content address incl. length (hash(len || bytes))"
+      data:   "the chunk bytes"
+      length: "actual byte length of this chunk"
+    returns: none
+    consumed_by: ["every chunked write"]
+    notes: >
+      CV-2: insert-or-ignore into the immutable pool. A chunk already present is
+      shared (dedup), never rewritten — DO NOTHING guarantees no in-place mutation.
+
+  insert_chunk_ref:
+    sql: |
+      INSERT INTO content_version (content_id, version, chunk_index, chunk_hash)
+      VALUES (:node, :version, :index, :hash)
+    params:
+      node:    "NodeId (content_id)"
+      version: "the version being staged"
+      index:   "0-based position within the version"
+      hash:    "chunk_hash referenced at this position"
+    returns: none
+    consumed_by: ["every chunked write"]
+    notes: "One ordered manifest row per chunk position (CV-4). Composite PK enforces position uniqueness."
+
+  copy_chunk_refs:
+    sql: |
+      INSERT INTO content_version (content_id, version, chunk_index, chunk_hash)
+      SELECT :dst, :dst_version, chunk_index, chunk_hash
+      FROM content_version
+      WHERE content_id = :src AND version = :src_version
+    params:
+      dst:         "destination NodeId"
+      dst_version: "version to write on the destination"
+      src:         "source NodeId"
+      src_version: "source committed version to copy"
+    returns: none
+    consumed_by: [copy]
+    notes: >
+      Dedup-preserving copy: re-references the source's existing pool chunks
+      (immutable, shared) rather than re-hashing bytes, so copying a stored
+      subtree is near-free.
+
+  copy_chunk_refs_range:
+    sql: |
+      INSERT INTO content_version (content_id, version, chunk_index, chunk_hash)
+      SELECT :node, :dst_version, chunk_index, chunk_hash
+      FROM content_version
+      WHERE content_id = :node AND version = :src_version
+        AND chunk_index BETWEEN :lo AND :hi
+    params:
+      node:        "NodeId (same node — re-reference its own prior version)"
+      dst_version: "the new version being staged"
+      src_version: "the prior committed version to carry chunks from"
+      lo:          "first chunk_index to carry (inclusive)"
+      hi:          "last chunk_index to carry (inclusive)"
+    returns: none
+    consumed_by: ["open_write/append (streaming carry-forward)"]
+    notes: >
+      Streaming append re-references the prior version's FULL leading chunks
+      (indices [0 .. floor(size/chunk_size)-1]) into the new version unchanged,
+      then rebuilds only from the partial final chunk onward. Keeps append
+      bounded-memory and preserves chunk sharing across versions.
+
+  next_version:
+    sql: |
+      SELECT max(
+        coalesce((SELECT version FROM content WHERE node_id = :node), 0),
+        coalesce((SELECT max(version) FROM content_version WHERE content_id = :node), 0)
+      ) + 1 AS next
+    params: { node: "NodeId" }
+    returns: "{ next }"
+    consumed_by: [write_all, "open_write/close (streaming)"]
+    notes: >
+      CV-3: the next version to allocate, under the entry's write lock. Takes the
+      max of the committed pointer and the highest existing manifest version so a
+      prior incomplete/aborted write (staged at committed+1 but never swapped) can
+      never have its version number reused.
+
+  set_retention_keep:
+    sql: |
+      UPDATE content SET retention_keep = :keep WHERE node_id = :node
+    params: { node: "NodeId", keep: "keep-last-N count, or NULL to keep all" }
+    returns: rowcount
+    consumed_by: [set_retention]
+    notes: "CV-6: the node's single retention policy. NULL = keep all superseded versions; the committed version is always retained regardless."
+
+  create_edge:
+    sql: |
+      INSERT INTO edge_new (from_id, to_id, volume_id)
+      VALUES (:from_id, :to_id, :volume)
+    params:
+      from_id: "container NodeId (parent)"
+      to_id:   "child NodeId"
+      volume:  "VolumeId"
+    returns: none
+    consumed_by: [create_container, create_entry, move, copy, unpack]
+    notes: >
+      Fires id generation (monotonic, same volume watermark as nodes) and the
+      guard triggers: EDGE-4 (from_id container) and PI-6 (volume match). PI-1's
+      partial unique index rejects a second ACTIVE placement. Host should
+      pre-check (check_type, check_cycle) for typed errors; the triggers/index are
+      the backstop. Follow with get_generated_edge_id if the id is needed.
+
+  get_generated_edge_id:
+    sql: |
+      SELECT edge_id FROM edge
+      WHERE volume_id = :volume
+      ORDER BY edge_id DESC
+      LIMIT 1
+    params: { volume: "VolumeId the edge was created in" }
+    returns: "{ edge_id }"
+    consumed_by: [move, copy, "pack (ordering)"]
+    notes: "Same monotonic max-in-volume retrieval as get_generated_node_id (last_insert_rowid is unreliable through insert-view triggers)." 
+
+  archive_edge:
+    sql: |
+      UPDATE edge SET archived = 1 WHERE edge_id = :edge AND archived = 0
+    params: { edge: "EdgeId" }
+    returns: rowcount
+    consumed_by: [move, remove]
+    notes: "The detach half of a move and the whole of a single remove. Retained for recovery (PI-7)."
+
+  update_content:
+    sql: |
+      UPDATE content SET version = :version, size = :size, content_hash = :hash
+      WHERE node_id = :node
+    params:
+      node:    "NodeId of the entry"
+      version: "the fully-staged new version to commit"
+      size:    "materialized total bytes of the new version"
+      hash:    "content hash bytes, or NULL"
+    returns: rowcount
+    consumed_by: [write_all, "open_write/close (staged-swap)"]
+    notes: >
+      CV-3/CV-5: the committed-version pointer swap. Fires node_touch_content
+      (UPDATE OF version) -> bumps modified_at. The chunks of :version must
+      already be staged in the pool + manifest before this runs; this single
+      UPDATE is the atomic make-visible step (IO-2r1).
+
+  rename_node:
+    sql: |
+      UPDATE node SET name = :name WHERE node_id = :node
+    params: { node: "NodeId", name: "new name" }
+    returns: rowcount
+    consumed_by: [rename]
+    notes: "Fires node_touch_name -> bumps modified_at only if the name actually changed."
+
+  set_metadata:
+    sql: |
+      UPDATE node SET metadata = jsonb(:metadata) WHERE node_id = :node
+    params:
+      node:     "NodeId (container or entry)"
+      metadata: "JSON string of a shallow {string:string} map, or NULL for empty"
+    returns: rowcount
+    consumed_by: [set_metadata]
+    notes: >
+      NODE-6 whole-map replace. There is NO modified_at trigger on the metadata
+      column by design, so this does not bump modified_at. UPDATE OF name/payload
+      fire touches; UPDATE OF metadata deliberately does not.
+
+  new_uuid7:
+    sql: |
+      SELECT lower(printf('%s-%s-7%s-%s-%s',
+        substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 1, 8),
+        substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 9, 4),
+        substr(lower(hex(randomblob(2))), 2, 3),
+        substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2, 3),
+        lower(hex(randomblob(6)))
+      )) AS id
+    params: {}
+    returns: "{ id }"
+    consumed_by: [create_volume, mount, "lock creation"]
+    notes: >
+      Stateless uuid7 for volume/mount/lock (no ordering need). The host SELECTs an
+      id, then passes it explicitly to the create — keeping generation in SQL while
+      letting the host hold the id without a fragile read-back. node/edge use the
+      monotonic watermark path (create_* + get_generated_*_id) instead.
+
+  create_volume:
+    sql: |
+      INSERT INTO volume_new (volume_id, name, chunk_size, enc_mode) VALUES (:id, :name, :chunk_size, :enc_mode)
+    params: { id: "VolumeId from new_uuid7", name: "volume name, or NULL", chunk_size: "per-volume chunk size in bytes (default 1048576)" }
+    returns: none
+    consumed_by: [create_volume]
+    notes: "api_version defaults to the schema's current era. id supplied by the host via new_uuid7. chunk_size is fixed here and immutable thereafter (CV-1)."
+
+  update_volume_crypto:
+    sql: |
+      UPDATE volume SET enc_mode = :enc_mode, wrapped_key = :wrapped_key, wrap_nonce = :wrap_nonce
+      WHERE volume_id = :volume
+    params: { volume: "VolumeId", enc_mode: "'convergent'|'random'", wrapped_key: "S_vk blob", wrap_nonce: "N_wrap blob" }
+    returns: rowcount
+    consumed_by: [create_volume]
+    notes: "Seals the volume key after the root is known (H_v needs root_node_id). Runs in the create_volume txn."
+
+  link_root:
+    sql: |
+      UPDATE volume SET root_node_id = :root WHERE volume_id = :volume
+    params: { volume: "VolumeId", root: "NodeId of the root container" }
+    returns: rowcount
+    consumed_by: [create_volume]
+    notes: "Second half of bootstrap: create_volume -> create_node(root, volume) -> link_root, all in one transaction."
+
+  create_mount:
+    sql: |
+      INSERT INTO mount_new (mount_id, volume_id, mount_point, expires_at, N_m)
+      VALUES (:id, :volume, :mount_point, :expires_at, :n_m)
+    params:
+      id:          "MountId from new_uuid7"
+      volume:      "VolumeId the session binds to"
+      mount_point: "NodeId anchoring the session (defaults to volume root)"
+      expires_at:  "ms epoch ttl, or NULL"
+    returns: none
+    consumed_by: [mount]
+
+  set_mount_state:
+    sql: |
+      UPDATE mount SET state = :state WHERE mount_id = :mount
+    params: { mount: "MountId", state: "'open' | 'active' | 'unmounted'" }
+    returns: rowcount
+    consumed_by: [unmount, "mount activate"]
+    notes: "unmount sets 'unmounted'; lock reclamation is deferred to prune (ACC-10), not done here."
+
+  renew_mount:
+    sql: |
+      UPDATE mount SET expires_at = :expires_at WHERE mount_id = :mount
+    params: { mount: "MountId", expires_at: "new ms-epoch ttl" }
+    returns: rowcount
+    consumed_by: [renew_mount]
+
+  create_lock:
+    sql: |
+      INSERT INTO lock_new (lock_id, mount_id, node_id, expires_at)
+      VALUES (:id, :mount, :node, :expires_at)
+    params:
+      id:         "LockId from new_uuid7"
+      mount:      "MountId holding the lock"
+      node:       "NodeId being locked"
+      expires_at: "ms epoch ttl, or NULL"
+    returns: none
+    consumed_by: [write_all, open_write]
+    notes: "Exclusive in this iteration (ACC-7). Pre-check with check_lock_held."
+
+  release_lock:
+    sql: |
+      DELETE FROM lock WHERE lock_id = :lock
+    params: { lock: "LockId" }
+    returns: rowcount
+    consumed_by: ["write_all/close", "open_write/close"]
+
+# ----------------------------------------------------------------------------
+# Validation (host pre-checks for typed errors; schema is the backstop)
+# ----------------------------------------------------------------------------
+validation:
+
+  check_cycle:
+    sql: |
+      SELECT EXISTS (
+        SELECT 1 WHERE :moving = :new_parent
+        UNION ALL
+        SELECT 1 FROM node_ancestor
+        WHERE node_id = :new_parent AND ancestor_id = :moving
+      ) AS would_cycle
+    params:
+      moving:     "NodeId being reparented"
+      new_parent: "proposed new parent container NodeId"
+    returns: "{ would_cycle: 0|1 }"
+    consumed_by: [move]
+    notes: >
+      PI-5. True if the target IS the moving node or sits inside its subtree.
+      Runs before the move on a known-acyclic tree, so the node_ancestor walk
+      terminates naturally; the view's depth < 256 bound only fires on
+      pre-existing corruption. would_cycle = 1 => raise would_cycle.
+
+  check_empty:
+    sql: |
+      SELECT EXISTS (SELECT 1 FROM active_edge WHERE from_id = :container) AS has_children
+    params: { container: "NodeId" }
+    returns: "{ has_children: 0|1 }"
+    consumed_by: [remove]
+    notes: "has_children = 1 => raise not_empty (use remove_recursive instead)."
+
+  check_lock_held:
+    sql: |
+      SELECT EXISTS (
+        SELECT 1 FROM valid_lock WHERE node_id = :node AND mount_id <> :mount
+      ) AS held
+    params: { node: "NodeId", mount: "the requesting MountId" }
+    returns: "{ held: 0|1 }"
+    consumed_by: [write_all, open_write]
+    notes: "held = 1 => raise lock_held. Excludes the caller's own mount."
+
+# ----------------------------------------------------------------------------
+# Recursive / set operations (over the subtree view)
+# ----------------------------------------------------------------------------
+recursive:
+
+  enumerate_subtree:
+    sql: |
+      SELECT node_id, parent_id, edge_id, depth
+      FROM subtree
+      WHERE root_id = :root
+      ORDER BY depth, edge_id, node_id
+    params: { root: "NodeId at the top of the subtree (depth 0 = root itself)" }
+    returns: "[{ node_id, parent_id, edge_id, depth }] top-down canonical order"
+    consumed_by: [copy, pack, "remove_recursive (alternative to set archive)"]
+    notes: >
+      ACTIVE edges only (the detached graveyard is excluded). The canonical order
+      (depth, edge_id, node_id) is a CONFORMANCE REQUIREMENT: copy and pack walk
+      this order and mint new ids in it, so two implementations produce identical
+      new-id sequences. The host loops these rows, using the old->new id map so a
+      copied child attaches to its copied parent.
+
+  archive_subtree:
+    sql: |
+      UPDATE edge SET archived = 1
+      WHERE archived = 0
+        AND to_id IN (SELECT node_id FROM subtree WHERE root_id = :root)
+    params: { root: "NodeId at the top of the subtree" }
+    returns: rowcount
+    consumed_by: [remove_recursive]
+    notes: >
+      The set-based path: one statement archives every active placement of a
+      subtree member, including the root's own incoming edge (the root is in
+      subtree at depth 0). No host loop. Atomic within the operation's transaction.
+
+# ----------------------------------------------------------------------------
+# Maintenance
+# ----------------------------------------------------------------------------
+maintenance:
+
+  prune_nodes:
+    sql: |
+      DELETE FROM node
+      WHERE node_id IN (SELECT node_id FROM volatile_node)
+        AND (:volume IS NULL OR volume_id = :volume)
+    params: { volume: "VolumeId to scope the sweep, or NULL for all" }
+    returns: rowcount
+    consumed_by: [prune]
+    notes: "PI-3 node-side sweep. content rows cascade (ON DELETE CASCADE). Only purges truly volatile nodes (no edge at all), never detached (recoverable) ones."
+
+  prune_locks:
+    sql: |
+      DELETE FROM lock WHERE lock_id IN (SELECT lock_id FROM prunable_lock)
+    params: {}
+    returns: rowcount
+    consumed_by: [prune]
+    notes: "ACC-10 lock-side sweep: removes locks whose mount ended or whose ttl elapsed."
+
+  prune_content_versions:
+    sql: |
+      DELETE FROM content_version
+      WHERE (content_id, version) NOT IN (SELECT content_id, version FROM retained_version)
+        AND content_id NOT IN (SELECT node_id FROM valid_lock)
+        AND (:volume IS NULL
+             OR content_id IN (SELECT node_id FROM node WHERE volume_id = :volume))
+    params: { volume: "VolumeId to scope the sweep, or NULL for all" }
+    returns: rowcount
+    consumed_by: [prune_content]
+    notes: >
+      CV-7 step 1: drop manifest rows for non-retained versions (superseded
+      beyond policy, plus aborted writes above the committed pointer). Retained
+      versions are resolved by the retained_version view BEFORE any chunk is
+      collected. The valid_lock guard is the live-write exclusion: a node that
+      currently holds a valid exclusive write lock is mid-stream — its
+      above-committed staging rows look identical to abandoned orphans, so we
+      never reap a locked node's rows. An orphan is precisely above-committed
+      rows with NO valid lock (the writer died, mount ended, or ttl lapsed).
+      Must run before prune_content_chunks.
+
+  prune_content_chunks:
+    sql: |
+      DELETE FROM content_chunk
+      WHERE chunk_hash NOT IN (SELECT chunk_hash FROM content_version)
+    params: {}
+    returns: rowcount
+    consumed_by: [prune_content]
+    notes: >
+      CV-7 step 2: after non-retained manifest rows are gone, sweep pool chunks
+      that no surviving manifest row references. Liveness = referenced by any
+      retained version of any node.
+
+  health_check:
+    sql: |
+      SELECT kind, id FROM health_anomaly
+    params: {}
+    returns: "[{ kind, id }] — empty = consistent"
+    consumed_by: [health_check]
+    notes: "Current tripwires: edge_volume_mismatch, node_without_volume, volume_without_root, cycle."
+
+# ----------------------------------------------------------------------------
+# Notes on operations that are PURE host orchestration over the above
+# ----------------------------------------------------------------------------
+host_only:
+  resolve: "fold resolve_segment over path segments from the mount point; empty at any segment => not_found"
+  resolve_parent: "fold resolve_segment over all-but-last segment; return (container_id, final_name)"
+  streaming_read_write: "descriptor read/write/seek operate on an in-memory buffer; reads reassemble via get_content_meta + read_chunks; a write stages chunks (upsert_chunk + insert_chunk_ref) in an independent commit then swaps the committed pointer (update_content) in a separate txn, releasing the lock"
+  copy_pack_unpack: "enumerate_subtree -> host walk in canonical order -> create_* leaves, threading the old->new id map; pack/unpack add MsgPack (de)serialization in the same walk"
