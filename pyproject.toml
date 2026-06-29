@@ -4,25 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aloelite"
-version = "0.1.0"
+version = "0.1.1"
+description = "AloeLite SQLite Filesystem"
+readme = "README.md"
+authors = [
+    {name = "Michael Godfrey", email = "michael@aloecraft.org"}
+]
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+]
 dependencies = [
     "cryptography",
     "pydantic",
     "pyyaml",
     "msgpack",
+    "flask",         # or fastapi + uvicorn
+]
+
+[project.optional-dependencies]
+fuse = [
     "pyfuse3",
     "trio",
-    "flask",         # or fastapi + uvicorn
+]
+test = [
+    "pytest",
 ]
 
 [project.scripts]
 aloelite-fuse = "aloelite.fuse:main"
-
-[project.optional-dependencies]
-test = [
-    "pytest",
-]
 
 [tool.setuptools.packages.find]
 where = ["."]
