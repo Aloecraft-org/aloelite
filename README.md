@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Aloecraft-org/xtrshow/main/doc/icon.png" style="height:96px; width:96px;"/>
+<img src="doc/icon.png" style="height:96px; width:96px;"/>
 
 **AloeLite SQLite Filesystem**
 

@@ -10,7 +10,7 @@ echo:
 
 clean:
 
-	rm -rf dist/ build/ *.egg-info
+	rm -rf dist/ build/ *.egg-info .ruff_cache .pytest_cache .html_doc __pycache__
 
 build:
 
@@ -19,3 +19,9 @@ build:
 twine-upload:
 
 	twine upload dist/*
+
+docgen:
+	mkdir -p .html_doc
+	pandoc README.md -o .html_doc/readme.html -f markdown+emoji
+	python3 script/pydocgen.py aloelite/ .html_doc --title "aloelite" --readme .html_doc/readme.html
+	(cd .html_doc && python3 -m http.server)

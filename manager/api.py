@@ -158,8 +158,9 @@ def create_app(
         body = request.get_json(silent=True) or {}
         pin = body.get("pin")
         pin_bytes = pin.encode() if pin else None
+        mount_name = body.get("mount_name") or rec.id
         try:
-            mountpoint = supervisor.mount(rec, pin_bytes)
+            mountpoint = supervisor.mount(rec, pin_bytes, mp_path=mount_name)
         except merr.AlreadyMounted:
             return jsonify(error="already mounted"), 409
         except merr.MountTimeout:
@@ -172,7 +173,7 @@ def create_app(
         rec.mounted = True
         rec.mountpoint = mountpoint
         store.put(rec)
-        return jsonify(id=vid, mountpoint=mountpoint, host_path=_host_path(vid)), 200
+        return jsonify(id=vid, mountpoint=mountpoint, host_path=_host_path(mount_name)), 200
 
     # -- DELETE /volumes/<id>/mount ----------------------------------------
     @app.delete("/volumes/<vid>/mount")

@@ -27,7 +27,7 @@ from typing import Any
 
 import msgpack
 
-from .db import Db
+from .db import Db, split_chunks
 from .descriptor import Descriptor
 from .errors import (
     BadKey,
@@ -464,6 +464,63 @@ def write_all(db: Db, mount: MountId, path: str, data: bytes) -> None:
             {"node": found.node, "version": version, "size": size, "hash": None},
         )
 
+def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
+    """Atomically append `data` to an entry and return the new size.
+
+    Bounded-memory and bounded-cost: the prior version's full leading chunks are
+    carried forward BY REFERENCE (copy_chunk_refs_range — no data copy), and only
+    the old partial final chunk + the new bytes are re-chunked and staged. Each
+    call is its own atomic commit (one new version, committed-pointer swap), which
+    is what makes it safe to call repeatedly for append-mostly files (logs, mbox):
+    every commit is immediately visible to readers and to /export, and a crash
+    loses only the uncommitted in-flight batch, never prior commits.
+
+    Cost per call is O(full_chunk_count) ref-copies (a single INSERT..SELECT) plus
+    O(len(partial_tail) + len(data)) staging. With the 1 MiB default chunk size and
+    FUSE-side batching this is cheap for logs and per-message mail files. Each call
+    creates a new version; run prune_content (or set_retention keep=N) periodically
+    on hot append files to bound manifest growth.
+    """
+    if not data:
+        m = _require_mount(db, mount)
+        found = resolve(db, m.mount_point, path)
+        if found.type is not NodeType.ENTRY:
+            raise NotAnEntry(node=found.node)
+        meta = db.read_content_meta(found.node)
+        return meta[1] if meta is not None else 0
+    with db.txn():
+        m = _require_mount(db, mount)
+        found = resolve(db, m.mount_point, path)
+        if found.type is not NodeType.ENTRY:
+            raise NotAnEntry(node=found.node)
+        if db.scalar("validation.check_lock_held", {"node": found.node, "mount": mount}):
+            raise LockHeld(node=found.node)
+        cs = db.chunk_size_of(m.volume)
+        meta = db.read_content_meta(found.node)
+        src_version, size = meta if meta is not None else (0, 0)
+        new_version = db.alloc_version(found.node)
+        full = size // cs
+        partial = size % cs
+        # carry the unchanged full leading chunks forward by reference
+        if full > 0:
+            db.run("mutation.copy_chunk_refs_range", {
+                "node": found.node, "dst_version": new_version,
+                "src_version": src_version, "lo": 0, "hi": full - 1,
+            })
+        # rebuild from the old partial tail + new data, re-chunked from index `full`
+        tail = b""
+        if partial > 0:
+            rows = db.read_chunk_range(found.node, src_version, full, full)
+            tail = rows[0][1] if rows else b""
+        index = full
+        for chunk in split_chunks(tail + data, cs):
+            db.stage_chunk(found.node, new_version, index, chunk)
+            index += 1
+        new_size = size + len(data)
+        db.rowcount("mutation.update_content", {
+            "node": found.node, "version": new_version, "size": new_size, "hash": None,
+        })
+    return new_size
 
 def rename(db: Db, mount: MountId, path: str, name: str) -> None:
     with db.txn():

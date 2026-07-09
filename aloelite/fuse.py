@@ -2,18 +2,18 @@
 # License: Apache-2.0 (disclaimer at bottom of file)
 #!/usr/bin/env python3
 """
-aloefuse — mount an AloeLite volume as a FUSE filesystem (Linux/pyfuse3).
+aloelite-fuse — mount an AloeLite volume as a FUSE filesystem (Linux/pyfuse3).
 
     sudo apt install fuse3 libfuse3-dev
     pip install pyfuse3
 
     # plain volume
-    python3 aloefuse.py photos.sqlite photos /mnt/photos
+    python3 fuse.py photos.sqlite photos /mnt/photos
 
     # encrypted volume (new or existing); three ways to supply the PIN:
-    python3 aloefuse.py vault.sqlite vault /mnt/vault --pin-env VAULT_PIN
-    python3 aloefuse.py vault.sqlite vault /mnt/vault --pin-file ~/.vaultpin
-    python3 aloefuse.py vault.sqlite vault /mnt/vault --pin "my secret"
+    python3 fuse.py vault.sqlite vault /mnt/vault --pin-env VAULT_PIN
+    python3 fuse.py vault.sqlite vault /mnt/vault --pin-file ~/.vaultpin
+    python3 fuse.py vault.sqlite vault /mnt/vault --pin "my secret"
 
     # unmount
     fusermount3 -u /mnt/photos
@@ -50,6 +50,7 @@ import aloelite.errors as aloe_errors
 from aloelite.types import WriteMode, Whence
 
 ROOT = pyfuse3.ROOT_INODE  # == 1
+_APPEND_BATCH = 1 << 20  # commit a buffered append once it reaches this many bytes
 
 
 # --- uuid7 -> 64-bit inode (FNV-1a), root pinned to ROOT -------------------
@@ -115,7 +116,7 @@ class AloeFuse(pyfuse3.Operations):
         a = pyfuse3.EntryAttributes()
         a.st_ino = inode
         is_dir = info.type.value == "container"
-        a.st_mode = (st_mod.S_IFDIR | 0o755) if is_dir else (st_mod.S_IFREG | 0o644)
+        a.st_mode = (st_mod.S_IFDIR | 0o777) if is_dir else (st_mod.S_IFREG | 0o666)
         a.st_nlink = 2 if is_dir else 1
         a.st_size = 0 if is_dir else info.size
         a.st_uid = os.getuid()
@@ -132,7 +133,13 @@ class AloeFuse(pyfuse3.Operations):
     # -- lookups ------------------------------------------------------------
     async def getattr(self, inode, ctx=None):
         try:
-            return self._attr(inode, self.m.stat_by_id(self._n[inode]))
+            a = self._attr(inode, self.m.stat_by_id(self._n[inode]))
+            extra = sum(len(h["buf"]) for h in self._open.values()
+                        if h.get("mode") == "a" and h.get("inode") == inode)
+            if extra:
+                a.st_size += extra
+                a.st_blocks = (a.st_size + 511) // 512
+            return a
         except KeyError:
             raise pyfuse3.FUSEError(errno.ENOENT)
         except Exception as e:
@@ -182,12 +189,16 @@ class AloeFuse(pyfuse3.Operations):
         path = f"{base}/{os.fsdecode(name)}"
         try:
             node = self.m.create_entry(path, b"")
-            writer = self.m.open_write(path, WriteMode.TRUNCATE)  # stream from byte 0
+            ino = self._register(node)
+            fh = self._next_fh()
+            if flags & os.O_APPEND:
+                self._open[fh] = {"mode": "a", "path": path,
+                                  "buf": bytearray(), "inode": ino}
+            else:
+                writer = self.m.open_write(path, WriteMode.TRUNCATE)
+                self._open[fh] = {"mode": "w", "path": path, "w": writer, "pos": 0}
         except Exception as e:
             raise _wrap(e)
-        ino = self._register(node)
-        fh = self._next_fh()
-        self._open[fh] = {"mode": "w", "path": path, "w": writer, "pos": 0}
         fi = pyfuse3.FileInfo(fh=fh, direct_io=True)
         return (fi, self._attr(ino, self.m.stat_by_id(node)))
 
@@ -228,6 +239,11 @@ class AloeFuse(pyfuse3.Operations):
             "dirty": truncate,
         }
 
+    def _append_commit(self, h) -> None:
+        if h["buf"]:
+            self.m.append(h["path"], bytes(h["buf"]))
+            h["buf"].clear()
+
     async def open(self, inode, flags, ctx):
         path = self._path(inode)
         acc = flags & os.O_ACCMODE
@@ -242,10 +258,9 @@ class AloeFuse(pyfuse3.Operations):
                 fh = self._next_fh()
                 self._open[fh] = {"mode": "w", "path": path, "w": writer, "pos": 0}
             elif acc == os.O_WRONLY and (flags & os.O_APPEND):
-                size = self.m.stat(path).size
-                writer = self.m.open_write(path, WriteMode.APPEND)
                 fh = self._next_fh()
-                self._open[fh] = {"mode": "w", "path": path, "w": writer, "pos": size}
+                self._open[fh] = {"mode": "a", "path": path,
+                                  "buf": bytearray(), "inode": inode}
             else:
                 # O_RDWR, or plain O_WRONLY (partial overwrite): buffered fallback
                 fh = self._next_fh()
@@ -272,6 +287,14 @@ class AloeFuse(pyfuse3.Operations):
     async def write(self, fh, off, data):
         h = self._open[fh]
         try:
+            if h["mode"] == "a":
+                # O_APPEND: the kernel's offset is advisory; EOF is authoritative,
+                # so ignore `off` and append at the true end. Buffer, commit in
+                # batches (and on flush/fsync/release).
+                h["buf"].extend(data)
+                if len(h["buf"]) >= _APPEND_BATCH:
+                    self._append_commit(h)
+                return len(data)
             if h["mode"] == "w":
                 if off == h["pos"]:
                     n = h["w"].write(data)  # straight through -> engine flushes chunks
@@ -335,12 +358,14 @@ class AloeFuse(pyfuse3.Operations):
     # commits its whole buffer with the atomic write_all.
     async def flush(self, fh):
         h = self._open.get(fh)
-        if h and h["mode"] == "buf" and h["dirty"]:
-            try:
+        try:
+            if h and h["mode"] == "a":
+                self._append_commit(h)
+            elif h and h["mode"] == "buf" and h["dirty"]:
                 self.m.write_all(h["path"], bytes(h["buf"]))
                 h["dirty"] = False
-            except Exception as e:
-                raise _wrap(e)
+        except Exception as e:
+            raise _wrap(e)
 
     async def fsync(self, fh, datasync):
         await self.flush(fh)
@@ -354,6 +379,8 @@ class AloeFuse(pyfuse3.Operations):
                 h["w"].close()  # final chunk + pointer swap + unlock
             elif h["mode"] == "r":
                 h["r"].close()
+            elif h["mode"] == "a":
+                self._append_commit(h)
             elif h["mode"] == "buf" and h["dirty"]:
                 self.m.write_all(h["path"], bytes(h["buf"]))
         except Exception as e:

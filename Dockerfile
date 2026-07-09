@@ -16,7 +16,7 @@ COPY manager/ ./manager/
 COPY config/ ./config/
 COPY sql/ ./sql/
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[fuse]"
 
 # Backing files + volume metadata live here (mount a volume over it).
 VOLUME ["/aloelite-root"]

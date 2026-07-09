@@ -210,10 +210,18 @@
       </div>
       <div class="modal-body">
         <p class="small text-muted mb-3" x-text="mountTarget?.name"></p>
-        <div class="mb-2">
+        <div class="mb-3">
+          <label class="form-label small">Mount name <span class="text-muted fw-normal">(optional)</span></label>
+          <input type="text" class="form-control form-control-sm" x-model="mountPath"
+                placeholder="leave blank to use volume ID">
+          <div class="form-text" style="font-size:.72rem;">
+            Sets the host path suffix: /mnt/aloelite/<strong>name</strong>
+          </div>
+        </div>
+        <div x-show="mountTarget?.encrypted" class="mb-2">
           <label class="form-label small">PIN</label>
           <input type="password" class="form-control form-control-sm" x-model="mountPin"
-                 @keydown.enter="doMount()" autofocus>
+                 @keydown.enter="doMount()" :autofocus="mountTarget?.encrypted">
         </div>
         <div x-show="mountErr" class="alert alert-danger py-1 px-2 small" x-text="mountErr"></div>
       </div>
@@ -262,7 +270,7 @@ function app() {
     createErr: '', creating: false,
 
     mountTarget: null,
-    mountPin: '', mountErr: '', mounting: false,
+    mountPin: '', mountPath: '', mountErr: '', mounting: false,
 
     delTarget: null,
 
@@ -328,30 +336,28 @@ function app() {
     },
 
     mountVol(v) {
-      if (v.encrypted) {
-        this.mountTarget = v; this.mountPin = ''; this.mountErr = '';
-        this._modal('mountModal').show();
-      } else {
-        this._doMountRequest(v, null);
-      }
+      this.mountTarget = v; this.mountPin = ''; this.mountPath = ''; this.mountErr = '';
+      this._modal('mountModal').show();
     },
 
     async doMount() {
       if (!this.mountTarget) return;
       this.mounting = true; this.mountErr = '';
-      await this._doMountRequest(this.mountTarget, this.mountPin || null);
+      await this._doMountRequest(this.mountTarget, this.mountPin || null, this.mountPath || null);
       this.mounting = false;
     },
 
-    async _doMountRequest(v, pin) {
+    async _doMountRequest(v, pin, mountPath) {
       v._busy = true;
       try {
-        const body = pin ? { pin } : {};
+        const body = {};
+        if (pin) body.pin = pin;
+        if (mountPath) body.mount_name = mountPath;
         const r = await this.api('POST', `/volumes/${v.id}/mount`, body);
         if (r.ok) {
           this.addLog(`Mounted "${v.name}" → ${r.data.mountpoint}`);
           this._modal('mountModal').hide();
-          this.mountPin = ''; this.mountErr = '';
+          this.mountPin = ''; this.mountPath = ''; this.mountErr = '';
           await this.refresh();
         } else {
           const msg = r.data?.error || 'Mount failed.';

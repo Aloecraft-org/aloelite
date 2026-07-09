@@ -163,13 +163,16 @@ class MountSupervisor:
             time.sleep(self.poll_interval)
         raise MountTimeout(f"mount {mountpoint} not ready within {self.ready_timeout}s")
 
+        
     # -- public API ---------------------------------------------------------
-    def mount(self, record: VolumeRecord, pin: bytes | None) -> str:
-        mountpoint = self.mountpoint_for(record)
+    def mount(self, record: VolumeRecord, pin: bytes | None, mp_path=None) -> str:
+        name = mp_path or record.id
+        mountpoint = f"{str(self.mnt_dir).rstrip('/')}/{name}"
         with self._lock:
             if mountpoint in self._threads:
                 raise AlreadyMounted(f"volume {record.id} already mounted")
             os.makedirs(mountpoint, exist_ok=True)
+            os.chmod(mountpoint, 0o777)
             stop_event = threading.Event()
             done_event = threading.Event()
             result_box: dict = {}

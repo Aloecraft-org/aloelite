@@ -183,6 +183,9 @@ class Mount:
 
     def write_all(self, path: str, data: bytes) -> None:
         ops.write_all(self._db, self.id, path, data)
+        
+    def append(self, path: str, data: bytes) -> int:
+        return ops.append(self._db, self.id, path, data)
 
     def rename(self, path: str, name: str) -> None:
         ops.rename(self._db, self.id, path, name)
