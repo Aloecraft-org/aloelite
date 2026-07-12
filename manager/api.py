@@ -272,6 +272,38 @@ def create_app(
             },
         )
 
+    # -- GET /volumes/<id>/mounts --------------------------------------------
+    @app.get("/volumes/<vid>/mounts")
+    def list_engine_mounts(vid):
+        """Durable engine mounts inside the backing file (ACC-1a), distinct
+        from the manager's FUSE session state. Opens its own connection, so it
+        works whether or not the volume is FUSE-mounted, and needs no PIN
+        (mount rows are metadata, not encrypted content). ?all=1 includes
+        retired rows."""
+        rec = _require(vid)
+        if rec is None:
+            return jsonify(error="no such volume"), 404
+        include = request.args.get("all") in ("1", "true")
+
+        from aloelite.aloelite import Aloelite  # lazy
+
+        with Aloelite(rec.sqlite_path) as fs:
+            names = {v.id: v.name for v in fs.list_volumes()}
+            mounts = fs.list_mounts(include_unmounted=include)
+        out = [
+            {
+                "id": m.id,
+                "volume": m.volume,
+                "label": f"{names.get(m.volume) or m.volume[:8]}:{m.mount_path or '?'}",
+                "mount_path": m.mount_path,
+                "state": m.state.value,
+                "expires_at": m.expires_at,
+                "created_at": m.created_at,
+            }
+            for m in mounts
+        ]
+        return jsonify(out), 200
+
     # -- file explorer (over the live FUSE mountpoint) -----------------------
     #
     # These operate on the volume's *mounted* directory tree, so they work for

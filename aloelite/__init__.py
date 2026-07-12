@@ -47,7 +47,11 @@ from .types import (
     WriteMode,
 )
 
+from .aloelite import (Aloelite, Mount)
+
 __all__ = [
+    "Aloelite",
+    "Mount",
     # scaffolding
     "Db",
     "Templates",

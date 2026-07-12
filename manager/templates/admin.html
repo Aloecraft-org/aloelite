@@ -116,6 +116,18 @@
             <span><strong>Modified:</strong> <span x-text="v._stat ? fmtTime(v._stat.mtime) : ''"></span></span>
           </div>
 
+          <!-- engine mounts -->
+          <div x-show="v._mounts" x-cloak class="mt-2 stat-mini">
+            <template x-for="mt in v._mounts" :key="mt.id">
+              <div>
+                <span class="badge bg-light text-dark border" x-text="mt.state"></span>
+                <span x-text="mt.label"></span>
+                <span class="mono" x-text="mt.id.slice(0,8) + '…'"></span>
+              </div>
+            </template>
+            <div x-show="v._mounts && !v._mounts.length" class="text-muted">No mounts</div>
+          </div>
+
           <!-- per-card log line -->
           <div x-show="v._log" x-cloak class="mt-2">
             <div class="alert alert-secondary py-1 px-2 mb-0" style="font-size:.78rem;" x-text="v._log"></div>
@@ -147,6 +159,10 @@
             </button>
             <button class="btn btn-sm btn-outline-secondary" @click="doStat(v)">
               Stat
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" @click="doMounts(v)"
+                    title="List durable mounts in the volume file">
+              Mounts
             </button>
           </div>
 
@@ -376,6 +392,7 @@ function app() {
           this.volumes = (r.data || []).map(v => ({
             ...v,
             _stat: prev[v.id]?._stat ?? null,
+            _mounts: prev[v.id]?._mounts ?? null,
             _log:  prev[v.id]?._log  ?? null,
             _busy: false,
           }));
@@ -495,6 +512,14 @@ function app() {
         const r = await this.api('GET', `/volumes/${v.id}/stat`);
         if (r.ok) { v._stat = r.data; }
         else { this.addLog(`Stat error for "${v.name}": ${r.data?.error}`); }
+      } catch { this.addLog('Could not reach API.'); }
+    },
+
+    async doMounts(v) {
+      try {
+        const r = await this.api('GET', `/volumes/${v.id}/mounts`);
+        if (r.ok) { v._mounts = r.data; }
+        else { this.addLog(`Mounts error for "${v.name}": ${r.data?.error}`); }
       } catch { this.addLog('Could not reach API.'); }
     },
 

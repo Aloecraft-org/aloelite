@@ -393,6 +393,30 @@ def test_prune_collects_unmounted_locks(db, mount):
     assert report.locks_pruned >= 1
 
 
+def test_list_mounts_filters_unmounted(db, mount):
+    vol = ops.mount_info(db, mount).volume
+    m2 = ops.mount(db, vol, "/", ttl_ms=60_000)
+    assert {i.id for i in ops.list_mounts(db)} >= {mount, m2}
+    ops.unmount(db, m2)
+    ids = {i.id for i in ops.list_mounts(db)}
+    assert mount in ids and m2 not in ids  # retired rows hidden by default
+    assert m2 in {i.id for i in ops.list_mounts(db, include_unmounted=True)}
+    # volume scoping: a second volume's mount is excluded
+    other_vol = ops.create_volume(db, "other")
+    m3 = ops.mount(db, other_vol.id, "/")
+    assert m3 not in {i.id for i in ops.list_mounts(db, vol)}
+
+
+def test_list_mounts_tolerates_lost_anchor(db, mount):
+    vol = ops.mount_info(db, mount).volume
+    ops.create_container(db, mount, "/d")
+    m2 = ops.mount(db, vol, "/d", ttl_ms=60_000)
+    ops.remove_recursive(db, mount, "/d")  # archive the anchor (ACC-5)
+    infos = {i.id: i for i in ops.list_mounts(db)}  # must not raise
+    assert infos[m2].mount_path is None  # unresolvable => None, not an abort
+    assert infos[mount].mount_path == "/"
+
+
 # --------------------------------------------------------------------------
 # Content chunking + versioning (CV-1..CV-7)
 #

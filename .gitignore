@@ -4,3 +4,4 @@
 x.md
 x.patch
 */**/__pycache__
+*.egg-info

@@ -324,6 +324,35 @@ def mount_info(db: Db, mount: MountId) -> MountInfo:
     return MountInfo.from_row(row, mount_path=mount_path)
 
 
+def list_mounts(
+    db: Db,
+    volume: VolumeId | None = None,
+    *,
+    include_unmounted: bool = False,
+) -> "builtins.list[MountInfo]":
+    """List durable mounts (ACC-1a), optionally scoped to one volume.
+
+    Connection-scoped like list_volumes — takes no MountId, because its whole
+    purpose is to surface mounts before you hold a valid one. Reads the raw
+    mount table (not valid_mount), so expired mounts appear; retired
+    ('unmounted') rows are excluded unless include_unmounted. A mount whose
+    mount point no longer resolves (removed/archived anchor, ACC-5) is
+    returned with mount_path=None rather than aborting the listing.
+    """
+    out = []
+    rows = db.all(
+        "resolution.list_mounts",
+        {"volume": volume, "include_unmounted": 1 if include_unmounted else 0},
+    )
+    for r in rows:
+        try:
+            mount_path = _abs_path(db, NodeId(r["mount_point"]))
+        except (NotFound, Corrupt):
+            mount_path = None
+        out.append(MountInfo.from_row(r, mount_path=mount_path))
+    return out
+
+
 # ===========================================================================
 # Path / ancestor helpers (host-side, over the path_of template)
 # ===========================================================================
@@ -899,6 +928,7 @@ __all__ = [
     "unmount",
     "renew_mount",
     "mount_info",
+    "list_mounts",
     "stat",
     "stat_by_id",
     "exists",

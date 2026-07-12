@@ -204,6 +204,24 @@ resolution:
     consumed_by: ["every mount-scoped op (precondition)"]
     notes: "Empty => mount_invalid. Run as the first step of any operation taking a mount."
 
+  list_mounts:
+    sql: |
+      SELECT mount_id, volume_id, mount_point, state, expires_at, created_at
+      FROM mount
+      WHERE (:volume IS NULL OR volume_id = :volume)
+        AND (:include_unmounted OR state <> 'unmounted')
+      ORDER BY created_at, mount_id
+    params:
+      volume: "VolumeId to filter by, or NULL for all volumes"
+      include_unmounted: "1 to include retired ('unmounted') rows, 0 to exclude"
+    returns: "[MountInfo rows (minus mount_path)]"
+    consumed_by: [list_mounts]
+    notes: >
+      Deliberately reads the raw mount table, NOT valid_mount: a mount is a
+      durable access point (ACC-1a), so expired-but-not-retired mounts are
+      listable (renewable/duplicable). Retired rows are excluded by default so
+      a cleared mount does not keep reappearing.
+
   get_volume:
     sql: |
       SELECT volume_id, root_node_id, name, api_version, created_at

@@ -116,6 +116,18 @@ class Aloelite:
         resumed on this connection). The mount is validated lazily, per op."""
         return Mount(self._db, mount)
 
+    def list_mounts(
+        self,
+        volume: VolumeId | None = None,
+        *,
+        include_unmounted: bool = False,
+    ) -> builtins.list[MountInfo]:
+        """Durable mounts on this filesystem (records, not live handles).
+        Re-attach to one with attach(info.id)."""
+        return ops.list_mounts(
+            self._db, volume, include_unmounted=include_unmounted
+        )
+
     # -- maintenance ---------------------------------------------------------
     def prune(self, volume: VolumeId | None = None) -> PruneReport:
         return ops.prune(self._db, volume)
