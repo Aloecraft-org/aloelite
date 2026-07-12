@@ -1,7 +1,7 @@
 # ./aloelite/__init__.py
 # License: Apache-2.0 (disclaimer at bottom of file)
 """
-aloefs — Python reference implementation of the SQLite-backed Mount API.
+aloelite fs: Python reference implementation of the SQLite-backed Mount API.
 
 This is the oracle: the implementation the conformance suite is generated from
 and the other three (Rust, JS/WASM, Kotlin) are tested against. It drives the
@@ -12,13 +12,14 @@ Layering, bottom to top:
     schema.sql                      (the SQL floor)
     db.Db / Db.txn                  (connection, templates, transaction boundary)
     resolve.resolve / resolve_parent (path -> id, the most-reused logic)
-    [function layer]                (flat Mount API — next session)
+    [function layer]                (flat Mount API / next session)
     types / errors / models         (vocabulary, used throughout)
 """
 
 from . import errors, operations
 from .db import Db, Templates
 from .descriptor import Descriptor
+from .path import AloelitePath
 from .models import (
     Anomaly,
     ContentPruneReport,
@@ -83,6 +84,7 @@ __all__ = [
     "errors",
     "operations",
     "Descriptor",
+    "AloelitePath",
 ]
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #

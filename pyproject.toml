@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aloelite"
 version = "0.1.1"
-description = "AloeLite SQLite Filesystem"
+description = "Aloelite SQLite Filesystem"
 readme = "README.md"
 authors = [
     {name = "Michael Godfrey", email = "michael@aloecraft.org"}

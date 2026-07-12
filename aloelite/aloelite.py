@@ -1,15 +1,15 @@
 # ./aloelite/aloelite.py
 # License: Apache-2.0 (disclaimer at bottom of file)
 """
-AloeLite — the ergonomic, Pythonic wrapper.
+Aloelite — the ergonomic, Pythonic wrapper.
 
 This is the ONLY layer that is allowed object state and sugar. It sits on top of
 the flat function layer (operations.py) and adds nothing to the contract — the
 other three implementations will each grow their own idiomatic wrapper over the
 same operations. Two objects, each owning a resource as a context manager:
 
-  AloeLite  — owns the file / connection (the transient physical attachment).
-              `with AloeLite(path) as fs:` opens it; exit closes the connection.
+  Aloelite  — owns the file / connection (the transient physical attachment).
+              `with Aloelite(path) as fs:` opens it; exit closes the connection.
               Note a mount is a ROW, not this connection: the connection is
               disposable, the mount id outlives it.
 
@@ -50,8 +50,8 @@ _DEFAULT_TEMPLATES = _PKG / "../config/sql-templates.yaml"
 _DEFAULT_SCHEMA = _PKG / "../sql/schema.sql"
 
 
-class AloeLite:
-    """A handle to an AloeLite filesystem file (owns the connection)."""
+class Aloelite:
+    """A handle to an Aloelite filesystem file (owns the connection)."""
 
     def __init__(
         self,
@@ -70,7 +70,7 @@ class AloeLite:
         )
 
     # -- connection lifecycle (this object's context manager) ----------------
-    def __enter__(self) -> "AloeLite":
+    def __enter__(self) -> "Aloelite":
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -155,6 +155,17 @@ class Mount:
     def renew(self, ttl_ms: int | None = None) -> MountInfo:
         return ops.renew_mount(self._db, self.id, ttl_ms)
 
+    # -- ergonomic path surface -----------------------------------------------
+    def path(self, path: str = "/") -> "AloelitePath":
+        """A pathlib-style handle bound to this mount (see aloelite.path)."""
+        from .path import AloelitePath
+
+        return AloelitePath(self, path)
+
+    def __truediv__(self, other) -> "AloelitePath":
+        """`mount / "docs" / "a.txt"` builds an AloelitePath from the mount root."""
+        return self.path("/") / other
+
     # -- read ----------------------------------------------------------------
     def stat(self, path: str) -> NodeInfo:
         return ops.stat(self._db, self.id, path)
@@ -219,12 +230,10 @@ class Mount:
         return ops.open_read(self._db, self.id, path)
 
     def open_write(self, path: str, mode: WriteMode = WriteMode.TRUNCATE) -> Descriptor:
-        if not self.exists(path) and mode is not WriteMode.APPEND:
-            ops.create_entry(self._db, self.id, path)
         return ops.open_write(self._db, self.id, path, mode)
 
 
-__all__ = ["AloeLite", "Mount"]
+__all__ = ["Aloelite", "Mount"]
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

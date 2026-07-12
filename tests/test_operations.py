@@ -302,6 +302,21 @@ def test_same_mount_does_not_self_block(db, mount):
     assert ops.read_all(db, mount, "/f") in (b"x", b"y")
 
 
+def test_open_write_creates_missing_entry(db, mount):
+    # open_write(TRUNCATE) on a missing path creates the entry inside the
+    # operation's own transaction (no wrapper pre-create, no TOCTOU window)
+    with ops.open_write(db, mount, "/new") as w:
+        w.write(b"made")
+    assert ops.read_all(db, mount, "/new") == b"made"
+    # exactly one node named 'new' was created — no hidden same-name sibling
+    assert [e.name for e in ops.list(db, mount, "/")].count("new") == 1
+
+
+def test_open_write_append_missing_raises(db, mount):
+    with pytest.raises(errors.NotFound):
+        ops.open_write(db, mount, "/nope", WriteMode.APPEND)
+
+
 # --------------------------------------------------------------------------
 # Metadata (NODE-6)
 # --------------------------------------------------------------------------

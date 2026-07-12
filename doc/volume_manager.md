@@ -459,7 +459,7 @@ No streaming replication logic should be included in the initial implementation.
 aloelite-py/
   aloelite/
     __init__.py
-    aloelite.py         # AloeLite and Mount classes; add checkpoint() here
+    aloelite.py         # Aloelite and Mount classes; add checkpoint() here
     crypto.py
     db.py
     descriptor.py

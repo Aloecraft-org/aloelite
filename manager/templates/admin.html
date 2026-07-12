@@ -133,6 +133,11 @@
                 <span x-text="v._busy ? 'Unmounting…' : 'Unmount'"></span>
               </button>
             </template>
+            <template x-if="v.mounted">
+              <button class="btn btn-sm btn-outline-primary" @click="openExplorer(v)">
+                &#128194; Explore
+              </button>
+            </template>
             <button class="btn btn-sm btn-outline-secondary" @click="doCheckpoint(v)"
                     :disabled="v._busy" title="WAL checkpoint (safe while unmounted)">
               Checkpoint
@@ -256,6 +261,68 @@
   </div>
 </div>
 
+<!-- file explorer modal -->
+<div class="modal fade" id="expModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title">Files — <span x-text="expVol?.name"></span></h6>
+        <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex align-items-center justify-content-between mb-2 gap-2 flex-wrap">
+          <nav aria-label="breadcrumb">
+            <ol class="breadcrumb mb-0" style="font-size:.85rem;">
+              <template x-for="(c, i) in expCrumbs()" :key="i">
+                <li class="breadcrumb-item">
+                  <a href="#" @click.prevent="navTo(c.path)" x-text="c.name"></a>
+                </li>
+              </template>
+            </ol>
+          </nav>
+          <div class="d-flex gap-2 flex-shrink-0">
+            <label class="btn btn-sm btn-outline-primary mb-0">
+              Upload<input type="file" hidden multiple @change="expUpload($event)">
+            </label>
+            <button class="btn btn-sm btn-outline-secondary" @click="expMkdir()">New folder</button>
+            <button class="btn btn-sm btn-outline-secondary" @click="loadFiles()" :disabled="expBusy">
+              <span :class="expBusy ? 'spin' : ''">&#8635;</span>
+            </button>
+          </div>
+        </div>
+        <div x-show="expErr" x-cloak class="alert alert-danger py-1 px-2 small" x-text="expErr"></div>
+        <table class="table table-sm table-hover align-middle mb-0" style="font-size:.85rem;">
+          <thead>
+            <tr><th>Name</th><th class="text-end">Size</th><th>Modified</th><th class="text-end"></th></tr>
+          </thead>
+          <tbody>
+            <template x-for="e in expEntries" :key="e.name">
+              <tr>
+                <td>
+                  <a x-show="e.type === 'dir'" href="#" class="text-decoration-none"
+                     @click.prevent="navTo(expJoin(e.name))">&#128193; <span x-text="e.name"></span></a>
+                  <span x-show="e.type === 'file'">&#128196; <span x-text="e.name"></span></span>
+                </td>
+                <td class="text-end" x-text="e.type === 'file' ? fmtBytes(e.size) : ''"></td>
+                <td x-text="fmtTime(e.mtime)"></td>
+                <td class="text-end text-nowrap">
+                  <button x-show="e.type === 'file'" class="btn btn-sm btn-outline-secondary py-0"
+                          title="Download" @click="expDownload(e)">&#8595;</button>
+                  <button class="btn btn-sm btn-outline-danger py-0"
+                          title="Delete" @click="expDelete(e)">&#128465;</button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="!expEntries.length && !expBusy">
+              <td colspan="4" class="text-muted text-center py-3">Empty folder</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 function app() {
   return {
@@ -273,6 +340,8 @@ function app() {
     mountPin: '', mountPath: '', mountErr: '', mounting: false,
 
     delTarget: null,
+
+    expVol: null, expPath: '/', expEntries: [], expErr: '', expBusy: false,
 
     _modal(id) { return bootstrap.Modal.getOrCreateInstance(document.getElementById(id)); },
 
@@ -427,6 +496,85 @@ function app() {
         if (r.ok) { v._stat = r.data; }
         else { this.addLog(`Stat error for "${v.name}": ${r.data?.error}`); }
       } catch { this.addLog('Could not reach API.'); }
+    },
+
+    // -- file explorer ------------------------------------------------------
+    openExplorer(v) {
+      this.expVol = v; this.expPath = '/'; this.expEntries = []; this.expErr = '';
+      this._modal('expModal').show();
+      this.loadFiles();
+    },
+
+    expJoin(name) {
+      return (this.expPath === '/' ? '' : this.expPath) + '/' + name;
+    },
+
+    expCrumbs() {
+      const segs = this.expPath.split('/').filter(Boolean);
+      const out = [{ name: this.expVol?.name || '/', path: '/' }];
+      let p = '';
+      for (const s of segs) { p += '/' + s; out.push({ name: s, path: p }); }
+      return out;
+    },
+
+    navTo(p) { this.expPath = p || '/'; this.loadFiles(); },
+
+    async loadFiles() {
+      if (!this.expVol) return;
+      this.expBusy = true; this.expErr = '';
+      try {
+        const r = await this.api('GET',
+          `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expPath)}`);
+        if (r.ok) this.expEntries = r.data;
+        else { this.expEntries = []; this.expErr = r.data?.error || 'Failed to list files.'; }
+      } catch { this.expErr = 'Could not reach API.'; }
+      this.expBusy = false;
+    },
+
+    async expMkdir() {
+      const name = prompt('Folder name:');
+      if (!name) return;
+      const r = await this.api('POST',
+        `/volumes/${this.expVol.id}/files/mkdir?path=${encodeURIComponent(this.expJoin(name))}`);
+      if (!r.ok) this.expErr = r.data?.error || 'mkdir failed.';
+      this.loadFiles();
+    },
+
+    async expDelete(e) {
+      if (!confirm(`Delete ${e.name}${e.type === 'dir' ? ' and its contents' : ''}?`)) return;
+      const r = await this.api('DELETE',
+        `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expJoin(e.name))}`);
+      if (!r.ok) this.expErr = r.data?.error || 'delete failed.';
+      this.loadFiles();
+    },
+
+    expDownload(e) {
+      const a = document.createElement('a');
+      a.href = `${this.apiBase}/volumes/${this.expVol.id}/files/download?path=${encodeURIComponent(this.expJoin(e.name))}`;
+      a.download = e.name;
+      a.click();
+    },
+
+    async expUpload(ev) {
+      const files = ev.target.files;
+      if (!files.length) return;
+      this.expBusy = true; this.expErr = '';
+      for (const f of files) {
+        const fd = new FormData();
+        fd.append('file', f);
+        try {
+          const r = await fetch(
+            `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(this.expPath)}`,
+            { method: 'POST', body: fd });
+          if (!r.ok) {
+            const d = await r.json().catch(() => null);
+            this.expErr = d?.error || `upload of ${f.name} failed`;
+          }
+        } catch { this.expErr = 'Could not reach API.'; }
+      }
+      ev.target.value = '';
+      this.expBusy = false;
+      this.loadFiles();
     },
 
     fmtBytes(n) {

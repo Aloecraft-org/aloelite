@@ -518,7 +518,7 @@ mutation:
   set_mount_state:
     sql: |
       UPDATE mount SET state = :state WHERE mount_id = :mount
-    params: { mount: "MountId", state: "'open' | 'active' | 'unmounted'" }
+    params: { mount: "MountId", state: "'new' | 'active' | 'unmounted'" }
     returns: rowcount
     consumed_by: [unmount, "mount activate"]
     notes: "unmount sets 'unmounted'; lock reclamation is deferred to prune (ACC-10), not done here."

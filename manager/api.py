@@ -5,7 +5,7 @@ manager.api — the nine-endpoint HTTP API.
 
 `create_app(store, supervisor, ...)` returns a Flask app. The app talks to the
 metadata store and the mount supervisor through their interfaces only; volume
-creation uses AloeLite (imported lazily so this module imports without the
+creation uses Aloelite (imported lazily so this module imports without the
 aloelite package, e.g. for unit tests with fakes). Checkpoint/export open the
 backing SQLite file *directly* (stdlib sqlite3), independent of any live FUSE
 mount — that is what lets a backup run while the volume is mounted.
@@ -26,11 +26,12 @@ Endpoints:
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import time
 import uuid
 
-from flask import Flask, Response, jsonify, request, render_template
+from flask import Flask, Response, jsonify, request, render_template, send_file
 
 from . import errors as merr
 from .store import VolumeRecord, VolumeStore
@@ -91,9 +92,9 @@ def create_app(
         vid = uuid.uuid4().hex
         sqlite_path = _sqlite_path(vid)
 
-        from aloelite.aloelite import AloeLite  # lazy
+        from aloelite.aloelite import Aloelite  # lazy
 
-        with AloeLite(sqlite_path) as fs:
+        with Aloelite(sqlite_path) as fs:
             fs.create_volume(name, pin=pin.encode() if pin else None)
 
         rec = VolumeRecord(
@@ -270,6 +271,123 @@ def create_app(
                 "Content-Disposition": f'attachment; filename="{vid}.sqlite"',
             },
         )
+
+    # -- file explorer (over the live FUSE mountpoint) -----------------------
+    #
+    # These operate on the volume's *mounted* directory tree, so they work for
+    # plain and encrypted volumes alike (the FUSE session already holds the
+    # key) and exercise exactly the path consumers see. A volume must be
+    # mounted to browse it.
+    def _files_root(rec: VolumeRecord) -> str | None:
+        if not rec.mounted or not rec.mountpoint:
+            return None
+        return rec.mountpoint.rstrip("/") or "/"
+
+    def _safe_join(root: str, rel: str | None) -> str | None:
+        """Join a client-supplied volume-relative path under root; refuse any
+        traversal escape ('..')."""
+        parts = [
+            p for p in (rel or "/").replace("\\", "/").split("/") if p and p != "."
+        ]
+        if ".." in parts:
+            return None
+        return os.path.join(root, *parts) if parts else root
+
+    def _files_ctx(vid: str, *, want: str | None = None):
+        """Resolve (record, root, abs-path) for a files request, or an error
+        response tuple. `want` = 'dir'|'file' adds an existence/type check."""
+        rec = _require(vid)
+        if rec is None:
+            return None, (jsonify(error="no such volume"), 404)
+        root = _files_root(rec)
+        if root is None:
+            return None, (jsonify(error="volume is not mounted"), 409)
+        p = _safe_join(root, request.args.get("path"))
+        if p is None:
+            return None, (jsonify(error="bad path"), 400)
+        if want == "dir" and not os.path.isdir(p):
+            return None, (jsonify(error="not a directory"), 404)
+        if want == "file" and not os.path.isfile(p):
+            return None, (jsonify(error="not a file"), 404)
+        return (rec, root, p), None
+
+    @app.get("/volumes/<vid>/files")
+    def list_files(vid):
+        ctx, err = _files_ctx(vid, want="dir")
+        if err:
+            return err
+        _rec, _root, p = ctx
+        out = []
+        for name in sorted(os.listdir(p)):
+            fp = os.path.join(p, name)
+            try:
+                st = os.stat(fp)
+            except OSError:
+                continue  # raced with a concurrent delete
+            out.append(
+                {
+                    "name": name,
+                    "type": "dir" if os.path.isdir(fp) else "file",
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                }
+            )
+        return jsonify(out), 200
+
+    @app.get("/volumes/<vid>/files/download")
+    def download_file(vid):
+        ctx, err = _files_ctx(vid, want="file")
+        if err:
+            return err
+        _rec, _root, p = ctx
+        return send_file(p, as_attachment=True, download_name=os.path.basename(p))
+
+    @app.post("/volumes/<vid>/files/upload")
+    def upload_file(vid):
+        # multipart form: field 'file'; ?path= is the target directory
+        ctx, err = _files_ctx(vid, want="dir")
+        if err:
+            return err
+        _rec, _root, p = ctx
+        f = request.files.get("file")
+        if f is None or not f.filename:
+            return jsonify(error="multipart field 'file' is required"), 400
+        name = os.path.basename(f.filename.replace("\\", "/"))
+        if not name or name in (".", ".."):
+            return jsonify(error="bad filename"), 400
+        # werkzeug streams to disk in chunks; the sequential write rides the
+        # FUSE streaming fast path (bounded memory for large uploads)
+        f.save(os.path.join(p, name))
+        return jsonify(name=name), 201
+
+    @app.post("/volumes/<vid>/files/mkdir")
+    def mkdir_files(vid):
+        ctx, err = _files_ctx(vid)
+        if err:
+            return err
+        _rec, root, p = ctx
+        if p == root:
+            return jsonify(error="path is required"), 400
+        if os.path.exists(p):
+            return jsonify(error="already exists"), 409
+        os.makedirs(p)
+        return jsonify(path=p[len(root):] or "/"), 201
+
+    @app.delete("/volumes/<vid>/files")
+    def delete_files(vid):
+        ctx, err = _files_ctx(vid)
+        if err:
+            return err
+        _rec, root, p = ctx
+        if p == root:
+            return jsonify(error="refusing to delete the volume root"), 400
+        if os.path.isdir(p):
+            shutil.rmtree(p)
+        elif os.path.isfile(p):
+            os.remove(p)
+        else:
+            return jsonify(error="no such file"), 404
+        return "", 204
 
     @app.get("/admin")
     def admin():

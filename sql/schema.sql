@@ -1,5 +1,5 @@
 -- ============================================================================
--- SQLite Filesystem — Schema
+-- SQLite Filesystem Schema
 --
 -- Maps to the requirements document. Where an invariant is enforced
 -- declaratively, the constraint is noted with its requirement id. Invariants
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS node (
 -- pointer (CV-3, the sole definition of current bytes), a materialized total
 -- size (so get_node needs no chunk join), the reserved whole-payload hash
 -- (EXT-2), and a single keep-last-N retention policy (CV-6). The inline payload
--- is gone — bytes live in the chunk pool, referenced through content_version.
+-- is gone. bytes live in the chunk pool, referenced through content_version.
 CREATE TABLE IF NOT EXISTS content (
   node_id        TEXT PRIMARY KEY REFERENCES node (node_id) ON DELETE CASCADE,
   version        INTEGER NOT NULL DEFAULT 0,   -- CV-3: committed version pointer
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS content_chunk (
   enc_tag    BLOB    NOT NULL                  -- ENC-2: ChaCha20-Poly1305 tag (16 bytes)
 ) STRICT;
 
--- CV-4: the ordered manifest — one row per chunk reference. Composite PK makes
+-- CV-4: the ordered manifest. one row per chunk reference. Composite PK makes
 -- position-within-version unique and pins reassembly order. chunk_hash FK into
 -- the pool; the separate index below supports the GC reverse walk
 -- (chunk -> versions). `proof` reserves a per-reference Merkle membership slot
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS edge (
 ) STRICT;
 
 -- Guard triggers: refuse-only enforcement for invariants the schema cannot
--- express as constraints. These never DO work, they only REJECT — so they
+-- express as constraints. These never DO work, they only REJECT. so they
 -- cannot drift in behavior and they protect the file equally no matter which
 -- of the four implementations is writing. Active (work-performing) logic stays
 -- in the Mount API. Fire on every base-table insert, including those issued by
@@ -143,7 +143,7 @@ BEGIN
 END;
 
 -- modified_at touch triggers. Bump a node's modified_at on a change to its own
--- content or own metadata (name) — NOT on placement (a move changes edges, not
+-- content or own metadata (name). NOT on placement (a move changes edges, not
 -- the node row, so modified_at deliberately stays put; modified vs moved are
 -- different questions). Schema-side so the bump is identical across all four
 -- implementations rather than per-Mount-API discipline. A content write now

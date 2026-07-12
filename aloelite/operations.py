@@ -84,7 +84,7 @@ class _Mount:
 def _require_mount(db: Db, mount: MountId) -> _Mount:
     """Resolve a mount to its anchor + volume, or raise MountInvalid.
 
-    A mount is untrusted-until-validated: it may have been unmounted or expired
+    A mount is untrusted-until-validated (or revalidated-per-access): it may have been unmounted or expired
     (possibly from another connection), so this runs as the first step of every
     operation. (ACC-1/4/5.)
     """
@@ -231,12 +231,12 @@ def mount(
     ttl_ms: int | None = None,
     pin: bytes | None = None,
 ) -> MountId:
-    """Open a mount (session) on a volume, anchored at `at` (relative to the
+    """Open a mount on a volume, anchored at `at` (relative to the
     volume root). Returns the durable MountId.
 
     For an encrypted volume a `pin` is required: it derives K_u, unwraps the
     volume key K_v, installs the chunk cipher on this connection for the life of
-    the session, and mints a per-mount token T plus a memory-only sealed mount
+    the mount, and mints a per-mount token T plus a memory-only sealed mount
     secret (so subsequent re-attach within the process needs only T + N_m, not
     the PIN). The token is exposed via db.active_session['token'] (the wrapper
     surfaces it as Mount.token). A wrong PIN raises BadKey; a PIN on an
@@ -298,7 +298,7 @@ def mount(
 
 def unmount(db: Db, mount: MountId) -> None:
     """Mark the mount invalid. Lock reclamation is deferred to prune (ACC-10).
-    Tears down the session cipher: K_v and the sealed mount secret leave memory,
+    Tears down the session cipher: K_v and the sealed mount secret leave memory,    
     so post-unmount operations fall back to the identity (unencrypted) cipher.
     """
     with db.txn():
@@ -796,22 +796,23 @@ def open_write(
         try:
             # Atomic resolution check inside the isolated transaction boundary
             found = resolve(db, m.mount_point, path)
+            if found.type is not NodeType.ENTRY:
+                raise NotAnEntry(node=found.node)
             node_id = found.node
         except NotFound:
             if mode is WriteMode.APPEND:
                 raise
-            # Safe creation within the isolated block
-            node_id = _create_entry_internal(db, m, path)
-        if found.type is not NodeType.ENTRY:
-            raise NotAnEntry(node=found.node)
+            # Safe creation within the isolated block (pass the MountId, not
+            # the resolved _Mount — _create_entry_internal re-validates it)
+            node_id = _create_entry_internal(db, mount, path)
         if db.scalar(
-            "validation.check_lock_held", {"node": found.node, "mount": mount}
+            "validation.check_lock_held", {"node": node_id, "mount": mount}
         ):
-            raise LockHeld(node=found.node)
+            raise LockHeld(node=node_id)
         lock = db.gen_id()
         db.run(
             "mutation.create_lock",
-            {"id": lock, "mount": mount, "node": found.node, "expires_at": None},
+            {"id": lock, "mount": mount, "node": node_id, "expires_at": None},
         )
         cs = db.chunk_size_of(m.volume)
         # Append carries the prior version's FULL leading chunks forward
@@ -821,13 +822,13 @@ def open_write(
         pending = b""
         position = 0
         if mode is WriteMode.APPEND:
-            meta = db.read_content_meta(found.node)
+            meta = db.read_content_meta(node_id)
             src_version, size = meta if meta is not None else (0, 0)
             carry_src = src_version
             if size > 0 and size % cs != 0:
                 carry_full = size // cs  # full leading chunks
                 tail = db.read_chunk_range(
-                    found.node, src_version, carry_full, carry_full
+                    node_id, src_version, carry_full, carry_full
                 )
                 pending = tail[0][1] if tail else b""  # partial last chunk -> rebuild
             else:
@@ -835,7 +836,7 @@ def open_write(
             position = size
     return Descriptor(
         db,
-        found.node,
+        node_id,
         FdId(db.gen_id()),
         writable=True,
         lock=LockId(lock),

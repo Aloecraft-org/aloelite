@@ -47,7 +47,7 @@ Each requirement is identified by a stable prefix and number for reference. Requ
 
 ## Access
 
-- **ACC-1** : A mount is a live session bound to exactly one volume. All access to a volume is brokered through a mount; access is never ambient.
+- **ACC-1a** : A mount is a durable immutable access point bound to an explicit node in exactly one volume. All access to a volume is brokered through a mount; access is never ambient.
 - **ACC-2** : A mount has a mount point: a reference to a node within its volume that anchors the session for resolution and scoping.
 - **ACC-3** : A mount carries a ttl. The mounts table is part of the schema, but its contents are not held to the same persistence expectations as the rest of the model.
 - **ACC-4** : Mount state is actively managed across a lifecycle (open → active → unmount); mount and unmount are operations. Unmount marks the mount invalid; reclamation of what it held is deferred to pruning rather than performed eagerly.

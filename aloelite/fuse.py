@@ -2,7 +2,7 @@
 # License: Apache-2.0 (disclaimer at bottom of file)
 #!/usr/bin/env python3
 """
-aloelite-fuse — mount an AloeLite volume as a FUSE filesystem (Linux/pyfuse3).
+aloelite-fuse — mount an Aloelite volume as a FUSE filesystem (Linux/pyfuse3).
 
     sudo apt install fuse3 libfuse3-dev
     pip install pyfuse3
@@ -45,7 +45,7 @@ import sys
 import pyfuse3
 import trio
 
-from aloelite.aloelite import AloeLite
+from aloelite.aloelite import Aloelite
 import aloelite.errors as aloe_errors
 from aloelite.types import WriteMode, Whence
 
@@ -445,10 +445,10 @@ async def fuse_main(
     allow_other: bool = True,
     debug: bool = False,
 ) -> None:
-    """Mount one AloeLite volume at `mountpoint` and serve FUSE until the mount
+    """Mount one Aloelite volume at `mountpoint` and serve FUSE until the mount
     is torn down (external `fusermount3 -uz`, or `stop_event` being set).
 
-    Owns its own AloeLite connection, mount session, and pyfuse3 session, so
+    Owns its own Aloelite connection, mount session, and pyfuse3 session, so
     many of these run concurrently — one per thread, each in its own trio.run().
     Mount/PIN errors (aloe_errors.BadKey / EncryptionRequired) propagate to the
     caller instead of exiting, so the supervisor can translate and report them.
@@ -456,7 +456,7 @@ async def fuse_main(
     The spec's `trio.run(fuse_main, sqlite_path, volume_name, mountpoint, pin)`
     works directly; pass stop_event/allow_other/debug via functools.partial.
     """
-    fs = AloeLite(sqlite_path)
+    fs = Aloelite(sqlite_path)
     try:
         vol_id = _find_or_create_volume(fs, volume_name, pin=pin)
         mount = fs.mount(vol_id, pin=pin).__enter__()
@@ -489,7 +489,7 @@ async def fuse_main(
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Mount an AloeLite volume via FUSE.",
+        description="Mount an Aloelite volume via FUSE.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Encryption
@@ -512,7 +512,7 @@ Examples
   python3 aloefuse.py vault.sqlite vault /mnt/vault --pin-env VAULT_PIN
 """,
     )
-    ap.add_argument("db", help="path to the AloeLite sqlite file")
+    ap.add_argument("db", help="path to the Aloelite sqlite file")
     ap.add_argument("volume", help="volume name (created if absent)")
     ap.add_argument("mountpoint", help="empty directory to mount at")
     ap.add_argument("--debug", action="store_true")

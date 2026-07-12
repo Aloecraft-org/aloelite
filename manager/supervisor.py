@@ -8,7 +8,7 @@ aloelite.fuse.fuse_main(...). A threading.Event is the stop signal; readiness is
 detected by polling st_dev (a live FUSE mount differs from its parent dir).
 
 Mount/PIN errors are surfaced synchronously to the API: fuse_main performs its
-AloeLite mount *before* the blocking pyfuse3.main loop, so a wrong PIN makes the
+Aloelite mount *before* the blocking pyfuse3.main loop, so a wrong PIN makes the
 thread exit fast with the error captured; the readiness poll notices the early
 exit and translates BadKey -> BadPin, EncryptionRequired -> EncryptionMismatch.
 This avoids a second (Argon2id-costly) validation mount.
