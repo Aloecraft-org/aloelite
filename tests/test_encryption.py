@@ -205,6 +205,33 @@ def test_mount_exposes_token_and_session():
         db.close()
 
 
+def test_cross_volume_same_plaintext_no_alias():
+    """Two encrypted volumes with different keys but identical plaintext must
+    not alias in the shared chunk pool (the InvalidTag-on-reread bug). Mounts
+    are sequential because the cipher is per-connection (one active at a time)."""
+    db = Db.open(":memory:", TEMPLATES, schema_path=SCHEMA)
+    try:
+        va = ops.create_volume(db, "a", chunk_size=16, pin=PIN)
+        vb = ops.create_volume(db, "b", chunk_size=16, pin=PIN)
+        payload = b"identical across volumes"
+
+        ma = ops.mount(db, va.id, "/", pin=PIN)
+        ops.create_entry(db, ma, "/f", payload)
+        assert ops.read_all(db, ma, "/f") == payload
+        ops.unmount(db, ma)
+
+        mb = ops.mount(db, vb.id, "/", pin=PIN)
+        ops.create_entry(db, mb, "/f", payload)   # same plaintext, different key
+        assert ops.read_all(db, mb, "/f") == payload   # InvalidTag before the fix
+        ops.unmount(db, mb)
+
+        # volume a still reads correctly afterward
+        ma2 = ops.mount(db, va.id, "/", pin=PIN)
+        assert ops.read_all(db, ma2, "/f") == payload
+    finally:
+        db.close()
+
+
 def test_streaming_write_encrypted():
     """The bounded-memory streaming descriptor must also encrypt per chunk."""
     db = Db.open(":memory:", TEMPLATES, schema_path=SCHEMA)

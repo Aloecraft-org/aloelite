@@ -104,6 +104,64 @@ def test_rename_copy_remove(m):
     assert not d.exists()
 
 
+def test_mount_by_name_and_create():
+    with Aloelite(":memory:") as fs:
+        with pytest.raises(errors.NotFound):
+            fs.mount("nope")                      # double miss, create=False
+        with fs.mount("vault", create=True) as m:  # bootstraps + mounts
+            m.put("/f", b"x")
+        assert fs.resolve_volume_name("vault") is not None
+        with fs.mount("vault") as m:              # resolves by name now
+            assert m.read_all("/f") == b"x"
+        with pytest.raises(errors.FsError):
+            fs.create_volume("vault", ensure_unique=True)
+        # duplicate names: latest id wins
+        v2 = fs.create_volume("vault")            # permissive path still allowed
+        assert fs.resolve_volume_name("vault") == v2.id
+        # id-fallback: an explicit id still mounts even with names around
+        with fs.mount(v2.id) as m:
+            assert m.list() == []
+
+
+def test_mkdir(m):
+    m.mkdir("/a")
+    with pytest.raises(errors.ContainerExists):
+        m.mkdir("/a")
+    assert m.mkdir("/a", exist_ok=True)          # returns existing id, no dup
+    assert [e.name for e in m.list("/")].count("a") == 1
+    with pytest.raises(errors.NotFound):
+        m.mkdir("/x/y/z")                        # strict default: no parents
+    m.mkdir("/x/y/z", parents=True, exist_ok=True)   # mkdir -p
+    assert (m / "x" / "y" / "z").is_dir()
+    m.put("/f", b"")
+    with pytest.raises(errors.ContainerExists):
+        m.mkdir("/f", exist_ok=True)             # entry in the way: still raises
+
+
+def test_direntry_path(m):
+    m.mkdir("/folder")
+    m.put("/folder/abc.txt", b"123")
+    (root,) = [e for e in m.list("/") if e.name == "folder"]
+    assert root.current_directory == "/" and root.path == "/folder"
+    (child,) = m.list("/folder")
+    assert child.current_directory == "/folder"
+    assert child.path == "/folder/abc.txt"
+    (deep,) = m.list("folder//")                 # normalization
+    assert deep.path == "/folder/abc.txt"
+
+
+def test_put(m):
+    p = m / "f"
+    m.put("/f", b"one")                # create
+    assert p.read_bytes() == b"one"
+    m.put("/f", b"two")                # replace
+    assert p.read_bytes() == b"two"
+    m.put("/f", b"!", append=True)     # append existing
+    assert p.read_bytes() == b"two!"
+    m.put("/g", b"new", append=True)   # append to missing => create
+    assert (m / "g").read_bytes() == b"new"
+
+
 def test_metadata_property(m):
     p = m / "f"
     p.write_bytes(b"")

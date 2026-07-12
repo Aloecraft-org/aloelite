@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Optional
 
+from pydantic import computed_field
+
 from pydantic import BaseModel, ConfigDict
 
 from .types import (
@@ -98,15 +100,31 @@ class DirEntry(_Record):
     type: NodeType
     visible: bool
     edge: EdgeId
+    # The listing context: the container path list() was called with, stamped
+    # by the host at fetch time (NOT a table column — from_row never sets it).
+    # Named current_directory, not path-on-node: placement can change and
+    # NODE-5 allows several names; this is where the entry was SEEN.
+    current_directory: str = "/"
+
+    @computed_field
+    @property
+    def path(self) -> str:
+        """Full path as seen from the listing: current_directory joined with
+        name. Contextual to the fetch, not a stored property of the node."""
+        base = self.current_directory.rstrip("/")
+        return f"{base}/{self.name}"
 
     @classmethod
-    def from_row(cls, r: Mapping[str, Any]) -> "DirEntry":
+    def from_row(
+        cls, r: Mapping[str, Any], current_directory: str = "/"
+    ) -> "DirEntry":
         return cls(
             node=NodeId(r["node_id"]),
             name=r["name"],
             type=NodeType(r["type"]),
             visible=_b(r["visible"]),
             edge=EdgeId(r["edge_id"]),
+            current_directory=current_directory,
         )
 
 

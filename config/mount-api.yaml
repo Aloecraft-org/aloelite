@@ -101,6 +101,7 @@ errors:
   lock_invalid:         "the descriptor's lock has expired or its mount ended (ACC-9)"
   corrupt:              "an invariant the schema cannot enforce was found violated"
   unsupported:          "operation not available in this build/target"
+  container_exists:     "container already exists while attempting to create a new one"
 
 # ----------------------------------------------------------------------------
 # Operations

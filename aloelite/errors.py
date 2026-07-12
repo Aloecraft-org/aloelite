@@ -63,6 +63,12 @@ class VolumeMismatch(FsError):
     code = "volume_mismatch"
 
 
+class ContainerExists(FsError):
+    """a container already exists at the target path (mkdir without exist_ok)"""
+
+    code = "container_exists"
+
+
 class NotEmpty(FsError):
     """container is non-empty; use remove_recursive (caller policy)"""
 
@@ -141,6 +147,7 @@ __all__ = [
     "Nameless",
     "WouldCycle",
     "VolumeMismatch",
+    "ContainerExists",
     "NotEmpty",
     "MountInvalid",
     "MountPointArchived",

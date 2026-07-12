@@ -216,9 +216,12 @@ class Db:
         size = len(data)
         for index, chunk in enumerate(split_chunks(data, self.chunk_size_of(volume))):
             ct, n_c, tag = self.cipher.encrypt_chunk(chunk)
-            # Address over PLAINTEXT (dedup) or over nonce||plaintext (random
-            # mode: the unique nonce makes equal plaintext store distinctly).
-            ch = chunk_hash(chunk) if self.cipher.dedup else chunk_hash(n_c + chunk)
+            # Address over the CIPHERTEXT actually stored, so "same address <=>
+            # same stored bytes" holds even across volumes keyed differently.
+            # Convergent ct is deterministic within a volume (dedup preserved);
+            # random mode and foreign keys produce distinct ct, hence distinct
+            # addresses, so no cross-volume aliasing.
+            ch = chunk_hash(ct)
             self.run(
                 "mutation.upsert_chunk",
                 {"hash": ch, "data": ct, "length": len(chunk), "n_c": n_c, "tag": tag},
@@ -238,7 +241,8 @@ class Db:
         file size.
         """
         ct, n_c, tag = self.cipher.encrypt_chunk(data)
-        ch = chunk_hash(data) if self.cipher.dedup else chunk_hash(n_c + data)
+        # Address over the ciphertext actually stored (see stage_chunks).
+        ch = chunk_hash(ct)
         self.run(
             "mutation.upsert_chunk",
             {"hash": ch, "data": ct, "length": len(data), "n_c": n_c, "tag": tag},

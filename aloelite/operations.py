@@ -51,7 +51,7 @@ from .models import (
     PruneReport,
     VolumeInfo,
 )
-from .resolve import resolve, resolve_parent
+from .resolve import resolve, resolve_parent, split_path
 from .types import (
     FdId,
     LockId,
@@ -416,8 +416,10 @@ def list(db: Db, mount: MountId, path: str = "/") -> "builtins.list[DirEntry]":
     found = resolve(db, m.mount_point, path)
     if found.type is not NodeType.CONTAINER:
         raise NotAContainer(node=found.node)
+    # Stamp the normalized listing path as each entry's fetch context.
+    cwd = "/" + "/".join(split_path(path))
     return [
-        DirEntry.from_row(r)
+        DirEntry.from_row(r, current_directory=cwd)
         for r in db.all("resolution.list_children", {"container": found.node})
     ]
 

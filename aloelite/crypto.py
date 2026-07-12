@@ -38,8 +38,12 @@ keeps working:
     N_c     = SHA256(b"aloelite-nc" || len(pt) || pt)[:12]   # convergent
     (xC, tag) = ChaCha20Poly1305(K_chunk).encrypt(N_c, pt)
 
-chunk_hash stays computed over PLAINTEXT, so equal plaintext dedups; convergent
-N_c makes the ciphertext equal too, so the pool actually collapses duplicates.
+chunk_hash is computed over the CIPHERTEXT actually stored, so the pool's
+content-address invariant (same address <=> same stored bytes) holds even when
+two volumes in one file use different keys. Convergent N_c keeps ciphertext
+deterministic within a volume, so equal plaintext still collapses to one pool
+row; a different volume key (or random mode) yields different ciphertext and a
+distinct address, so nothing cross-volume ever aliases.
 """
 
 from __future__ import annotations

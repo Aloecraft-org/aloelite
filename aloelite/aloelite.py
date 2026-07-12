@@ -31,6 +31,7 @@ import builtins
 from pathlib import Path as _FsPath
 from typing import Iterator
 
+from . import errors
 from . import operations as ops
 from .db import Db
 from .descriptor import Descriptor
@@ -92,8 +93,20 @@ class Aloelite:
         pin: bytes | None = None,
         *,
         enc_mode: str = "convergent",
+        ensure_unique: bool = False,
     ) -> VolumeInfo:
+        """Create a volume. ensure_unique=True raises if a volume with this
+        name already exists (library-level check, not a schema constraint)."""
+        if ensure_unique and name is not None:
+            if self.resolve_volume_name(name) is not None:
+                raise errors.FsError(f"a volume named {name!r} already exists")
         return ops.create_volume(self._db, name, chunk_size, pin, enc_mode=enc_mode)
+
+    def resolve_volume_name(self, name: str) -> VolumeId | None:
+        """VolumeId for `name`, or None. On duplicates the greatest (latest)
+        id wins — mirroring NODE-5's greatest-uuid7-is-visible convention."""
+        ids = [v.id for v in ops.list_volumes(self._db) if v.name == name]
+        return max(ids) if ids else None
 
     def list_volumes(self) -> builtins.list[VolumeInfo]:
         return ops.list_volumes(self._db)
@@ -101,12 +114,35 @@ class Aloelite:
     # -- mounts --------------------------------------------------------------
     def mount(
         self,
-        volume: VolumeId,
+        volume: VolumeId | str,
         at: str = "/",
         ttl_ms: int | None = None,
         pin: bytes | None = None,
+        create: bool = False,
     ) -> "Mount":
-        mid = ops.mount(self._db, volume, at, ttl_ms, pin)
+        """Open a mount on a volume, addressed by id or by name.
+
+        `volume` is resolved name-first (greatest id wins on duplicates), then
+        treated as a VolumeId. Only when BOTH miss does `create` apply:
+        create=True bootstraps a uniquely-named volume (encrypted iff `pin` is
+        given) and mounts it; create=False raises NotFound. Explicit code
+        should manage volumes via create_volume/list_volumes and pass ids.
+        """
+        resolved = self.resolve_volume_name(str(volume))
+        if resolved is None:
+            row = self._db.one("resolution.get_volume", {"volume": volume})
+            if row is not None:
+                resolved = volume
+            elif create:
+                resolved = self.create_volume(
+                    str(volume), pin=pin, ensure_unique=True
+                ).id
+            else:
+                raise errors.NotFound(
+                    f"no volume named or identified by {volume!r} "
+                    "(pass create=True to bootstrap one)"
+                )
+        mid = ops.mount(self._db, resolved, at, ttl_ms, pin)
         sess = self._db.active_session
         token = sess["token"] if sess and sess.get("mount_id") == mid else None
         return Mount(self._db, mid, token=token)
@@ -198,11 +234,50 @@ class Mount:
         return ops.path_of(self._db, self.id, node)
 
     # -- structural ----------------------------------------------------------
+    def mkdir(
+        self, path: str, *, parents: bool = False, exist_ok: bool = False
+    ) -> NodeId:
+        """Create a container. parents=True creates missing intermediates
+        (mkdir -p is parents=True, exist_ok=True). If a visible node already
+        exists at path: exist_ok=True returns its id when it is a container
+        (never minting a hidden duplicate sibling); otherwise ContainerExists.
+        create_container remains the strict primitive."""
+        try:
+            found = ops.resolve(
+                self._db, ops._require_mount(self._db, self.id).mount_point, path
+            )
+        except (errors.NotFound, errors.NotAContainer):
+            found = None
+        if found is not None:
+            if exist_ok and found.type.value == "container":
+                return found.node
+            raise errors.ContainerExists(path=path)
+        if parents:
+            segs = [s for s in str(path).split("/") if s]
+            for i in range(1, len(segs)):
+                parent = "/" + "/".join(segs[:i])
+                if not ops.exists(self._db, self.id, parent):
+                    ops.create_container(self._db, self.id, parent)
+        return ops.create_container(self._db, self.id, path)
+
     def create_container(self, path: str) -> NodeId:
         return ops.create_container(self._db, self.id, path)
 
     def create_entry(self, path: str, data: bytes | None = None) -> NodeId:
         return ops.create_entry(self._db, self.id, path, data)
+
+    def put(self, path: str, data: bytes, *, append: bool = False) -> None:
+        """Write bytes, doing the right thing: append if asked, replace if the
+        entry exists, create it otherwise. Each branch is one atomic op."""
+        if append:
+            if not ops.exists(self._db, self.id, path):
+                ops.create_entry(self._db, self.id, path, data)
+            else:
+                ops.append(self._db, self.id, path, data)
+        elif ops.exists(self._db, self.id, path):
+            ops.write_all(self._db, self.id, path, data)
+        else:
+            ops.create_entry(self._db, self.id, path, data)
 
     def write_all(self, path: str, data: bytes) -> None:
         ops.write_all(self._db, self.id, path, data)

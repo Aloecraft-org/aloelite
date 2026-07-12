@@ -40,7 +40,7 @@ This document specifies the design of a portable filesystem implemented on top o
 
 The motivation for building on SQLite is portability and reach. A filesystem expressed as a SQLite database is a single, self-describing file that can be opened, moved, and inspected anywhere SQLite runs, which is nearly everywhere, and it inherits decades of work on storage layout and transactional integrity for free. The cost of that choice is that the filesystem's structure must be expressed relationally; the contribution of this design is a set of primitives that do so cleanly while keeping future capabilities reachable rather than precluded.
 
-The model separates four concerns that filesystems often conflate. A *node* is an identity: a file (Entry) or a directory (Container), bearing a stable time-ordered identifier and its own name. An *edge* is a placement: a directed, immutable relationship that situates a node beneath a container within a particular volume. A *volume* is an origin: the root to which a coherent tree of placements ultimately refers. A *mount* is an access context: a live, volume-bound session, anchored at a node, through which operation on the filesystem is brokered. Holding these four apart is what gives the design its flexibility. Because a node's name and existence are independent of where it sits, the same node can in principle be reachable from more than one place, which is the seam through which links, mounts, and an eventual graph layout enter without disturbing the core. Because placement lives in immutable edges, every structural change is expressed as the creation of a new edge rather than the mutation of an existing one, which keeps the history of where things have been available and gives later features (e.g. ordering, verification, recovery) a stable substrate to build on. Because origins are modeled explicitly rather than inferred, the boundary of a volume is a real, referenceable thing rather than a convention. And because access is brokered through mounts rather than ambient, the system has a concrete answer to a question filesystems usually answer with the operating system: who holds a handle, who holds a lock, and what to reclaim when a session ends.
+The model separates four concerns that filesystems often conflate. A *node* is an identity: a file (Entry) or a directory (Container), bearing a stable time-ordered identifier and its own name. An *edge* is a placement: a directed, immutable relationship that situates a node beneath a container within a particular volume. A *volume* is an origin: the root to which a coherent tree of placements ultimately refers. A *mount* is an access context: a durable, volume-bound access point, anchored at an explicit node, through which operation on the filesystem is brokered. Holding these four apart is what gives the design its flexibility. Because a node's name and existence are independent of where it sits, the same node can in principle be reachable from more than one place, which is the seam through which links, mounts, and an eventual graph layout enter without disturbing the core. Because placement lives in immutable edges, every structural change is expressed as the creation of a new edge rather than the mutation of an existing one, which keeps the history of where things have been available and gives later features (e.g. ordering, verification, recovery) a stable substrate to build on. Because origins are modeled explicitly rather than inferred, the boundary of a volume is a real, referenceable thing rather than a convention. And because access is brokered through mounts rather than ambient, the system has a concrete answer to a question filesystems usually answer with the operating system: who holds a handle, who holds a lock, and what to reclaim when a session ends.
 
 File contents are held apart from node metadata, so that traversing and resolving the namespace touches only small, frequently-accessed rows and never drags large payloads along. Reading and writing a whole file is an atomic operation in the ordinary case, with a streaming, descriptor-like access path for large or incremental I/O. That access path is mediated by mounts: because the filesystem has no native notion of a process, a mount stands in as the session identity that holds open handles and locks, and locks are scoped to the mount that acquired them, so that ending a session has a well-defined effect on everything it held. This advisory locking coexists with rather than commandeers SQLite's own transactional concurrency. Archival packs a subtree into a portable serialized form within the safety of a single transaction, so that the act of consolidating data cannot lose it. And the design reserves room for cryptographic verification of modification (e.g. a Merkle structure over the tree) by ensuring that mutations flow through a single, well-defined path where such bookkeeping can later be attached. None of these later-stage capabilities is fully realized in the first iteration; the purpose of the model described here is to make each of them an addition rather than a redesign.
 
@@ -70,9 +70,19 @@ from aloelite.aloelite import Aloelite
 from aloelite.types import WriteMode, Whence
 
 with Aloelite("photos.sqlite") as fs:
-    vol = fs.create_volume("photos")
+    # Mount by name; create=True bootstraps the volume on first run.
+    # (Volumes can also be managed explicitly: create_volume / list_volumes /
+    #  resolve_volume_name, then mount by id.)
+    with fs.mount("photos", create=True) as m:
+        m.put("/hello.txt", b"hi")          # create-or-replace, one atomic op
+        m.put("/hello.txt", b"hi again")    # replace
+        m.put("/log.txt", b"x\n", append=True)  # append (creates if missing)
 
-    with fs.mount(vol.id) as m:
+        m.mkdir("/2024/trip", parents=True, exist_ok=True)  # mkdir -p
+
+        for e in m.list("/"):
+            print(e.path)                   # full path, stamped at fetch time
+
         m.create_container("/2024")
         m.set_metadata("/2024", {"year": "2024", "album": "trip"})
         m.create_entry("/2024/caption.txt", b"a sunset")
@@ -103,18 +113,22 @@ with Aloelite("photos.sqlite") as fs:
 PIN = b"correct-horse-battery-staple"
 
 with Aloelite("vault.sqlite") as fs:
-    vol = fs.create_volume("vault", pin=PIN)   # Argon2id key derivation, ChaCha20-Poly1305
-
-    with fs.mount(vol.id, pin=PIN) as m:
+    # create=True with a pin creates the volume encrypted; encryption is
+    # decided once, at creation (Argon2id key derivation, ChaCha20-Poly1305).
+    with fs.mount("vault", pin=PIN, create=True) as m:
         m.create_entry("/secret.txt", b"eyes only")
         print(m.read_all("/secret.txt"))   # -> b"eyes only"
 
     # Wrong PIN is rejected at mount time (not at read time)
     from aloelite import errors
     try:
-        fs.mount(vol.id, pin=b"wrong")
+        fs.mount("vault", pin=b"wrong")
     except errors.BadKey:
         print("wrong PIN rejected ✓")
+
+    # Durable mounts (records, not sessions) are listable and re-attachable:
+    for info in fs.list_mounts():
+        print(info.id, info.mount_path, info.state.value)
 ```
 
 Encryption is invisible at the `Mount` API level. Use `enc_mode="random"` to trade chunk deduplication for zero equality leakage.
@@ -206,6 +220,7 @@ docker run -d --privileged \
 | `POST` | `/volumes/<id>/mount` | Mount a volume |
 | `DELETE` | `/volumes/<id>/mount` | Unmount a volume |
 | `GET` | `/volumes/<id>/mount` | Mount status |
+| `GET` | `/volumes/<id>/mounts` | List durable engine mounts in the volume file (`?all=1` includes retired) |
 | `GET` | `/volumes/<id>/stat` | Backing file metadata (size, mtime) |
 | `GET` | `/volumes/<id>/export` | Checkpoint + stream the SQLite file |
 | `POST` | `/volumes/<id>/checkpoint` | Run `WAL_CHECKPOINT(TRUNCATE)` |
@@ -245,7 +260,7 @@ curl -s -X POST http://localhost:8080/volumes \
 
 The export endpoint runs `WAL_CHECKPOINT(TRUNCATE)` before streaming, producing a complete self-contained SQLite file with no accompanying WAL. The volume does not need to be unmounted to export — SQLite's read consistency guarantees a coherent snapshot regardless of active writes.
 
-The admin panel at `/admin` includes a per-volume **file explorer** for any mounted volume: browse with breadcrumbs, upload, download, create folders, and delete. The file endpoints operate through the live FUSE mountpoint, so they work identically for plain and encrypted volumes (the mount session already holds the key).
+The admin panel at `/admin` includes a per-volume **file explorer** for any mounted volume: browse with breadcrumbs, upload, download, create folders, and delete. Each volume card also has a **Mounts** button listing the durable engine mounts inside the backing file (label, path, state), independent of any live FUSE session. The file endpoints operate through the live FUSE mountpoint, so they work identically for plain and encrypted volumes (the mount session already holds the key).
 
 ### Backup sync pattern
 
