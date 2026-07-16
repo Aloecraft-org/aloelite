@@ -75,7 +75,7 @@ class _RwHandle:
         merged: list[tuple[int, bytearray]] = []
         for lo, b in self.extents:
             hi = lo + len(b)
-            if hi < new_lo or lo > new_hi:        # disjoint
+            if hi < new_lo or lo > new_hi:  # disjoint
                 merged.append((lo, b))
                 continue
             # overlap/adjacent: fold the old extent around the new bytes
@@ -106,7 +106,7 @@ class _RwHandle:
                 r.seek(off, Whence.SET)
                 got = r.read(max(0, min(end, committed) - off))
             base[: len(got)] = got
-        for elo, b in self.extents:               # overlay dirty extents
+        for elo, b in self.extents:  # overlay dirty extents
             ehi = elo + len(b)
             if ehi <= off or elo >= end:
                 continue
@@ -115,7 +115,7 @@ class _RwHandle:
         return bytes(base)
 
     def truncate(self, new_size: int) -> None:
-        self.flush()                              # simple + always correct
+        self.flush()  # simple + always correct
         self.m.truncate(self.path, new_size)
         self.size = new_size
 
@@ -233,8 +233,11 @@ class AloeFuse(pyfuse3.Operations):
     async def getattr(self, inode, ctx=None):
         try:
             a = self._attr(inode, self.m.stat_by_id(self._n[inode]))
-            extra = sum(len(h["buf"]) for h in self._open.values()
-                        if h.get("mode") == "a" and h.get("inode") == inode)
+            extra = sum(
+                len(h["buf"])
+                for h in self._open.values()
+                if h.get("mode") == "a" and h.get("inode") == inode
+            )
             if extra:
                 a.st_size += extra
                 a.st_blocks = (a.st_size + 511) // 512
@@ -295,8 +298,12 @@ class AloeFuse(pyfuse3.Operations):
             ino = self._register(node)
             fh = self._next_fh()
             if flags & os.O_APPEND:
-                self._open[fh] = {"mode": "a", "path": path,
-                                  "buf": bytearray(), "inode": ino}
+                self._open[fh] = {
+                    "mode": "a",
+                    "path": path,
+                    "buf": bytearray(),
+                    "inode": ino,
+                }
             else:
                 writer = self.m.open_write(path, WriteMode.TRUNCATE)
                 self._open[fh] = {"mode": "w", "path": path, "w": writer, "pos": 0}
@@ -338,7 +345,10 @@ class AloeFuse(pyfuse3.Operations):
         # O_RDWR / partial-overwrite path. Kept for one release; then remove
         # along with the "buf" branches in read/write/setattr/flush/release.
         import warnings
-        warnings.warn("_open_buffered is deprecated (rw-handle path)", DeprecationWarning)
+
+        warnings.warn(
+            "_open_buffered is deprecated (rw-handle path)", DeprecationWarning
+        )
         data = b"" if truncate else self.m.read_all(path)
         self._open[fh] = {
             "mode": "buf",
@@ -367,8 +377,12 @@ class AloeFuse(pyfuse3.Operations):
                 self._open[fh] = {"mode": "w", "path": path, "w": writer, "pos": 0}
             elif acc == os.O_WRONLY and (flags & os.O_APPEND):
                 fh = self._next_fh()
-                self._open[fh] = {"mode": "a", "path": path,
-                                  "buf": bytearray(), "inode": inode}
+                self._open[fh] = {
+                    "mode": "a",
+                    "path": path,
+                    "buf": bytearray(),
+                    "inode": inode,
+                }
             else:
                 # O_RDWR, or plain O_WRONLY (partial overwrite): dirty-extent
                 # handle over write_range (bounded memory; no whole-file buffer)
@@ -522,8 +536,12 @@ class AloeFuse(pyfuse3.Operations):
 # per-method decorators) so a newly added handler can't be forgotten.
 for _name in dir(AloeFuse):
     _fn = getattr(AloeFuse, _name)
-    if not _name.startswith("_") and callable(_fn) and hasattr(_fn, "__code__") \
-            and _fn.__code__.co_flags & 0x80:  # CO_COROUTINE
+    if (
+        not _name.startswith("_")
+        and callable(_fn)
+        and hasattr(_fn, "__code__")
+        and _fn.__code__.co_flags & 0x80
+    ):  # CO_COROUTINE
         setattr(AloeFuse, _name, _never_die(_fn))
 del _name, _fn
 

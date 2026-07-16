@@ -60,11 +60,13 @@ def test_encrypted_pin_env(fsfile, tmp_path, monkeypatch):
 
 
 def test_volumes_and_mounts(fsfile, capsys):
-    assert run("-f", fsfile, "ls") == 0          # mints a mount row
+    assert run("-f", fsfile, "ls") == 0  # mints a mount row
     assert run("-f", fsfile, "volumes") == 0
     assert "vol" in capsys.readouterr().out
     assert run("-f", fsfile, "mounts", "--all") == 0
     assert "unmounted" in capsys.readouterr().out  # session-per-invocation retired it
+
+
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

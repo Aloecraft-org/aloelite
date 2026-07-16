@@ -17,7 +17,9 @@ class PinError(Exception):
     """A PIN source was specified but could not be read."""
 
 
-def read_pin(pin: str | None, pin_file: str | None, pin_env: str | None) -> bytes | None:
+def read_pin(
+    pin: str | None, pin_file: str | None, pin_env: str | None
+) -> bytes | None:
     """Resolve a PIN from the three standard flags, in precedence order.
     Returns None if none were given."""
     if pin is not None:
@@ -40,12 +42,17 @@ def add_pin_arguments(parser) -> None:
     """Attach the standard --pin/--pin-file/--pin-env group to an argparse
     parser (same flags and semantics across all front-ends)."""
     grp = parser.add_argument_group("encryption")
-    grp.add_argument("--pin", metavar="SECRET",
-                     help="PIN (plaintext; prefer --pin-file or --pin-env)")
-    grp.add_argument("--pin-file", metavar="PATH",
-                     help="file whose contents are the PIN")
-    grp.add_argument("--pin-env", metavar="VAR",
-                     help="environment variable holding the PIN")
+    grp.add_argument(
+        "--pin",
+        metavar="SECRET",
+        help="PIN (plaintext; prefer --pin-file or --pin-env)",
+    )
+    grp.add_argument(
+        "--pin-file", metavar="PATH", help="file whose contents are the PIN"
+    )
+    grp.add_argument(
+        "--pin-env", metavar="VAR", help="environment variable holding the PIN"
+    )
 
 
 __all__ = ["read_pin", "add_pin_arguments", "PinError"]

@@ -115,9 +115,7 @@ class DirEntry(_Record):
         return f"{base}/{self.name}"
 
     @classmethod
-    def from_row(
-        cls, r: Mapping[str, Any], current_directory: str = "/"
-    ) -> "DirEntry":
+    def from_row(cls, r: Mapping[str, Any], current_directory: str = "/") -> "DirEntry":
         return cls(
             node=NodeId(r["node_id"]),
             name=r["name"],

@@ -221,8 +221,8 @@ def test_cross_volume_same_plaintext_no_alias():
         ops.unmount(db, ma)
 
         mb = ops.mount(db, vb.id, "/", pin=PIN)
-        ops.create_entry(db, mb, "/f", payload)   # same plaintext, different key
-        assert ops.read_all(db, mb, "/f") == payload   # InvalidTag before the fix
+        ops.create_entry(db, mb, "/f", payload)  # same plaintext, different key
+        assert ops.read_all(db, mb, "/f") == payload  # InvalidTag before the fix
         ops.unmount(db, mb)
 
         # volume a still reads correctly afterward
@@ -279,6 +279,8 @@ def test_persisted_encrypted_volume_reopens(tmp_path):
             ops.mount(db2, vid, "/", pin=PIN2)
     finally:
         db2.close()
+
+
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

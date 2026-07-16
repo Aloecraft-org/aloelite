@@ -166,8 +166,12 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="aloelite", description="Operate on an Aloelite filesystem file."
     )
     ap.add_argument("-f", "--file", required=True, help="path to the .sqlite/.fs file")
-    ap.add_argument("-v", "--volume", metavar="NAME_OR_ID",
-                    help="volume name or id (optional if the file has exactly one)")
+    ap.add_argument(
+        "-v",
+        "--volume",
+        metavar="NAME_OR_ID",
+        help="volume name or id (optional if the file has exactly one)",
+    )
     add_pin_arguments(ap)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -176,23 +180,30 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("-l", "--long", action="store_true", help="show type and size")
 
     p = sub.add_parser("put", help="write a local file (or '-' = stdin) to a path")
-    p.add_argument("src"); p.add_argument("dst")
+    p.add_argument("src")
+    p.add_argument("dst")
     p.add_argument("--append", action="store_true")
 
     p = sub.add_parser("get", help="read a path to a local file (or '-' = stdout)")
-    p.add_argument("src"); p.add_argument("dst", nargs="?")
+    p.add_argument("src")
+    p.add_argument("dst", nargs="?")
 
     p = sub.add_parser("mkdir", help="create a container")
     p.add_argument("path")
-    p.add_argument("-p", "--parents", action="store_true",
-                   help="create parents; no error if it exists (mkdir -p)")
+    p.add_argument(
+        "-p",
+        "--parents",
+        action="store_true",
+        help="create parents; no error if it exists (mkdir -p)",
+    )
 
     p = sub.add_parser("rm", help="remove an entry or empty container")
     p.add_argument("path")
     p.add_argument("-r", "--recursive", action="store_true")
 
     p = sub.add_parser("mv", help="move/rename")
-    p.add_argument("src"); p.add_argument("dst")
+    p.add_argument("src")
+    p.add_argument("dst")
 
     p = sub.add_parser("volumes", help="list volumes in the file")
 
@@ -202,8 +213,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-_MOUNT_VERBS = {"ls": _cmd_ls, "put": _cmd_put, "get": _cmd_get,
-                "mkdir": _cmd_mkdir, "rm": _cmd_rm, "mv": _cmd_mv}
+_MOUNT_VERBS = {
+    "ls": _cmd_ls,
+    "put": _cmd_put,
+    "get": _cmd_get,
+    "mkdir": _cmd_mkdir,
+    "rm": _cmd_rm,
+    "mv": _cmd_mv,
+}
 _FS_VERBS = {"volumes": _cmd_volumes, "mounts": _cmd_mounts}
 
 

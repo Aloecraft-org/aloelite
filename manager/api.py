@@ -174,7 +174,9 @@ def create_app(
         rec.mounted = True
         rec.mountpoint = mountpoint
         store.put(rec)
-        return jsonify(id=vid, mountpoint=mountpoint, host_path=_host_path(mount_name)), 200
+        return jsonify(
+            id=vid, mountpoint=mountpoint, host_path=_host_path(mount_name)
+        ), 200
 
     # -- DELETE /volumes/<id>/mount ----------------------------------------
     @app.delete("/volumes/<vid>/mount")
@@ -403,7 +405,7 @@ def create_app(
         if os.path.exists(p):
             return jsonify(error="already exists"), 409
         os.makedirs(p)
-        return jsonify(path=p[len(root):] or "/"), 201
+        return jsonify(path=p[len(root) :] or "/"), 201
 
     @app.delete("/volumes/<vid>/files")
     def delete_files(vid):

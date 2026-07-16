@@ -516,9 +516,14 @@ def test_shared_chunk_immutability(db, chunky):
 
 
 def _hashes(db, nid, version):
-    return [r[0] for r in db.connection.execute(
-        "SELECT chunk_hash FROM content_version WHERE content_id=? AND version=? "
-        "ORDER BY chunk_index", (nid, version)).fetchall()]
+    return [
+        r[0]
+        for r in db.connection.execute(
+            "SELECT chunk_hash FROM content_version WHERE content_id=? AND version=? "
+            "ORDER BY chunk_index",
+            (nid, version),
+        ).fetchall()
+    ]
 
 
 def test_write_range_midfile_carries_prefix_and_suffix(db, chunky):
@@ -532,8 +537,8 @@ def test_write_range_midfile_carries_prefix_and_suffix(db, chunky):
     v2 = _committed(db, nid)
     h1, h2 = _hashes(db, nid, v1), _hashes(db, nid, v2)
     assert h2[0] == h1[0] and h2[2:] == h1[2:]  # prefix + suffix by reference
-    assert h2[1] != h1[1]                        # only the window re-chunked
-    assert _pool_count(db) == pool_before + 1    # one new pool row
+    assert h2[1] != h1[1]  # only the window re-chunked
+    assert _pool_count(db) == pool_before + 1  # one new pool row
 
 
 def test_write_range_cross_boundary_and_extend(db, chunky):
@@ -549,7 +554,11 @@ def test_write_range_gap_zero_fills_and_rebuilds_short_tail(db, chunky):
     assert ops.write_range(db, chunky, "/f", 10, b"ZZ") == 12
     assert ops.read_all(db, chunky, "/f") == b"aaaabb\x00\x00\x00\x00ZZ"
     nid = _nid(db, chunky, "/f")
-    assert _chunk_lengths(db, nid) == [4, 4, 4]  # short tail rebuilt, no mid-file short chunk
+    assert _chunk_lengths(db, nid) == [
+        4,
+        4,
+        4,
+    ]  # short tail rebuilt, no mid-file short chunk
 
 
 def test_write_range_empty_and_lock(db, chunky):
@@ -567,6 +576,7 @@ def test_write_range_interleaved_random(db, chunky):
     # the rw-handle pattern: many small writes at scattered offsets, each an
     # atomic version, must converge to the byte-identical file
     import random
+
     rng = random.Random(7)
     ref = bytearray(64)
     ops.create_entry(db, chunky, "/f", bytes(ref))
@@ -585,12 +595,12 @@ def test_truncate(db, chunky):
     ops.create_entry(db, chunky, "/f", b"aaaabbbbcc")
     nid = _nid(db, chunky, "/f")
     v1 = _committed(db, nid)
-    ops.truncate(db, chunky, "/f", 6)                      # shrink into chunk 1
+    ops.truncate(db, chunky, "/f", 6)  # shrink into chunk 1
     assert ops.read_all(db, chunky, "/f") == b"aaaabb"
     assert _hashes(db, nid, _committed(db, nid))[0] == _hashes(db, nid, v1)[0]
-    ops.truncate(db, chunky, "/f", 9)                      # grow, zero-fill
+    ops.truncate(db, chunky, "/f", 9)  # grow, zero-fill
     assert ops.read_all(db, chunky, "/f") == b"aaaabb\x00\x00\x00"
-    ops.truncate(db, chunky, "/f", 0)                      # to empty
+    ops.truncate(db, chunky, "/f", 0)  # to empty
     assert ops.read_all(db, chunky, "/f") == b""
     assert ops.stat(db, chunky, "/f").size == 0
 
@@ -845,6 +855,8 @@ def test_orphan_collected_after_lock_gone(db, streamvol):
         == 0
     )
     assert ops.read_all(db, streamvol, "/f") == b"good"
+
+
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

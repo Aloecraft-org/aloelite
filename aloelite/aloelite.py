@@ -160,9 +160,7 @@ class Aloelite:
     ) -> builtins.list[MountInfo]:
         """Durable mounts on this filesystem (records, not live handles).
         Re-attach to one with attach(info.id)."""
-        return ops.list_mounts(
-            self._db, volume, include_unmounted=include_unmounted
-        )
+        return ops.list_mounts(self._db, volume, include_unmounted=include_unmounted)
 
     # -- maintenance ---------------------------------------------------------
     def prune(self, volume: VolumeId | None = None) -> PruneReport:
@@ -281,7 +279,7 @@ class Mount:
 
     def write_all(self, path: str, data: bytes) -> None:
         ops.write_all(self._db, self.id, path, data)
-        
+
     def write_range(self, path: str, offset: int, data: bytes) -> int:
         """Atomic in-place overwrite at offset (extends + zero-fills past
         EOF); untouched chunks are carried by reference. Returns new size."""

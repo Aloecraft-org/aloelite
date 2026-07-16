@@ -35,9 +35,9 @@ def test_path_algebra(m):
 
 def test_write_read_roundtrip(m):
     p = m / "notes.txt"
-    p.write_text("héllo")            # creates the entry
+    p.write_text("héllo")  # creates the entry
     assert p.read_text() == "héllo"
-    p.write_bytes(b"raw")            # atomic replace of an existing entry
+    p.write_bytes(b"raw")  # atomic replace of an existing entry
     assert p.read_bytes() == b"raw"
     assert p.exists() and p.is_file() and not p.is_dir()
 
@@ -48,7 +48,7 @@ def test_mkdir_parents_and_iterdir(m):
     assert d.is_dir() and (m / "a").is_dir()
     with pytest.raises(FileExistsError):
         d.mkdir()
-    d.mkdir(exist_ok=True)           # no-op
+    d.mkdir(exist_ok=True)  # no-op
     (d / "x").write_bytes(b"1")
     (d / "y").write_bytes(b"2")
     assert {c.name for c in d.iterdir()} == {"x", "y"}
@@ -56,12 +56,12 @@ def test_mkdir_parents_and_iterdir(m):
 
 def test_open_streaming_modes(m):
     p = m / "big"
-    with p.open("wb") as w:          # creates + truncate-writes
+    with p.open("wb") as w:  # creates + truncate-writes
         w.write(b"abc")
         w.write(b"def")
-    with p.open("ab") as w:          # append
+    with p.open("ab") as w:  # append
         w.write(b"!")
-    with p.open("rb") as r:          # ranged read
+    with p.open("rb") as r:  # ranged read
         assert r.read() == b"abcdef!"
     with pytest.raises(ValueError):
         p.open("r+")
@@ -89,7 +89,7 @@ def test_glob_and_rglob(m):
 def test_rename_copy_remove(m):
     p = m / "f"
     p.write_bytes(b"x")
-    q = p.rename("/g")               # returns the new path
+    q = p.rename("/g")  # returns the new path
     assert q.exists() and not p.exists()
     c = q.copy("/h")
     assert c.read_bytes() == b"x" and q.exists()
@@ -107,16 +107,16 @@ def test_rename_copy_remove(m):
 def test_mount_by_name_and_create():
     with Aloelite(":memory:") as fs:
         with pytest.raises(errors.NotFound):
-            fs.mount("nope")                      # double miss, create=False
+            fs.mount("nope")  # double miss, create=False
         with fs.mount("vault", create=True) as m:  # bootstraps + mounts
             m.put("/f", b"x")
         assert fs.resolve_volume_name("vault") is not None
-        with fs.mount("vault") as m:              # resolves by name now
+        with fs.mount("vault") as m:  # resolves by name now
             assert m.read_all("/f") == b"x"
         with pytest.raises(errors.FsError):
             fs.create_volume("vault", ensure_unique=True)
         # duplicate names: latest id wins
-        v2 = fs.create_volume("vault")            # permissive path still allowed
+        v2 = fs.create_volume("vault")  # permissive path still allowed
         assert fs.resolve_volume_name("vault") == v2.id
         # id-fallback: an explicit id still mounts even with names around
         with fs.mount(v2.id) as m:
@@ -127,15 +127,15 @@ def test_mkdir(m):
     m.mkdir("/a")
     with pytest.raises(errors.ContainerExists):
         m.mkdir("/a")
-    assert m.mkdir("/a", exist_ok=True)          # returns existing id, no dup
+    assert m.mkdir("/a", exist_ok=True)  # returns existing id, no dup
     assert [e.name for e in m.list("/")].count("a") == 1
     with pytest.raises(errors.NotFound):
-        m.mkdir("/x/y/z")                        # strict default: no parents
-    m.mkdir("/x/y/z", parents=True, exist_ok=True)   # mkdir -p
+        m.mkdir("/x/y/z")  # strict default: no parents
+    m.mkdir("/x/y/z", parents=True, exist_ok=True)  # mkdir -p
     assert (m / "x" / "y" / "z").is_dir()
     m.put("/f", b"")
     with pytest.raises(errors.ContainerExists):
-        m.mkdir("/f", exist_ok=True)             # entry in the way: still raises
+        m.mkdir("/f", exist_ok=True)  # entry in the way: still raises
 
 
 def test_direntry_path(m):
@@ -146,19 +146,19 @@ def test_direntry_path(m):
     (child,) = m.list("/folder")
     assert child.current_directory == "/folder"
     assert child.path == "/folder/abc.txt"
-    (deep,) = m.list("folder//")                 # normalization
+    (deep,) = m.list("folder//")  # normalization
     assert deep.path == "/folder/abc.txt"
 
 
 def test_put(m):
     p = m / "f"
-    m.put("/f", b"one")                # create
+    m.put("/f", b"one")  # create
     assert p.read_bytes() == b"one"
-    m.put("/f", b"two")                # replace
+    m.put("/f", b"two")  # replace
     assert p.read_bytes() == b"two"
-    m.put("/f", b"!", append=True)     # append existing
+    m.put("/f", b"!", append=True)  # append existing
     assert p.read_bytes() == b"two!"
-    m.put("/g", b"new", append=True)   # append to missing => create
+    m.put("/g", b"new", append=True)  # append to missing => create
     assert (m / "g").read_bytes() == b"new"
 
 
@@ -168,6 +168,8 @@ def test_metadata_property(m):
     assert p.metadata == {}
     p.set_metadata({"author": "mg"})
     assert p.metadata == {"author": "mg"}
+
+
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

@@ -163,7 +163,6 @@ class MountSupervisor:
             time.sleep(self.poll_interval)
         raise MountTimeout(f"mount {mountpoint} not ready within {self.ready_timeout}s")
 
-        
     # -- public API ---------------------------------------------------------
     def mount(self, record: VolumeRecord, pin: bytes | None, mp_path=None) -> str:
         name = mp_path or record.id

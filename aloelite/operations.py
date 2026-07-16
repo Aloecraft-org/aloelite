@@ -298,7 +298,7 @@ def mount(
 
 def unmount(db: Db, mount: MountId) -> None:
     """Mark the mount invalid. Lock reclamation is deferred to prune (ACC-10).
-    Tears down the session cipher: K_v and the sealed mount secret leave memory,    
+    Tears down the session cipher: K_v and the sealed mount secret leave memory,
     so post-unmount operations fall back to the identity (unencrypted) cipher.
     """
     with db.txn():
@@ -495,6 +495,7 @@ def write_all(db: Db, mount: MountId, path: str, data: bytes) -> None:
             {"node": found.node, "version": version, "size": size, "hash": None},
         )
 
+
 def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
     """Atomically append `data` to an entry and return the new size.
 
@@ -524,7 +525,9 @@ def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
         found = resolve(db, m.mount_point, path)
         if found.type is not NodeType.ENTRY:
             raise NotAnEntry(node=found.node)
-        if db.scalar("validation.check_lock_held", {"node": found.node, "mount": mount}):
+        if db.scalar(
+            "validation.check_lock_held", {"node": found.node, "mount": mount}
+        ):
             raise LockHeld(node=found.node)
         cs = db.chunk_size_of(m.volume)
         meta = db.read_content_meta(found.node)
@@ -534,10 +537,16 @@ def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
         partial = size % cs
         # carry the unchanged full leading chunks forward by reference
         if full > 0:
-            db.run("mutation.copy_chunk_refs_range", {
-                "node": found.node, "dst_version": new_version,
-                "src_version": src_version, "lo": 0, "hi": full - 1,
-            })
+            db.run(
+                "mutation.copy_chunk_refs_range",
+                {
+                    "node": found.node,
+                    "dst_version": new_version,
+                    "src_version": src_version,
+                    "lo": 0,
+                    "hi": full - 1,
+                },
+            )
         # rebuild from the old partial tail + new data, re-chunked from index `full`
         tail = b""
         if partial > 0:
@@ -548,10 +557,17 @@ def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
             db.stage_chunk(found.node, new_version, index, chunk)
             index += 1
         new_size = size + len(data)
-        db.rowcount("mutation.update_content", {
-            "node": found.node, "version": new_version, "size": new_size, "hash": None,
-        })
+        db.rowcount(
+            "mutation.update_content",
+            {
+                "node": found.node,
+                "version": new_version,
+                "size": new_size,
+                "hash": None,
+            },
+        )
     return new_size
+
 
 def write_range(db: Db, mount: MountId, path: str, offset: int, data: bytes) -> int:
     """Atomically overwrite bytes [offset, offset+len(data)) of an entry,
@@ -585,7 +601,9 @@ def write_range(db: Db, mount: MountId, path: str, offset: int, data: bytes) -> 
         found = resolve(db, m.mount_point, path)
         if found.type is not NodeType.ENTRY:
             raise NotAnEntry(node=found.node)
-        if db.scalar("validation.check_lock_held", {"node": found.node, "mount": mount}):
+        if db.scalar(
+            "validation.check_lock_held", {"node": found.node, "mount": mount}
+        ):
             raise LockHeld(node=found.node)
         cs = db.chunk_size_of(m.volume)
         meta = db.read_content_meta(found.node)
@@ -602,15 +620,27 @@ def write_range(db: Db, mount: MountId, path: str, offset: int, data: bytes) -> 
         src_last = (size - 1) // cs if size > 0 else -1
 
         if window_lo > 0:
-            db.run("mutation.copy_chunk_refs_range", {
-                "node": found.node, "dst_version": new_version,
-                "src_version": src_version, "lo": 0, "hi": window_lo - 1,
-            })
+            db.run(
+                "mutation.copy_chunk_refs_range",
+                {
+                    "node": found.node,
+                    "dst_version": new_version,
+                    "src_version": src_version,
+                    "lo": 0,
+                    "hi": window_lo - 1,
+                },
+            )
         if src_last > hi:
-            db.run("mutation.copy_chunk_refs_range", {
-                "node": found.node, "dst_version": new_version,
-                "src_version": src_version, "lo": hi + 1, "hi": src_last,
-            })
+            db.run(
+                "mutation.copy_chunk_refs_range",
+                {
+                    "node": found.node,
+                    "dst_version": new_version,
+                    "src_version": src_version,
+                    "lo": hi + 1,
+                    "hi": src_last,
+                },
+            )
 
         base = window_lo * cs
         buf = bytearray()
@@ -625,9 +655,15 @@ def write_range(db: Db, mount: MountId, path: str, offset: int, data: bytes) -> 
         for chunk in split_chunks(bytes(buf), cs):
             db.stage_chunk(found.node, new_version, index, chunk)
             index += 1
-        db.rowcount("mutation.update_content", {
-            "node": found.node, "version": new_version, "size": new_size, "hash": None,
-        })
+        db.rowcount(
+            "mutation.update_content",
+            {
+                "node": found.node,
+                "version": new_version,
+                "size": new_size,
+                "hash": None,
+            },
+        )
     return new_size
 
 
@@ -643,7 +679,9 @@ def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
         found = resolve(db, m.mount_point, path)
         if found.type is not NodeType.ENTRY:
             raise NotAnEntry(node=found.node)
-        if db.scalar("validation.check_lock_held", {"node": found.node, "mount": mount}):
+        if db.scalar(
+            "validation.check_lock_held", {"node": found.node, "mount": mount}
+        ):
             raise LockHeld(node=found.node)
         cs = db.chunk_size_of(m.volume)
         meta = db.read_content_meta(found.node)
@@ -654,10 +692,16 @@ def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
         if size < cur:
             full = size // cs
             if full > 0:
-                db.run("mutation.copy_chunk_refs_range", {
-                    "node": found.node, "dst_version": new_version,
-                    "src_version": src_version, "lo": 0, "hi": full - 1,
-                })
+                db.run(
+                    "mutation.copy_chunk_refs_range",
+                    {
+                        "node": found.node,
+                        "dst_version": new_version,
+                        "src_version": src_version,
+                        "lo": 0,
+                        "hi": full - 1,
+                    },
+                )
             rem = size % cs
             if rem:
                 rows = db.read_chunk_range(found.node, src_version, full, full)
@@ -665,10 +709,16 @@ def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
         else:
             full = cur // cs
             if full > 0:
-                db.run("mutation.copy_chunk_refs_range", {
-                    "node": found.node, "dst_version": new_version,
-                    "src_version": src_version, "lo": 0, "hi": full - 1,
-                })
+                db.run(
+                    "mutation.copy_chunk_refs_range",
+                    {
+                        "node": found.node,
+                        "dst_version": new_version,
+                        "src_version": src_version,
+                        "lo": 0,
+                        "hi": full - 1,
+                    },
+                )
             tail = b""
             if cur % cs:
                 rows = db.read_chunk_range(found.node, src_version, full, full)
@@ -678,9 +728,15 @@ def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
             for chunk in split_chunks(pad, cs):
                 db.stage_chunk(found.node, new_version, index, chunk)
                 index += 1
-        db.rowcount("mutation.update_content", {
-            "node": found.node, "version": new_version, "size": size, "hash": None,
-        })
+        db.rowcount(
+            "mutation.update_content",
+            {
+                "node": found.node,
+                "version": new_version,
+                "size": size,
+                "hash": None,
+            },
+        )
 
 
 def set_mtime(db: Db, mount: MountId, node: NodeId, ts_ms: int) -> None:
@@ -974,9 +1030,7 @@ def open_write(
             # Safe creation within the isolated block (pass the MountId, not
             # the resolved _Mount — _create_entry_internal re-validates it)
             node_id = _create_entry_internal(db, mount, path)
-        if db.scalar(
-            "validation.check_lock_held", {"node": node_id, "mount": mount}
-        ):
+        if db.scalar("validation.check_lock_held", {"node": node_id, "mount": mount}):
             raise LockHeld(node=node_id)
         lock = db.gen_id()
         db.run(
@@ -996,9 +1050,7 @@ def open_write(
             carry_src = src_version
             if size > 0 and size % cs != 0:
                 carry_full = size // cs  # full leading chunks
-                tail = db.read_chunk_range(
-                    node_id, src_version, carry_full, carry_full
-                )
+                tail = db.read_chunk_range(node_id, src_version, carry_full, carry_full)
                 pending = tail[0][1] if tail else b""  # partial last chunk -> rebuild
             else:
                 carry_full = size // cs  # all chunks full (or empty)
