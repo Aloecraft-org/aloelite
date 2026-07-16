@@ -23,14 +23,15 @@ It is designed for situations where you want filesystem semantics (paths, direct
 
 **What it provides:**
 
-- A Python API for creating and navigating volumes, with full streaming read/write support validated against multi-gigabyte files
+- A Python API for creating and navigating volumes, with full streaming read/write support validated against multi-gigabyte files, plus atomic random-access writes (`write_range`/`truncate`) that carry unchanged chunks by reference
+- A CLI (`aloelite`) for scripting any of the above — one session per invocation, stdin/stdout piping, the same PIN flags as FUSE
 - At-rest encryption per volume (ChaCha20-Poly1305, Argon2id key derivation), with the PIN accepted only at mount time and never stored
 - Content deduplication via a chunk pool (identical data stored once across all files in a volume)
 - FUSE integration so any application can use an Aloelite volume as a plain directory, without modification
 - A container-ready volume manager that exposes volumes over HTTP and propagates FUSE mounts to other containers via bind mount. i.e. suitable as a lightweight Docker/Podman volume provisioner
 - Export and checkpoint endpoints that produce clean, self-contained SQLite snapshots while the volume remains mounted, enabling simple backup workflows without coordination
 
-**What it is not:** a general-purpose network filesystem, a database replacement, or a POSIX-complete block device. Random-access rewrites on large files fall back to a buffered path. Node metadata (paths, timestamps, directory structure) is stored in plaintext even on encrypted volumes. (see [Security Notes](#security-notes))
+**What it is not:** a general-purpose network filesystem, a database replacement, or a POSIX-complete block device (yet — see the roadmap; symlinks, byte-range locks, and mmap are not implemented). Node metadata (paths, timestamps, directory structure) is stored in plaintext even on encrypted volumes. (see [Security Notes](#security-notes))
 
 ## Abstract
 
@@ -46,11 +47,22 @@ File contents are held apart from node metadata, so that traversing and resolvin
 
 **Implementation Status**
 
-The core model (i.e. nodes, edges, volumes, and mounts) is fully realized, including path resolution, structural operations (create, move, rename, copy, remove, pack/unpack), advisory locking, and mount-scoped session management. File content is stored in a content-addressed chunk pool with deduplication, per-version manifests, configurable retention, and bounded-memory streaming I/O for both reads and writes; the streaming descriptor is production-validated against files in the tens of gigabytes. At-rest encryption is implemented at the storage boundary (ChaCha20-Poly1305, Argon2id key derivation, per-volume wrapped key), with convergent-nonce and random-nonce modes and a FUSE front-end that accepts a PIN at mount time. A container manager (`manager/`) exposes volumes as FUSE-mounted directories over a nine-endpoint HTTP API, suitable for use as a Docker/Podman volume provisioner. Reserved but not yet realized: cryptographic verification of the node tree (Merkle structure over content and placement), content-defined chunking, key rotation, graph-shaped namespaces beyond the default hierarchical tree, and node metadata encryption (currently plaintext in the SQLite schema. (see [Security Notes](#security-notes)))
+The core model (i.e. nodes, edges, volumes, and mounts) is fully realized, including path resolution, structural operations (create, move, rename, copy, remove, pack/unpack), advisory locking, and mount-scoped session management. File content is stored in a content-addressed chunk pool with deduplication, per-version manifests, configurable retention, and bounded-memory streaming I/O for both reads and writes; the streaming descriptor is production-validated against files in the tens of gigabytes. At-rest encryption is implemented at the storage boundary (ChaCha20-Poly1305, Argon2id key derivation, per-volume wrapped key), with convergent-nonce and random-nonce modes and a FUSE front-end that accepts a PIN at mount time. Random-access writes are first-class engine operations (`write_range`, `truncate`): unchanged chunks are carried into the new version by reference and only the touched window is re-chunked, so partial overwrites of large files are cheap and bounded-memory. The FUSE front-end serves O_RDWR access through a dirty-extent handle over these primitives (memory bounded by dirty bytes, flushed atomically on fsync/release), honors utimens, and hardens every handler so an unexpected error returns EIO instead of detaching the mount. A CLI (`aloelite`) covers the library verbs for scripting. A container manager (`manager/`) exposes volumes as FUSE-mounted directories over an HTTP API, suitable for use as a Docker/Podman volume provisioner. 
+
+Reserved but not yet realized:
+- cryptographic verification of the node tree (Merkle structure over content and placement)
+- content-defined chunking
+- key rotation
+- graph-shaped namespaces beyond the default hierarchical tree
+- and node metadata encryption (currently plaintext in the SQLite schema. (see [Security Notes](#security-notes)))
 
 ---
 
 ## Getting Started
+
+New here? **[GETTING_STARTED.md](GETTING_STARTED.md)** is the friendly
+tour, organized by use case (Python / CLI / FUSE / Docker). See also
+**[FAQ.md](FAQ.md)** and **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
 
 ```
 pip install aloelite
@@ -97,6 +109,9 @@ with Aloelite("photos.sqlite") as fs:
             head = r.read(5)
             r.seek(-5, Whence.END)
             tail = r.read()
+
+        m.write_range("/note.txt", 6, b"WORLD")  # atomic in-place overwrite
+        m.truncate("/note.txt", 5)               # -> b"hello"
 
         m.rename("/note.txt", "readme.txt")
         m.move("/readme.txt", "/2024/readme.txt")
@@ -209,7 +224,7 @@ aloelite-fuse vault.sqlite vault /mnt/vault --pin-env VAULT_PIN
 fusermount3 -u /mnt/photos
 ```
 
-The FUSE driver uses bounded-memory streaming I/O for both reads and writes — a 15 GB copy does not buffer in RAM. Sequential writes flush one chunk at a time; non-sequential access on large files falls back to a buffered path.
+The FUSE driver uses bounded-memory I/O throughout — a 15 GB copy does not buffer in RAM. Sequential writes stream one chunk at a time; random access (O_RDWR, partial overwrites, truncation) buffers only the dirty byte ranges and commits them as atomic in-place writes on fsync/release. Handlers are hardened: an unexpected error returns EIO to the caller rather than detaching the mount.
 
 ---
 
