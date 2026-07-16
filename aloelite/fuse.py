@@ -1,6 +1,6 @@
+#!/usr/bin/env python3
 # ./aloelite/fuse.py
 # License: Apache-2.0 (disclaimer at bottom of file)
-#!/usr/bin/env python3
 """
 aloelite-fuse — mount an Aloelite volume as a FUSE filesystem (Linux/pyfuse3).
 
@@ -24,13 +24,19 @@ flushes one chunk at a time — memory stays bounded regardless of file size, so
 a 15 GB copy no longer buffers the whole file. A read-only file is served by a
 ranged-read Descriptor (only the chunks covering each read are fetched).
 
-Random access (O_RDWR, plain O_WRONLY partial overwrite, size changes) is
-served by a dirty-extent handle: writes buffer only the touched byte ranges,
-reads overlay them on ranged reads of committed content, and flush/fsync/
-release commit each coalesced extent as one atomic engine write_range (unchanged
-chunks carried by reference). Memory is bounded by dirty bytes, never file
-size. A non-sequential write on a *streaming* handle (O_WRONLY|O_TRUNC path)
-still returns ENOTSUP; open the file O_RDWR for random access instead.
+Caching: the kernel page cache and attr/entry caches are enabled (direct_io
+dropped). Attr/entry TTL is 1s, bounding staleness for out-of-process
+changes to the backing file; a fresh open drops cached pages
+(keep_cache=False, the pyfuse3 default), so cross-process changes are seen
+on the next open. Within one mount, sizes reported by getattr are overlaid
+with any unflushed append/rw-handle state, keyed by inode.
+
+Writes buffer only the touched byte ranges, reads overlay them on ranged reads
+of committed content, and flush/fsync/ release commit each coalesced extent as
+one atomic engine write_range (unchanged chunks carried by reference). Memory
+is bounded by dirty bytes, never file size. A non-sequential write on a
+*streaming* handle (O_WRONLY|O_TRUNC path) still returns ENOTSUP; open the file
+O_RDWR for random access instead.
 """
 
 from __future__ import annotations
@@ -190,9 +196,10 @@ class AloeFuse(pyfuse3.Operations):
         root = self.m.stat("/")
         self._n = {ROOT: root.id}  # inode -> NodeId
         # fh -> handle state, one of:
-        #   {"mode":"w",   "path", "w": Descriptor, "pos": int}   sequential stream write
-        #   {"mode":"r",   "path", "r": Descriptor}               ranged stream read
-        #   {"mode":"buf", "path", "buf": bytearray, "dirty": bool}  buffered fallback
+        #   {"mode":"w",  "path", "w": Descriptor, "pos", "inode"}  sequential stream write
+        #   {"mode":"r",  "path", "r": Descriptor}                  ranged stream read
+        #   {"mode":"a",  "path", "buf": bytearray, "inode"}        append batcher
+        #   {"mode":"rw", "path", "h": _RwHandle, "inode"}          dirty-extent random access
         self._open = {}
         self._fh = 0
 
@@ -225,8 +232,10 @@ class AloeFuse(pyfuse3.Operations):
         a.st_atime_ns = a.st_mtime_ns
         a.st_blksize = 512
         a.st_blocks = (a.st_size + 511) // 512
-        a.entry_timeout = 0  # no kernel attr/entry caching (writes mutate)
-        a.attr_timeout = 0
+        # Stone 2: kernel caching on. 1s TTL bounds staleness from writers
+        # outside this process; our own writes flow through the kernel.
+        a.entry_timeout = 1.0
+        a.attr_timeout = 1.0
         return a
 
     # -- lookups ------------------------------------------------------------
@@ -242,8 +251,8 @@ class AloeFuse(pyfuse3.Operations):
                 a.st_size += extra
                 a.st_blocks = (a.st_size + 511) // 512
             for h in self._open.values():
-                if h.get("mode") == "rw" and h["path"] == self._path(inode):
-                    a.st_size = max(a.st_size, h["h"].size)
+                if h.get("mode") == "w" and h.get("inode") == inode:
+                    a.st_size = max(a.st_size, h["pos"])
                     a.st_blocks = (a.st_size + 511) // 512
             return a
         except KeyError:
@@ -297,6 +306,7 @@ class AloeFuse(pyfuse3.Operations):
             node = self.m.create_entry(path, b"")
             ino = self._register(node)
             fh = self._next_fh()
+            acc = flags & os.O_ACCMODE
             if flags & os.O_APPEND:
                 self._open[fh] = {
                     "mode": "a",
@@ -304,12 +314,26 @@ class AloeFuse(pyfuse3.Operations):
                     "buf": bytearray(),
                     "inode": ino,
                 }
+            elif acc == os.O_RDWR:
+                # editors (vim swap files) create O_RDWR and write randomly
+                self._open[fh] = {
+                    "mode": "rw",
+                    "path": path,
+                    "inode": ino,
+                    "h": _RwHandle(self.m, path, truncate=False),
+                }
             else:
                 writer = self.m.open_write(path, WriteMode.TRUNCATE)
-                self._open[fh] = {"mode": "w", "path": path, "w": writer, "pos": 0}
+                self._open[fh] = {
+                    "mode": "w",
+                    "path": path,
+                    "w": writer,
+                    "pos": 0,
+                    "inode": ino,
+                }
         except Exception as e:
             raise _wrap(e)
-        fi = pyfuse3.FileInfo(fh=fh, direct_io=True)
+        fi = pyfuse3.FileInfo(fh=fh)
         return (fi, self._attr(ino, self.m.stat_by_id(node)))
 
     async def unlink(self, parent_inode, name, ctx):
@@ -374,7 +398,13 @@ class AloeFuse(pyfuse3.Operations):
             elif acc == os.O_WRONLY and (flags & os.O_TRUNC):
                 writer = self.m.open_write(path, WriteMode.TRUNCATE)
                 fh = self._next_fh()
-                self._open[fh] = {"mode": "w", "path": path, "w": writer, "pos": 0}
+                self._open[fh] = {
+                    "mode": "w",
+                    "path": path,
+                    "w": writer,
+                    "pos": 0,
+                    "inode": inode,
+                }
             elif acc == os.O_WRONLY and (flags & os.O_APPEND):
                 fh = self._next_fh()
                 self._open[fh] = {
@@ -390,11 +420,12 @@ class AloeFuse(pyfuse3.Operations):
                 self._open[fh] = {
                     "mode": "rw",
                     "path": path,
+                    "inode": inode,
                     "h": _RwHandle(self.m, path, truncate=bool(flags & os.O_TRUNC)),
                 }
         except Exception as e:
             raise _wrap(e)
-        return pyfuse3.FileInfo(fh=fh, direct_io=True)
+        return pyfuse3.FileInfo(fh=fh)
 
     async def read(self, fh, off, size):
         h = self._open[fh]
@@ -404,8 +435,6 @@ class AloeFuse(pyfuse3.Operations):
                 return h["r"].read(size)
             if h["mode"] == "rw":
                 return h["h"].read(off, size)
-            if h["mode"] == "buf":
-                return bytes(h["buf"][off : off + size])
             # write-only streaming handle
             raise pyfuse3.FUSEError(errno.ENOTSUP)
         except pyfuse3.FUSEError:
@@ -434,13 +463,6 @@ class AloeFuse(pyfuse3.Operations):
                 raise pyfuse3.FUSEError(errno.ENOTSUP)
             if h["mode"] == "rw":
                 return h["h"].write(off, data)
-            if h["mode"] == "buf":
-                buf = h["buf"]
-                if off > len(buf):
-                    buf.extend(b"\x00" * (off - len(buf)))
-                buf[off : off + len(data)] = data
-                h["dirty"] = True
-                return len(data)
             raise pyfuse3.FUSEError(errno.ENOTSUP)  # read handle
         except pyfuse3.FUSEError:
             raise
@@ -465,13 +487,6 @@ class AloeFuse(pyfuse3.Operations):
                 # new >= pos: no-op hint; the sequential writes define real size
             elif h is not None and h["mode"] == "rw":
                 h["h"].truncate(new)
-            elif h is not None and h["mode"] == "buf":
-                buf = h["buf"]
-                if new < len(buf):
-                    del buf[new:]
-                else:
-                    buf.extend(b"\x00" * (new - len(buf)))
-                h["dirty"] = True
             elif h is not None and h["mode"] == "r":
                 raise pyfuse3.FUSEError(errno.ENOTSUP)
             else:
@@ -487,8 +502,7 @@ class AloeFuse(pyfuse3.Operations):
     # For streaming handles, full chunks are already committed as they stream;
     # the final short chunk + the committed-version pointer swap happen on
     # close() at release. flush/fsync are no-ops for streaming handles (the
-    # descriptor is closed exactly once, at release). The buffered fallback
-    # commits its whole buffer with the atomic write_all.
+    # descriptor is closed exactly once, at release).
     async def flush(self, fh):
         h = self._open.get(fh)
         try:
@@ -496,9 +510,6 @@ class AloeFuse(pyfuse3.Operations):
                 h["h"].flush()
             elif h and h["mode"] == "a":
                 self._append_commit(h)
-            elif h and h["mode"] == "buf" and h["dirty"]:
-                self.m.write_all(h["path"], bytes(h["buf"]))
-                h["dirty"] = False
         except Exception as e:
             raise _wrap(e)
 
@@ -518,8 +529,6 @@ class AloeFuse(pyfuse3.Operations):
                 h["h"].flush()
             elif h["mode"] == "a":
                 self._append_commit(h)
-            elif h["mode"] == "buf" and h["dirty"]:
-                self.m.write_all(h["path"], bytes(h["buf"]))
         except Exception as e:
             raise _wrap(e)
 
@@ -676,6 +685,12 @@ Examples
     )
 
     args = ap.parse_args()
+    import logging
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
     pin = _read_pin(args)
 
     import functools
