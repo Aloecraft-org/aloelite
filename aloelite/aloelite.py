@@ -282,6 +282,14 @@ class Mount:
     def write_all(self, path: str, data: bytes) -> None:
         ops.write_all(self._db, self.id, path, data)
         
+    def write_range(self, path: str, offset: int, data: bytes) -> int:
+        """Atomic in-place overwrite at offset (extends + zero-fills past
+        EOF); untouched chunks are carried by reference. Returns new size."""
+        return ops.write_range(self._db, self.id, path, offset, data)
+
+    def truncate(self, path: str, size: int) -> None:
+        return ops.truncate(self._db, self.id, path, size)
+
     def append(self, path: str, data: bytes) -> int:
         return ops.append(self._db, self.id, path, data)
 

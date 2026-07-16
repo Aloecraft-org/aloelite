@@ -509,6 +509,68 @@ def test_shared_chunk_immutability(db, chunky):
     assert row is not None and row[0] == b"SAME"  # shared chunk untouched
 
 
+def _hashes(db, nid, version):
+    return [r[0] for r in db.connection.execute(
+        "SELECT chunk_hash FROM content_version WHERE content_id=? AND version=? "
+        "ORDER BY chunk_index", (nid, version)).fetchall()]
+
+
+def test_write_range_midfile_carries_prefix_and_suffix(db, chunky):
+    base = b"aaaabbbbccccdddd"  # 4 chunks of 4
+    ops.create_entry(db, chunky, "/f", base)
+    nid = _nid(db, chunky, "/f")
+    v1 = _committed(db, nid)
+    pool_before = _pool_count(db)
+    assert ops.write_range(db, chunky, "/f", 5, b"XY") == 16
+    assert ops.read_all(db, chunky, "/f") == b"aaaabXYbccccdddd"
+    v2 = _committed(db, nid)
+    h1, h2 = _hashes(db, nid, v1), _hashes(db, nid, v2)
+    assert h2[0] == h1[0] and h2[2:] == h1[2:]  # prefix + suffix by reference
+    assert h2[1] != h1[1]                        # only the window re-chunked
+    assert _pool_count(db) == pool_before + 1    # one new pool row
+
+
+def test_write_range_cross_boundary_and_extend(db, chunky):
+    ops.create_entry(db, chunky, "/f", b"aaaabbbb")
+    assert ops.write_range(db, chunky, "/f", 6, b"XXXX") == 10  # spans + extends
+    assert ops.read_all(db, chunky, "/f") == b"aaaabbXXXX"
+    nid = _nid(db, chunky, "/f")
+    assert _chunk_lengths(db, nid) == [4, 4, 2]  # uniform invariant holds
+
+
+def test_write_range_gap_zero_fills_and_rebuilds_short_tail(db, chunky):
+    ops.create_entry(db, chunky, "/f", b"aaaabb")  # short final chunk (2)
+    assert ops.write_range(db, chunky, "/f", 10, b"ZZ") == 12
+    assert ops.read_all(db, chunky, "/f") == b"aaaabb\x00\x00\x00\x00ZZ"
+    nid = _nid(db, chunky, "/f")
+    assert _chunk_lengths(db, nid) == [4, 4, 4]  # short tail rebuilt, no mid-file short chunk
+
+
+def test_write_range_empty_and_lock(db, chunky):
+    ops.create_entry(db, chunky, "/f", b"abcd")
+    assert ops.write_range(db, chunky, "/f", 0, b"") == 4  # no-op returns size
+    vol = ops.mount_info(db, chunky).volume
+    other = ops.mount(db, vol, "/")
+    with ops.open_write(db, chunky, "/f") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld):
+            ops.write_range(db, other, "/f", 0, b"y")
+
+
+def test_truncate(db, chunky):
+    ops.create_entry(db, chunky, "/f", b"aaaabbbbcc")
+    nid = _nid(db, chunky, "/f")
+    v1 = _committed(db, nid)
+    ops.truncate(db, chunky, "/f", 6)                      # shrink into chunk 1
+    assert ops.read_all(db, chunky, "/f") == b"aaaabb"
+    assert _hashes(db, nid, _committed(db, nid))[0] == _hashes(db, nid, v1)[0]
+    ops.truncate(db, chunky, "/f", 9)                      # grow, zero-fill
+    assert ops.read_all(db, chunky, "/f") == b"aaaabb\x00\x00\x00"
+    ops.truncate(db, chunky, "/f", 0)                      # to empty
+    assert ops.read_all(db, chunky, "/f") == b""
+    assert ops.stat(db, chunky, "/f").size == 0
+
+
 def test_versioning_committed_advances(db, chunky):
     ops.create_entry(db, chunky, "/f", b"v1xx")
     nid = _nid(db, chunky, "/f")

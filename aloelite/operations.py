@@ -553,6 +553,136 @@ def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
         })
     return new_size
 
+def write_range(db: Db, mount: MountId, path: str, offset: int, data: bytes) -> int:
+    """Atomically overwrite bytes [offset, offset+len(data)) of an entry,
+    extending it (zero-filling any gap) when the range passes EOF. Returns
+    the new size.
+
+    Bounded memory and bounded cost: full chunks strictly before the touched
+    window are carried into the new version BY REFERENCE (prefix), as are
+    full chunks strictly after it (suffix — chunk alignment is preserved
+    because an in-place overwrite never shifts bytes). Only the window is
+    read, patched, re-chunked, and staged. The window extends down to the
+    chunk containing the prior EOF when writing at/past it, so a short final
+    chunk is always rebuilt, preserving the uniform-chunks-except-last
+    invariant the ranged reader depends on.
+
+    Each call is one atomic commit = one new content version. Hot
+    random-write entries should carry set_retention(keep=N) and see periodic
+    prune_content (CV-6/CV-7) to bound manifest growth.
+    """
+    if offset < 0:
+        raise ValueError("negative offset")
+    if not data:
+        m = _require_mount(db, mount)
+        found = resolve(db, m.mount_point, path)
+        if found.type is not NodeType.ENTRY:
+            raise NotAnEntry(node=found.node)
+        meta = db.read_content_meta(found.node)
+        return meta[1] if meta is not None else 0
+    with db.txn():
+        m = _require_mount(db, mount)
+        found = resolve(db, m.mount_point, path)
+        if found.type is not NodeType.ENTRY:
+            raise NotAnEntry(node=found.node)
+        if db.scalar("validation.check_lock_held", {"node": found.node, "mount": mount}):
+            raise LockHeld(node=found.node)
+        cs = db.chunk_size_of(m.volume)
+        meta = db.read_content_meta(found.node)
+        src_version, size = meta if meta is not None else (0, 0)
+        end = offset + len(data)
+        new_size = max(size, end)
+        new_version = db.alloc_version(found.node)
+
+        lo = offset // cs
+        hi = (end - 1) // cs
+        # The window reaches down to the chunk containing the prior EOF when
+        # writing at/past it (rebuild a short final chunk; zero-fill a gap).
+        window_lo = min(lo, size // cs)
+        src_last = (size - 1) // cs if size > 0 else -1
+
+        if window_lo > 0:
+            db.run("mutation.copy_chunk_refs_range", {
+                "node": found.node, "dst_version": new_version,
+                "src_version": src_version, "lo": 0, "hi": window_lo - 1,
+            })
+        if src_last > hi:
+            db.run("mutation.copy_chunk_refs_range", {
+                "node": found.node, "dst_version": new_version,
+                "src_version": src_version, "lo": hi + 1, "hi": src_last,
+            })
+
+        base = window_lo * cs
+        buf = bytearray()
+        win_src_hi = min(hi, src_last)
+        if win_src_hi >= window_lo:
+            rows = db.read_chunk_range(found.node, src_version, window_lo, win_src_hi)
+            buf = bytearray(b"".join(d for _, d in rows))
+        if offset - base > len(buf):
+            buf.extend(b"\x00" * (offset - base - len(buf)))
+        buf[offset - base : end - base] = data
+        index = window_lo
+        for chunk in split_chunks(bytes(buf), cs):
+            db.stage_chunk(found.node, new_version, index, chunk)
+            index += 1
+        db.rowcount("mutation.update_content", {
+            "node": found.node, "version": new_version, "size": new_size, "hash": None,
+        })
+    return new_size
+
+
+def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
+    """Atomically set an entry's size. Shrink carries full leading chunks by
+    reference and trims the boundary chunk; grow zero-fills (rebuilding only
+    the prior short final chunk). One new version per call; no-op when the
+    size is unchanged."""
+    if size < 0:
+        raise ValueError("negative size")
+    with db.txn():
+        m = _require_mount(db, mount)
+        found = resolve(db, m.mount_point, path)
+        if found.type is not NodeType.ENTRY:
+            raise NotAnEntry(node=found.node)
+        if db.scalar("validation.check_lock_held", {"node": found.node, "mount": mount}):
+            raise LockHeld(node=found.node)
+        cs = db.chunk_size_of(m.volume)
+        meta = db.read_content_meta(found.node)
+        src_version, cur = meta if meta is not None else (0, 0)
+        if size == cur:
+            return
+        new_version = db.alloc_version(found.node)
+        if size < cur:
+            full = size // cs
+            if full > 0:
+                db.run("mutation.copy_chunk_refs_range", {
+                    "node": found.node, "dst_version": new_version,
+                    "src_version": src_version, "lo": 0, "hi": full - 1,
+                })
+            rem = size % cs
+            if rem:
+                rows = db.read_chunk_range(found.node, src_version, full, full)
+                db.stage_chunk(found.node, new_version, full, rows[0][1][:rem])
+        else:
+            full = cur // cs
+            if full > 0:
+                db.run("mutation.copy_chunk_refs_range", {
+                    "node": found.node, "dst_version": new_version,
+                    "src_version": src_version, "lo": 0, "hi": full - 1,
+                })
+            tail = b""
+            if cur % cs:
+                rows = db.read_chunk_range(found.node, src_version, full, full)
+                tail = rows[0][1] if rows else b""
+            pad = tail + b"\x00" * (size - full * cs - len(tail))
+            index = full
+            for chunk in split_chunks(pad, cs):
+                db.stage_chunk(found.node, new_version, index, chunk)
+                index += 1
+        db.rowcount("mutation.update_content", {
+            "node": found.node, "version": new_version, "size": size, "hash": None,
+        })
+
+
 def rename(db: Db, mount: MountId, path: str, name: str) -> None:
     with db.txn():
         m = _require_mount(db, mount)
@@ -940,6 +1070,8 @@ __all__ = [
     "create_container",
     "create_entry",
     "write_all",
+    "write_range",
+    "truncate",
     "rename",
     "set_metadata",
     "move",
