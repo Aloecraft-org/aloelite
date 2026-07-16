@@ -683,6 +683,14 @@ def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
         })
 
 
+def set_mtime(db: Db, mount: MountId, node: NodeId, ts_ms: int) -> None:
+    """Explicitly set a node's modified_at (utimens; archive/rsync timestamp
+    restoration). Id-addressed like stat_by_id."""
+    with db.txn():
+        _require_mount(db, mount)
+        db.rowcount("mutation.set_modified_at", {"node": node, "ts": ts_ms})
+
+
 def rename(db: Db, mount: MountId, path: str, name: str) -> None:
     with db.txn():
         m = _require_mount(db, mount)
@@ -1074,6 +1082,7 @@ __all__ = [
     "truncate",
     "rename",
     "set_metadata",
+    "set_mtime",
     "move",
     "remove",
     "remove_recursive",

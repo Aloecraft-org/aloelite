@@ -296,6 +296,9 @@ class Mount:
     def rename(self, path: str, name: str) -> None:
         ops.rename(self._db, self.id, path, name)
 
+    def set_mtime(self, node: NodeId, ts_ms: int) -> None:
+        return ops.set_mtime(self._db, self.id, node, ts_ms)
+
     def set_metadata(self, path: str, metadata: dict[str, str]) -> None:
         ops.set_metadata(self._db, self.id, path, metadata)
 

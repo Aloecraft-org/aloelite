@@ -159,6 +159,30 @@ def _wrap(e: Exception) -> pyfuse3.FUSEError:
     return pyfuse3.FUSEError(_ERRNO.get(type(e).__name__, errno.EIO))
 
 
+def _never_die(fn):
+    """Last-resort guard on every FUSE handler: an unhandled exception must
+    surface to the caller as an errno, never escape and kill the event loop
+    (which detaches the mount for every consumer). FUSEError passes through;
+    anything else is logged with traceback and returned as EIO."""
+    import functools
+    import logging
+    import traceback
+
+    log = logging.getLogger("aloelite.fuse")
+
+    @functools.wraps(fn)
+    async def guarded(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except pyfuse3.FUSEError:
+            raise
+        except Exception:
+            log.error("unhandled in %s:\n%s", fn.__name__, traceback.format_exc())
+            raise pyfuse3.FUSEError(errno.EIO)
+
+    return guarded
+
+
 class AloeFuse(pyfuse3.Operations):
     def __init__(self, mount):
         super().__init__()
@@ -310,6 +334,11 @@ class AloeFuse(pyfuse3.Operations):
 
     # -- file io ------------------------------------------------------------
     def _open_buffered(self, path: str, fh: int, *, truncate: bool) -> None:
+        # DEPRECATED: unreachable since the dirty-extent handle took over the
+        # O_RDWR / partial-overwrite path. Kept for one release; then remove
+        # along with the "buf" branches in read/write/setattr/flush/release.
+        import warnings
+        warnings.warn("_open_buffered is deprecated (rw-handle path)", DeprecationWarning)
         data = b"" if truncate else self.m.read_all(path)
         self._open[fh] = {
             "mode": "buf",
@@ -405,7 +434,12 @@ class AloeFuse(pyfuse3.Operations):
             raise _wrap(e)
 
     async def setattr(self, inode, attr, fields, fh, ctx):
-        # only size changes need action; accept mode/uid/time updates silently
+        # size changes and mtime are honored; mode/uid accepted silently
+        if fields.update_mtime:
+            try:
+                self.m.set_mtime(self._n[inode], attr.st_mtime_ns // 1_000_000)
+            except Exception as e:
+                raise _wrap(e)
         if fields.update_size:
             new = attr.st_size
             h = self._open.get(fh) if fh is not None else None
@@ -482,6 +516,16 @@ class AloeFuse(pyfuse3.Operations):
         s.f_files = s.f_ffree = s.f_favail = 0
         s.f_namemax = 255
         return s
+
+
+# Wrap every async FUSE handler in the never-die guard. Done here (not as
+# per-method decorators) so a newly added handler can't be forgotten.
+for _name in dir(AloeFuse):
+    _fn = getattr(AloeFuse, _name)
+    if not _name.startswith("_") and callable(_fn) and hasattr(_fn, "__code__") \
+            and _fn.__code__.co_flags & 0x80:  # CO_COROUTINE
+        setattr(AloeFuse, _name, _never_die(_fn))
+del _name, _fn
 
 
 def _find_or_create_volume(fs, name, pin=None):

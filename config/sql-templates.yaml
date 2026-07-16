@@ -457,6 +457,18 @@ mutation:
       already be staged in the pool + manifest before this runs; this single
       UPDATE is the atomic make-visible step (IO-2r1).
 
+  set_modified_at:
+    sql: |
+      UPDATE node SET modified_at = :ts WHERE node_id = :node
+    params: { node: "NodeId", ts: "ms epoch to set as modified_at" }
+    returns: rowcount
+    consumed_by: [set_mtime]
+    notes: >
+      Explicit timestamp restoration (utimens via FUSE; archive extraction,
+      rsync -t). Bypasses the touch triggers' now() by setting the column
+      directly — the triggers fire on name/version updates, not on
+      modified_at itself, so no recursion.
+
   rename_node:
     sql: |
       UPDATE node SET name = :name WHERE node_id = :node

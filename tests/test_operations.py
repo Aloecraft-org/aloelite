@@ -149,6 +149,12 @@ def test_write_all_replaces_and_bumps_modified(db, mount):
     assert after.modified_at > before.modified_at
 
 
+def test_set_mtime(db, mount):
+    nid = ops.create_entry(db, mount, "/f", b"x")
+    ops.set_mtime(db, mount, nid, 12345)
+    assert ops.stat_by_id(db, mount, nid).modified_at == 12345
+
+
 def test_rename(db, mount):
     ops.create_entry(db, mount, "/a", b"x")
     ops.rename(db, mount, "/a", "b")
