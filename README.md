@@ -6,6 +6,10 @@
 
 **Aloelite SQLite Filesystem**
 
+**Overview (current)** | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
+
+[Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md)
+
 [![PyPI Version](https://img.shields.io/pypi/v/aloelite.svg)](https://pypi.org/project/aloelite/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/aloelite.svg)](https://pypi.org/project/aloelite/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -14,16 +18,6 @@
 [![Downloads](https://static.pepy.tech/badge/aloelite)](https://pepy.tech/project/aloelite)
 
 </div>
-
----
-<div align="center">
-
-**Documentation:** **README (current)** | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
-
-[Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md)
-
-</div>
-
 
 ## Contents
 - [Installation](#installation)
@@ -64,23 +58,26 @@ docker pull aloecraft/aloelite
 ## Usage
 
 **CLI**
+```bash
+aloelite -f notebook.fs put report.pdf /docs/report.pdf
 ```
 
+**Python**
+```python
+with Aloelite("notebook.fs") as fs, fs.mount("docs", create=True) as m:
+    m.put("/hello.txt", b"hello world")
 ```
 
-**Python Library Import**
-```
-
-```
-
-**Docker Container**
-```
-
+**Docker (volume manager + WebUI)**
+```bash
+docker run -d --privileged --device /dev/fuse -p 8080:8080 \
+  -v /aloelite-root:/aloelite-root -v /mnt/aloelite:/mnt:rshared \
+  aloecraft/aloelite-manager   # then open http://localhost:8080/admin
 ```
 
 **FUSE Mount**
-```
-
+```bash
+aloelite-fuse photos.fs photos ~/photos   # now it's just a directory
 ```
 
 ## Overview
@@ -91,19 +88,23 @@ It is designed for situations where you want filesystem semantics (paths, direct
 
 **What It Provides**
 
-- A Python API for creating and navigating volumes, with full streaming read/write support validated against multi-gigabyte files, plus atomic random-access writes (`write_range`/`truncate`) that carry unchanged chunks by reference
-- A CLI (`aloelite`) exposing the Mount API for scripting — stdin/stdout piping, the same PIN flags as FUSE
-- At-rest encryption per volume (ChaCha20-Poly1305, Argon2id key derivation), with the PIN accepted only at mount time and never stored
-- Content deduplication via a chunk pool (identical data stored once across all files in a volume)
-- FUSE integration so any application can use an Aloelite volume as a plain directory, without modification
-- A container-ready volume manager that exposes volumes over HTTP and propagates FUSE mounts to other containers via bind mount. i.e. suitable as a lightweight Docker/Podman volume provisioner
-- Export and checkpoint endpoints that produce clean, self-contained SQLite snapshots while the volume remains mounted, enabling simple backup workflows without coordination
-
-**What it is not:** a general-purpose network filesystem, a database replacement, or a POSIX-complete block device (yet — see the roadmap; symlinks, byte-range locks, and mmap are not implemented). Node metadata (paths, timestamps, directory structure) is stored in plaintext even on encrypted volumes. (see [Security Notes](#security-notes))
+- **Python API** — full filesystem semantics with bounded-memory streaming I/O and atomic random-access writes (`write_range`/`truncate`)
+- **CLI** (`aloelite`) — the same operations from the shell, with stdin/stdout piping
+- **FUSE** — mount a volume as a plain directory; any application can use it unmodified
+- **Volume manager + WebUI** — a container that provisions volumes for Docker/Podman over HTTP, with a browser admin panel and file explorer
+- **At-rest encryption** per volume (ChaCha20-Poly1305, Argon2id); the PIN is used only at mount time and never stored
+- **Content deduplication** — identical data is stored once per volume, including across repeated backups
+- **Live snapshots** — export a consistent, self-contained SQLite file while the volume is mounted and in use
 
 **Implementation Status**
 
-The core model (i.e. nodes, edges, volumes, and mounts) is fully realized, including path resolution, structural operations (create, move, rename, copy, remove, pack/unpack), advisory locking, and mount-scoped session management. File content is stored in a content-addressed chunk pool with deduplication, per-version manifests, configurable retention, and bounded-memory streaming I/O for both reads and writes; the streaming descriptor is production-validated against files in the tens of gigabytes. At-rest encryption is implemented at the storage boundary (ChaCha20-Poly1305, Argon2id key derivation, per-volume wrapped key), with convergent-nonce and random-nonce modes and a FUSE front-end that accepts a PIN at mount time. Random-access writes are first-class engine operations (`write_range`, `truncate`): unchanged chunks are carried into the new version by reference and only the touched window is re-chunked, so partial overwrites of large files are cheap and bounded-memory. The FUSE front-end serves O_RDWR access through a dirty-extent handle over these primitives (memory bounded by dirty bytes, flushed atomically on fsync/release), honors utimens, and hardens every handler so an unexpected error returns EIO instead of detaching the mount. A CLI (`aloelite`) covers the library verbs for scripting. A container manager (`manager/`) exposes volumes as FUSE-mounted directories over an HTTP API, suitable for use as a Docker/Podman volume provisioner. 
+- **Core model** — nodes, edges, volumes, and mounts are fully realized: path resolution, structural operations (create, move, rename, copy, remove, pack/unpack), advisory locking, and mount-scoped sessions.
+- **Content storage** — content-addressed chunk pool with deduplication, per-version manifests, configurable retention, and bounded-memory streaming I/O; production-validated against files in the tens of gigabytes.
+- **Random access** — `write_range` and `truncate` are first-class engine operations: unchanged chunks carry into the new version by reference, so partial overwrites of large files are cheap and bounded-memory.
+- **Encryption** — at-rest at the storage boundary (ChaCha20-Poly1305, Argon2id, per-volume wrapped key), with convergent and random nonce modes.
+- **FUSE** — O_RDWR access through a dirty-extent handle (memory bounded by dirty bytes, flushed atomically on fsync/release); honors utimens; hardened handlers return EIO rather than detaching the mount. Symlinks, byte-range locks, and mmap are not yet implemented.
+- **CLI** — covers the library verbs for scripting.
+- **Volume manager** (`manager/`) — exposes volumes as FUSE-mounted directories over an HTTP API with a WebUI; usable as a Docker/Podman volume provisioner.
 
 Reserved but not yet realized:
 - cryptographic verification of the node tree (Merkle structure over content and placement)

@@ -5,18 +5,11 @@
 <img src="aloelite.png" style="height:96px; width:96px;"/>
 
 **Aloelite SQLite Filesystem**
+
+[Overview](/README.md) | **Getting Started (This Document)** |  [Frequently Asked Questions](/doc/FAQ.md) 
+
+[Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md)
 </div>
-
-### Quick Links 
-
-- [Overview](/README.md)
-- **Getting Started (This Document)**
-- [Frequently Asked Questions](/doc/FAQ.md)
-- [Troubleshooting](/doc/TROUBLESHOOTING.md)
-- [Requirements Spec](/doc/REQUIREMENTS.md)
-- [Encryption Spec](/doc/ENCRYPTION.md)
-
-(see `doc/` for more)
 
 ## Getting Started with Aloelite
 
@@ -52,10 +45,7 @@ from the command line, mount it with FUSE for another app.
 | Work with files from the shell | **CLI** (`aloelite`) | [CLI](#cli) |
 | Let *any* program use it as a normal folder | **FUSE** (`aloelite-fuse`) | [FUSE](#fuse) |
 | Provide persistent volumes to Docker/Podman containers | **Volume Manager** | [Volume manager](#volume-manager) |
-| Manage volumes from a browser | **Admin panel** (part of the manager) | [Volume manager](#volume-manager) |
-
-A WebDAV interface is planned, for mounting volumes over the network
-without FUSE.
+| Manage volumes and browse files from a browser | **WebUI** (`/admin`, part of the manager) | [Admin panel](#admin-panel) |
 
 **Two words you'll see everywhere:**
 
@@ -64,6 +54,7 @@ without FUSE.
   encryption).
 - A **mount** is your access point into a volume. All reading and writing
   goes through a mount.
+
 
 ---
 
@@ -122,9 +113,8 @@ with Aloelite("vault.fs") as fs:
         m.put("/secret.txt", b"eyes only")
 ```
 
-The PIN is only ever used at mount time and is never stored. A volume's
-encryption is decided once, at creation — so if you want it encrypted,
-make sure the PIN is there on the *first* run.
+The PIN is only used at mount time and never stored. Encryption is
+decided once, at creation — make sure the PIN is there on the *first* run.
 
 ---
 
@@ -250,10 +240,11 @@ docker run -d -v /mnt/aloelite/<id>:/var/mail my-mail-server
 
 ### Admin panel
 
-Open `http://localhost:8080/admin` in a browser. You can create, mount,
-and delete volumes, browse and upload files in mounted volumes, list the
-durable mounts inside each file, and download a snapshot of any volume —
-all without touching the API directly.
+Open `http://localhost:8080/admin` in a browser. The WebUI covers the
+whole manager without touching the API: create, mount, and delete
+volumes, browse/upload/download files in mounted volumes with a built-in
+file explorer, inspect each file's durable mounts, and download a live
+snapshot of any volume.
 
 ### Backups
 

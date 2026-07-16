@@ -7,16 +7,10 @@
 **Aloelite SQLite Filesystem**
 </div>
 
-### Quick Links 
+[Overview](/README.md) | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
 
-- [Overview](/README.md)
-- [Getting Started](/doc/GETTING_STARTED.md)
-- [Frequently Asked Questions](/doc/FAQ.md)
-- [Troubleshooting](/doc/TROUBLESHOOTING.md)
-- **Requirements Spec (This Document)**
-- [Encryption Spec](/doc/ENCRYPTION.md)
-
-(see `doc/` for more)
+[Troubleshooting](/doc/TROUBLESHOOTING.md) | **Requirements Spec (This Document)** | [Encryption Spec](/doc/ENCRYPTION.md)
+</div>
 
 # Requirements
 

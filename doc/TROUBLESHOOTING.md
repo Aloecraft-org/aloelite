@@ -5,18 +5,11 @@
 <img src="aloelite.png" style="height:96px; width:96px;"/>
 
 **Aloelite SQLite Filesystem**
+
+[Overview](/README.md) | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
+
+**Troubleshooting (This Document)** | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md)
 </div>
-
-### Quick Links 
-
-- [Overview](/README.md)
-- [Getting Started](/doc/GETTING_STARTED.md)
-- [Frequently Asked Questions](/doc/FAQ.md)
-- **Troubleshooting (This Document)**
-- [Requirements Spec](/doc/REQUIREMENTS.md)
-- [Encryption Spec](/doc/ENCRYPTION.md)
-
-(see `doc/` for more)
 
 ## FUSE
 
