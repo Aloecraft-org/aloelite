@@ -557,6 +557,24 @@ def test_write_range_empty_and_lock(db, chunky):
             ops.write_range(db, other, "/f", 0, b"y")
 
 
+def test_write_range_interleaved_random(db, chunky):
+    # the rw-handle pattern: many small writes at scattered offsets, each an
+    # atomic version, must converge to the byte-identical file
+    import random
+    rng = random.Random(7)
+    ref = bytearray(64)
+    ops.create_entry(db, chunky, "/f", bytes(ref))
+    for _ in range(20):
+        off = rng.randrange(0, 70)
+        data = bytes(rng.randrange(1, 256) for _ in range(rng.randrange(1, 9)))
+        end = off + len(data)
+        if end > len(ref):
+            ref.extend(b"\x00" * (end - len(ref)))
+        ref[off:end] = data
+        ops.write_range(db, chunky, "/f", off, data)
+    assert ops.read_all(db, chunky, "/f") == bytes(ref)
+
+
 def test_truncate(db, chunky):
     ops.create_entry(db, chunky, "/f", b"aaaabbbbcc")
     nid = _nid(db, chunky, "/f")

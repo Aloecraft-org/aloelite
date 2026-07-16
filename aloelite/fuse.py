@@ -24,14 +24,13 @@ flushes one chunk at a time — memory stays bounded regardless of file size, so
 a 15 GB copy no longer buffers the whole file. A read-only file is served by a
 ranged-read Descriptor (only the chunks covering each read are fetched).
 
-Anything that doesn't fit the sequential-stream shape falls back to a buffered
-read_all/write_all path *for that one file*: O_RDWR, a plain O_WRONLY without
-O_TRUNC (partial overwrite), or a size change with no open handle. A non-
-sequential write on a streaming handle (a seek backwards into already-flushed,
-immutable bytes) returns ENOTSUP rather than corrupting — file-manager and `cp`
-copies are sequential, so the fast path covers them. The buffered fallback still
-holds its file in RAM (fine for small files; large random-access rewrites are
-out of scope for this oracle).
+Random access (O_RDWR, plain O_WRONLY partial overwrite, size changes) is
+served by a dirty-extent handle: writes buffer only the touched byte ranges,
+reads overlay them on ranged reads of committed content, and flush/fsync/
+release commit each coalesced extent as one atomic engine write_range (unchanged
+chunks carried by reference). Memory is bounded by dirty bytes, never file
+size. A non-sequential write on a *streaming* handle (O_WRONLY|O_TRUNC path)
+still returns ENOTSUP; open the file O_RDWR for random access instead.
 """
 
 from __future__ import annotations
@@ -51,6 +50,82 @@ from aloelite.types import WriteMode, Whence
 
 ROOT = pyfuse3.ROOT_INODE  # == 1
 _APPEND_BATCH = 1 << 20  # commit a buffered append once it reaches this many bytes
+_DIRTY_FLUSH = 32 << 20  # flush a rw handle once dirty bytes reach this
+
+
+class _RwHandle:
+    """Random-access handle backed by write_range: buffers only DIRTY byte
+    extents (sorted, non-overlapping), overlays them on ranged reads of the
+    committed content, and flushes each coalesced extent as one atomic
+    write_range. Memory is bounded by dirty bytes, never file size."""
+
+    def __init__(self, mount, path: str, *, truncate: bool) -> None:
+        self.m = mount
+        self.path = path
+        if truncate:
+            mount.truncate(path, 0)
+        self.size = mount.stat(path).size  # committed + pending view
+        self.extents: list[tuple[int, bytearray]] = []  # sorted by offset
+        self.dirty = 0
+
+    # -- extent bookkeeping (merge adjacent/overlapping on insert) ----------
+    def write(self, off: int, data: bytes) -> int:
+        new_lo, new_hi = off, off + len(data)
+        buf = bytearray(data)
+        merged: list[tuple[int, bytearray]] = []
+        for lo, b in self.extents:
+            hi = lo + len(b)
+            if hi < new_lo or lo > new_hi:        # disjoint
+                merged.append((lo, b))
+                continue
+            # overlap/adjacent: fold the old extent around the new bytes
+            if lo < new_lo:
+                buf = b[: new_lo - lo] + buf
+                new_lo = lo
+            if hi > new_hi:
+                buf = buf + b[new_hi - lo :]
+                new_hi = new_lo + len(buf)
+        merged.append((new_lo, buf))
+        merged.sort(key=lambda e: e[0])
+        self.extents = merged
+        self.dirty = sum(len(b) for _, b in self.extents)
+        self.size = max(self.size, new_hi)
+        if self.dirty >= _DIRTY_FLUSH:
+            self.flush()
+        return len(data)
+
+    def read(self, off: int, n: int) -> bytes:
+        end = min(off + n, self.size)
+        if end <= off:
+            return b""
+        committed = self.m.stat(self.path).size
+        base = bytearray(end - off)
+        lo = min(off, committed)
+        if lo < committed:
+            with self.m.open_read(self.path) as r:
+                r.seek(off, Whence.SET)
+                got = r.read(max(0, min(end, committed) - off))
+            base[: len(got)] = got
+        for elo, b in self.extents:               # overlay dirty extents
+            ehi = elo + len(b)
+            if ehi <= off or elo >= end:
+                continue
+            s, e = max(elo, off), min(ehi, end)
+            base[s - off : e - off] = b[s - elo : e - elo]
+        return bytes(base)
+
+    def truncate(self, new_size: int) -> None:
+        self.flush()                              # simple + always correct
+        self.m.truncate(self.path, new_size)
+        self.size = new_size
+
+    def flush(self) -> None:
+        for lo, b in self.extents:
+            self.m.write_range(self.path, lo, bytes(b))
+        self.extents = []
+        self.dirty = 0
+        # an extension past committed EOF is realized by write_range; a pure
+        # ftruncate-style grow with no bytes is handled in truncate()
 
 
 # --- uuid7 -> 64-bit inode (FNV-1a), root pinned to ROOT -------------------
@@ -139,6 +214,10 @@ class AloeFuse(pyfuse3.Operations):
             if extra:
                 a.st_size += extra
                 a.st_blocks = (a.st_size + 511) // 512
+            for h in self._open.values():
+                if h.get("mode") == "rw" and h["path"] == self._path(inode):
+                    a.st_size = max(a.st_size, h["h"].size)
+                    a.st_blocks = (a.st_size + 511) // 512
             return a
         except KeyError:
             raise pyfuse3.FUSEError(errno.ENOENT)
@@ -262,9 +341,14 @@ class AloeFuse(pyfuse3.Operations):
                 self._open[fh] = {"mode": "a", "path": path,
                                   "buf": bytearray(), "inode": inode}
             else:
-                # O_RDWR, or plain O_WRONLY (partial overwrite): buffered fallback
+                # O_RDWR, or plain O_WRONLY (partial overwrite): dirty-extent
+                # handle over write_range (bounded memory; no whole-file buffer)
                 fh = self._next_fh()
-                self._open_buffered(path, fh, truncate=bool(flags & os.O_TRUNC))
+                self._open[fh] = {
+                    "mode": "rw",
+                    "path": path,
+                    "h": _RwHandle(self.m, path, truncate=bool(flags & os.O_TRUNC)),
+                }
         except Exception as e:
             raise _wrap(e)
         return pyfuse3.FileInfo(fh=fh, direct_io=True)
@@ -275,6 +359,8 @@ class AloeFuse(pyfuse3.Operations):
             if h["mode"] == "r":
                 h["r"].seek(off, Whence.SET)
                 return h["r"].read(size)
+            if h["mode"] == "rw":
+                return h["h"].read(off, size)
             if h["mode"] == "buf":
                 return bytes(h["buf"][off : off + size])
             # write-only streaming handle
@@ -303,6 +389,8 @@ class AloeFuse(pyfuse3.Operations):
                 # non-sequential write into a streaming handle: a seek back into
                 # already-flushed, immutable bytes can't be rewritten cheaply.
                 raise pyfuse3.FUSEError(errno.ENOTSUP)
+            if h["mode"] == "rw":
+                return h["h"].write(off, data)
             if h["mode"] == "buf":
                 buf = h["buf"]
                 if off > len(buf):
@@ -327,6 +415,8 @@ class AloeFuse(pyfuse3.Operations):
                 if new < h["pos"]:
                     raise pyfuse3.FUSEError(errno.ENOTSUP)
                 # new >= pos: no-op hint; the sequential writes define real size
+            elif h is not None and h["mode"] == "rw":
+                h["h"].truncate(new)
             elif h is not None and h["mode"] == "buf":
                 buf = h["buf"]
                 if new < len(buf):
@@ -337,15 +427,10 @@ class AloeFuse(pyfuse3.Operations):
             elif h is not None and h["mode"] == "r":
                 raise pyfuse3.FUSEError(errno.ENOTSUP)
             else:
-                # no open handle: read-modify-write via the atomic whole-file path
+                # no open handle: atomic engine-side truncate (ref-carried, no RAM copy)
                 path = self._path(inode)
                 try:
-                    data = bytearray(self.m.read_all(path))
-                    if new < len(data):
-                        del data[new:]
-                    else:
-                        data.extend(b"\x00" * (new - len(data)))
-                    self.m.write_all(path, bytes(data))
+                    self.m.truncate(path, new)
                 except Exception as e:
                     raise _wrap(e)
         return await self.getattr(inode)
@@ -359,7 +444,9 @@ class AloeFuse(pyfuse3.Operations):
     async def flush(self, fh):
         h = self._open.get(fh)
         try:
-            if h and h["mode"] == "a":
+            if h and h["mode"] == "rw":
+                h["h"].flush()
+            elif h and h["mode"] == "a":
                 self._append_commit(h)
             elif h and h["mode"] == "buf" and h["dirty"]:
                 self.m.write_all(h["path"], bytes(h["buf"]))
@@ -379,6 +466,8 @@ class AloeFuse(pyfuse3.Operations):
                 h["w"].close()  # final chunk + pointer swap + unlock
             elif h["mode"] == "r":
                 h["r"].close()
+            elif h["mode"] == "rw":
+                h["h"].flush()
             elif h["mode"] == "a":
                 self._append_commit(h)
             elif h["mode"] == "buf" and h["dirty"]:
