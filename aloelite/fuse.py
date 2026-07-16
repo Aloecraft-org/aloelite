@@ -403,27 +403,15 @@ def _find_or_create_volume(fs, name, pin=None):
 
 
 def _read_pin(args) -> bytes | None:
-    """Resolve PIN from --pin / --pin-file / --pin-env (in that precedence order).
-    Returns None if none of the three flags were given (unencrypted mount)."""
-    if args.pin is not None:
-        return args.pin.encode()
-    if args.pin_file is not None:
-        p = os.path.expanduser(args.pin_file)
-        try:
-            return open(p, "rb").read().rstrip(b"\n")
-        except OSError as e:
-            print(f"aloefuse: cannot read --pin-file {p!r}: {e}", file=sys.stderr)
-            sys.exit(1)
-    if args.pin_env is not None:
-        val = os.environ.get(args.pin_env)
-        if val is None:
-            print(
-                f"aloefuse: environment variable {args.pin_env!r} is not set",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        return val.encode()
-    return None
+    """Resolve PIN via the shared module (aloelite.pin); same flags and
+    precedence as the CLI. Exits with the error on a bad source."""
+    from aloelite.pin import PinError, read_pin
+
+    try:
+        return read_pin(args.pin, args.pin_file, args.pin_env)
+    except PinError as e:
+        print(f"aloefuse: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 async def _watch_stop(stop_event, interval: float = 0.2) -> None:

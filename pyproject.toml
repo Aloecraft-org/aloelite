@@ -36,6 +36,7 @@ test = [
 ]
 
 [project.scripts]
+aloelite = "aloelite.cli:main"
 aloelite-fuse = "aloelite.fuse:main"
 
 [tool.setuptools.packages.find]

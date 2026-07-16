@@ -169,6 +169,29 @@ with Aloelite("photos.sqlite") as fs:
 
 ---
 
+## Command line
+
+Every library verb, scriptable. One session per invocation:
+
+```bash
+aloelite -f notebook.fs volumes
+aloelite -f notebook.fs ls -l /
+aloelite -f notebook.fs put report.pdf /docs/report.pdf
+cat log | aloelite -f notebook.fs put - /logs/today --append
+aloelite -f notebook.fs get /docs/report.pdf -   # to stdout
+aloelite -f notebook.fs mkdir -p /a/b/c
+aloelite -f notebook.fs mv /a.txt /docs/a.txt
+aloelite -f notebook.fs rm -r /old
+aloelite -f notebook.fs mounts                   # durable mounts (ACC-1a)
+```
+
+`-v NAME_OR_ID` selects a volume (name, or uuid7 with/without dashes);
+omit it when the file holds exactly one. Encrypted volumes take the same
+`--pin` / `--pin-file` / `--pin-env` flags as `aloelite-fuse`, or prompt
+interactively.
+
+---
+
 ## FUSE
 
 Mount an Aloelite volume as a regular directory (Linux, requires `fuse3`):
