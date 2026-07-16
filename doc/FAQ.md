@@ -1,14 +1,24 @@
 # FAQ
 
-Conceptual questions. For setup, see GETTING_STARTED.md; for
-symptom→fix, see TROUBLESHOOTING.md.
+<div align="center">
 
----
+<img src="aloelite.png" style="height:96px; width:96px;"/>
 
-### What is Aloelite, in one sentence?
+**Aloelite SQLite Filesystem**
+</div>
 
-A filesystem stored inside a single SQLite file — files, folders,
-metadata, and content in one portable artifact.
+### Quick Links 
+
+- [Overview](/README.md)
+- [Getting Started](/doc/GETTING_STARTED.md)
+- **Frequently Asked Questions (This Document)**
+- [Troubleshooting](/doc/TROUBLESHOOTING.md)
+- [Requirements Spec](/doc/REQUIREMENTS.md)
+- [Encryption Spec](/doc/ENCRYPTION.md)
+
+(see `doc/` for more)
+
+## Frequently Asked Questions
 
 ### Why Aloelite?
 
@@ -24,6 +34,10 @@ metadata, and content in one portable artifact.
   container-volume manager over one format
 - **Runs anywhere SQLite does** — which is nearly everywhere
 
+### What is Aloelite, in one sentence?
+
+Aloelite is a filesystem (i.e. files, folders, metadata, and content) stored in one portable artifact as a single SQLite file.
+
 ### Why would I use this instead of a plain directory?
 
 When "the filesystem" needs to be a *thing you can hold*: one file to
@@ -34,27 +48,27 @@ encryption without setting up disk encryption.
 ### Why SQLite?
 
 Portability and inherited maturity. A SQLite file opens anywhere SQLite
-runs — which is nearly everywhere — and decades of work on storage
+runs (which is nearly everywhere) and decades of work on storage
 layout, crash safety, and transactional integrity come for free. Aloelite
 supplies the filesystem model on top; SQLite supplies the durability.
 
 ### Is it a database? Can I query my files with SQL?
 
 It's a filesystem that *uses* a database. You *can* open the file with
-any SQLite tool and inspect the schema — that's a feature for auditing —
+any SQLite tool and inspect the schema. That's a feature for auditing,
 but the supported interface is the Mount API (Python/CLI/FUSE/HTTP).
 Writing to the tables directly bypasses the invariants the API enforces.
 
 ### What's the difference between a volume and a mount?
 
-A **volume** is a filesystem tree — a root and everything under it. A
+A **volume** is a filesystem tree with a root and everything under it. A
 **mount** is a durable access point into a volume, anchored at a
 specific node. All access goes through a mount, never directly at a
 volume. One file can hold many volumes; one volume can have many mounts.
 
 ### Why do mounts stick around after I close my program?
 
-By design. A mount is a durable record, not a session — it can carry a
+By design. A mount is a durable record, not a session. It can carry a
 TTL, be listed later (`fs.list_mounts()`, `aloelite ... mounts`), and be
 re-attached to. Retiring one (`unmount`) is permanent; you open a new
 mount rather than reviving an old one. Retired mounts are hidden from

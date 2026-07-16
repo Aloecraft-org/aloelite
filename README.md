@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Aloecraft-org/aloelite/refs/heads/main/doc/icon.png" style="height:96px; width:96px;"/>
+<img src="doc/aloelite.png" style="height:96px; width:96px;"/>
 
 **Aloelite SQLite Filesystem**
 
@@ -15,16 +15,84 @@
 
 </div>
 
+---
+<div align="center">
+
+**Documentation:** **README (current)** | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
+
+[Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md)
+
+</div>
+
+
+## Contents
+- [Installation](#installation)
+- [Usage](#usage)
+- [Overview](#overview)
+- [Getting Started](#getting-started)
+    + [Python API](#python-api)
+    + [Encryption](#encryption)
+    + [Pathlib-Style Interface](#pathlib-style-interface)
+- [Command Line](#command-line)
+- [FUSE](#fuse)
+- [Volume Manager and WebUI](#volume-manager-and-webui)
+    + [REST API](#rest-api)
+    + [Backup Sync Pattern](#backup-sync-pattern)
+- [Security Notes](#security-notes)
+- [Design Background](#design-background)
+- [License](#license)
+
+## Installation
+
+``` bash
+pip install aloelite
+```
+
+For FUSE support (Linux only):
+
+```bash
+sudo apt install fuse3 libfuse3-dev
+pip install aloelite[fuse]
+```
+
+For Docker:
+
+```bash
+docker pull aloecraft/aloelite
+```
+
+## Usage
+
+**CLI**
+```
+
+```
+
+**Python Library Import**
+```
+
+```
+
+**Docker Container**
+```
+
+```
+
+**FUSE Mount**
+```
+
+```
+
 ## Overview
 
 Aloelite is a filesystem implemented as a SQLite database. The entire filesystem, (i.e. files, directories, metadata, and content) lives in a single portable `.sqlite` file that can be copied, versioned, and opened anywhere SQLite runs.
 
 It is designed for situations where you want filesystem semantics (paths, directories, streaming I/O) but need more control than a raw filesystem gives you: portable snapshots, at-rest encryption, content deduplication, and a clean programmatic API. A single file is easier to back up, replicate, and audit than a directory tree.
 
-**What it provides:**
+**What It Provides**
 
 - A Python API for creating and navigating volumes, with full streaming read/write support validated against multi-gigabyte files, plus atomic random-access writes (`write_range`/`truncate`) that carry unchanged chunks by reference
-- A CLI (`aloelite`) for scripting any of the above — one session per invocation, stdin/stdout piping, the same PIN flags as FUSE
+- A CLI (`aloelite`) exposing the Mount API for scripting — stdin/stdout piping, the same PIN flags as FUSE
 - At-rest encryption per volume (ChaCha20-Poly1305, Argon2id key derivation), with the PIN accepted only at mount time and never stored
 - Content deduplication via a chunk pool (identical data stored once across all files in a volume)
 - FUSE integration so any application can use an Aloelite volume as a plain directory, without modification
@@ -32,18 +100,6 @@ It is designed for situations where you want filesystem semantics (paths, direct
 - Export and checkpoint endpoints that produce clean, self-contained SQLite snapshots while the volume remains mounted, enabling simple backup workflows without coordination
 
 **What it is not:** a general-purpose network filesystem, a database replacement, or a POSIX-complete block device (yet — see the roadmap; symlinks, byte-range locks, and mmap are not implemented). Node metadata (paths, timestamps, directory structure) is stored in plaintext even on encrypted volumes. (see [Security Notes](#security-notes))
-
-## Abstract
-
-This document specifies the design of a portable filesystem implemented on top of SQLite. The system models a filesystem as a small set of relational primitives (i.e. nodes, edges, volumes, and mounts) rather than as a fixed on-disk layout, deferring byte packing, page management, and durability to SQLite's mature storage engine. It is deliberately interface-agnostic: it presents a coherent internal model of files, directories, placement, and access without committing to any single external protocol, while remaining structurally amenable to exposing one (WebDAV, FUSE, or others) in the future. The design favors a hierarchical tree as its default arrangement but encodes that hierarchy as a relaxable constraint rather than a structural assumption, leaving a clear path toward a more general graph-shaped namespace. Supporting concerns (e.g. content storage, archival, and verifiable modification) are accommodated as first-class parts of the model even where their full implementation is staged for later.
-
-## Discussion
-
-The motivation for building on SQLite is portability and reach. A filesystem expressed as a SQLite database is a single, self-describing file that can be opened, moved, and inspected anywhere SQLite runs, which is nearly everywhere, and it inherits decades of work on storage layout and transactional integrity for free. The cost of that choice is that the filesystem's structure must be expressed relationally; the contribution of this design is a set of primitives that do so cleanly while keeping future capabilities reachable rather than precluded.
-
-The model separates four concerns that filesystems often conflate. A *node* is an identity: a file (Entry) or a directory (Container), bearing a stable time-ordered identifier and its own name. An *edge* is a placement: a directed, immutable relationship that situates a node beneath a container within a particular volume. A *volume* is an origin: the root to which a coherent tree of placements ultimately refers. A *mount* is an access context: a durable, volume-bound access point, anchored at an explicit node, through which operation on the filesystem is brokered. Holding these four apart is what gives the design its flexibility. Because a node's name and existence are independent of where it sits, the same node can in principle be reachable from more than one place, which is the seam through which links, mounts, and an eventual graph layout enter without disturbing the core. Because placement lives in immutable edges, every structural change is expressed as the creation of a new edge rather than the mutation of an existing one, which keeps the history of where things have been available and gives later features (e.g. ordering, verification, recovery) a stable substrate to build on. Because origins are modeled explicitly rather than inferred, the boundary of a volume is a real, referenceable thing rather than a convention. And because access is brokered through mounts rather than ambient, the system has a concrete answer to a question filesystems usually answer with the operating system: who holds a handle, who holds a lock, and what to reclaim when a session ends.
-
-File contents are held apart from node metadata, so that traversing and resolving the namespace touches only small, frequently-accessed rows and never drags large payloads along. Reading and writing a whole file is an atomic operation in the ordinary case, with a streaming, descriptor-like access path for large or incremental I/O. That access path is mediated by mounts: because the filesystem has no native notion of a process, a mount stands in as the session identity that holds open handles and locks, and locks are scoped to the mount that acquired them, so that ending a session has a well-defined effect on everything it held. This advisory locking coexists with rather than commandeers SQLite's own transactional concurrency. Archival packs a subtree into a portable serialized form within the safety of a single transaction, so that the act of consolidating data cannot lose it. And the design reserves room for cryptographic verification of modification (e.g. a Merkle structure over the tree) by ensuring that mutations flow through a single, well-defined path where such bookkeeping can later be attached. None of these later-stage capabilities is fully realized in the first iteration; the purpose of the model described here is to make each of them an addition rather than a redesign.
 
 **Implementation Status**
 
@@ -56,24 +112,11 @@ Reserved but not yet realized:
 - graph-shaped namespaces beyond the default hierarchical tree
 - and node metadata encryption (currently plaintext in the SQLite schema. (see [Security Notes](#security-notes)))
 
----
-
 ## Getting Started
 
 New here? **[GETTING_STARTED.md](GETTING_STARTED.md)** is the friendly
 tour, organized by use case (Python / CLI / FUSE / Docker). See also
 **[FAQ.md](FAQ.md)** and **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
-
-```
-pip install aloelite
-```
-
-For FUSE support (Linux only):
-
-```bash
-sudo apt install fuse3 libfuse3-dev
-pip install aloelite[fuse]
-```
 
 ### Python API
 
@@ -148,7 +191,7 @@ with Aloelite("vault.sqlite") as fs:
 
 Encryption is invisible at the `Mount` API level. Use `enc_mode="random"` to trade chunk deduplication for zero equality leakage.
 
-### Pathlib-style interface (`AloelitePath`)
+### Pathlib-Style Interface
 
 The easiest way to work with files inside a volume. No FUSE required. Any `Mount` doubles as a path root:
 
@@ -182,13 +225,35 @@ with Aloelite("photos.sqlite") as fs:
 
 `AloelitePath` is pure sugar over the `Mount` API — it adds nothing to the contract, so everything above is atomic, deduplicated, and encryption-transparent exactly like the underlying operations.
 
----
+## Mount API
+
+Everything in Aloelite goes through one interface: the **Mount API**.
+It is defined once, language-neutrally, in `config/mount-api.yaml`, and
+implemented in `aloelite/operations.py` (the Python reference). The CLI,
+FUSE driver, volume manager, and pathlib wrapper are all thin consumers
+of the same operations — there is no second path into the file.
+
+The mental model is four nouns:
+
+- A **volume** is a filesystem tree inside the file (one file can hold many).
+- A **mount** is a durable access point into a volume — all reads and
+  writes are brokered through one.
+- Below that, a volume is made of **nodes** (files and directories) and
+  **edges** (placements) — you rarely touch these directly, but they are
+  why moves are cheap and history is recoverable.
+
+Every operation you see in the Python examples below (`put`, `list`,
+`move`, `open_write`, ...) is a Mount API operation. The CLI exposes the
+same verbs; FUSE translates kernel calls into them. Learn the API once
+and every interface is familiar.
 
 ## Command line
 
-Every library verb, scriptable. One session per invocation:
+Mount API usage from the command line
 
 ```bash
+# installed with `pip install aloelite`
+
 aloelite -f notebook.fs volumes
 aloelite -f notebook.fs ls -l /
 aloelite -f notebook.fs put report.pdf /docs/report.pdf
@@ -197,7 +262,7 @@ aloelite -f notebook.fs get /docs/report.pdf -   # to stdout
 aloelite -f notebook.fs mkdir -p /a/b/c
 aloelite -f notebook.fs mv /a.txt /docs/a.txt
 aloelite -f notebook.fs rm -r /old
-aloelite -f notebook.fs mounts                   # durable mounts (ACC-1a)
+aloelite -f notebook.fs mounts # List Mounts (ACC-1a)
 ```
 
 `-v NAME_OR_ID` selects a volume (name, or uuid7 with/without dashes);
@@ -205,7 +270,6 @@ omit it when the file holds exactly one. Encrypted volumes take the same
 `--pin` / `--pin-file` / `--pin-env` flags as `aloelite-fuse`, or prompt
 interactively.
 
----
 
 ## FUSE
 
@@ -226,9 +290,7 @@ fusermount3 -u /mnt/photos
 
 The FUSE driver uses bounded-memory I/O throughout — a 15 GB copy does not buffer in RAM. Sequential writes stream one chunk at a time; random access (O_RDWR, partial overwrites, truncation) buffers only the dirty byte ranges and commits them as atomic in-place writes on fsync/release. Handlers are hardened: an unexpected error returns EIO to the caller rather than detaching the mount.
 
----
-
-## Volume Manager
+## Volume Manager and WebUI
 
 The volume manager is a privileged container that manages multiple Aloelite volumes and exposes each as a FUSE-mounted subdirectory, accessible to other containers via bind mount.
 
@@ -247,6 +309,8 @@ docker run -d --privileged \
 ```
 
 `/aloelite-root` holds the backing SQLite files and persists across restarts. `/mnt/aloelite` is the host-visible mount root; FUSE mounts inside the container propagate here via `rshared`. `--privileged` (or at minimum `CAP_SYS_ADMIN`) is required.
+
+
 
 ### API
 
@@ -300,7 +364,7 @@ The export endpoint runs `WAL_CHECKPOINT(TRUNCATE)` before streaming, producing 
 
 The admin panel at `/admin` includes a per-volume **file explorer** for any mounted volume: browse with breadcrumbs, upload, download, create folders, and delete. Each volume card also has a **Mounts** button listing the durable engine mounts inside the backing file (label, path, state), independent of any live FUSE session. The file endpoints operate through the live FUSE mountpoint, so they work identically for plain and encrypted volumes (the mount session already holds the key).
 
-### Backup sync pattern
+### Backup Sync Pattern
 
 ```
 loop:
@@ -313,8 +377,6 @@ loop:
 
 The rename into place is atomic; a failed export leaves the previous replica intact.
 
----
-
 ## Security Notes
 
 **Chunk data** is encrypted at the storage boundary (ChaCha20-Poly1305, Argon2id key derivation). The SQLite file is opaque without the PIN.
@@ -323,7 +385,21 @@ The rename into place is atomic; a failed export leaves the previous replica int
 
 The volume manager API is intended for trusted networks. PINs are transmitted in request bodies and never logged or persisted; the derived key is held only for the duration of the mount session.
 
----
+## Design Background
+
+The original design abstract and discussion, from which doc/requirements.md was authored.
+
+### Abstract
+
+This document specifies the design of a portable filesystem implemented on top of SQLite. The system models a filesystem as a small set of relational primitives (i.e. nodes, edges, volumes, and mounts) rather than as a fixed on-disk layout, deferring byte packing, page management, and durability to SQLite's mature storage engine. It is deliberately interface-agnostic: it presents a coherent internal model of files, directories, placement, and access without committing to any single external protocol, while remaining structurally amenable to exposing one (WebDAV, FUSE, or others) in the future. The design favors a hierarchical tree as its default arrangement but encodes that hierarchy as a relaxable constraint rather than a structural assumption, leaving a clear path toward a more general graph-shaped namespace. Supporting concerns (e.g. content storage, archival, and verifiable modification) are accommodated as first-class parts of the model even where their full implementation is staged for later.
+
+### Discussion
+
+The motivation for building on SQLite is portability and reach. A filesystem expressed as a SQLite database is a single, self-describing file that can be opened, moved, and inspected anywhere SQLite runs, which is nearly everywhere, and it inherits decades of work on storage layout and transactional integrity for free. The cost of that choice is that the filesystem's structure must be expressed relationally; the contribution of this design is a set of primitives that do so cleanly while keeping future capabilities reachable rather than precluded.
+
+The model separates four concerns that filesystems often conflate. A *node* is an identity: a file (Entry) or a directory (Container), bearing a stable time-ordered identifier and its own name. An *edge* is a placement: a directed, immutable relationship that situates a node beneath a container within a particular volume. A *volume* is an origin: the root to which a coherent tree of placements ultimately refers. A *mount* is an access context: a durable, volume-bound access point, anchored at an explicit node, through which operation on the filesystem is brokered. Holding these four apart is what gives the design its flexibility. Because a node's name and existence are independent of where it sits, the same node can in principle be reachable from more than one place, which is the seam through which links, mounts, and an eventual graph layout enter without disturbing the core. Because placement lives in immutable edges, every structural change is expressed as the creation of a new edge rather than the mutation of an existing one, which keeps the history of where things have been available and gives later features (e.g. ordering, verification, recovery) a stable substrate to build on. Because origins are modeled explicitly rather than inferred, the boundary of a volume is a real, referenceable thing rather than a convention. And because access is brokered through mounts rather than ambient, the system has a concrete answer to a question filesystems usually answer with the operating system: who holds a handle, who holds a lock, and what to reclaim when a session ends.
+
+File contents are held apart from node metadata, so that traversing and resolving the namespace touches only small, frequently-accessed rows and never drags large payloads along. Reading and writing a whole file is an atomic operation in the ordinary case, with a streaming, descriptor-like access path for large or incremental I/O. That access path is mediated by mounts: because the filesystem has no native notion of a process, a mount stands in as the session identity that holds open handles and locks, and locks are scoped to the mount that acquired them, so that ending a session has a well-defined effect on everything it held. This advisory locking coexists with rather than commandeers SQLite's own transactional concurrency. Archival packs a subtree into a portable serialized form within the safety of a single transaction, so that the act of consolidating data cannot lose it. And the design reserves room for cryptographic verification of modification (e.g. a Merkle structure over the tree) by ensuring that mutations flow through a single, well-defined path where such bookkeeping can later be attached. None of these later-stage capabilities is fully realized in the first iteration; the purpose of the model described here is to make each of them an addition rather than a redesign.
 
 ## License
 

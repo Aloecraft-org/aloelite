@@ -1,3 +1,25 @@
+# Requirements Specification
+
+<div align="center">
+
+<img src="aloelite.png" style="height:96px; width:96px;"/>
+
+**Aloelite SQLite Filesystem**
+</div>
+
+### Quick Links 
+
+- [Overview](/README.md)
+- [Getting Started](/doc/GETTING_STARTED.md)
+- [Frequently Asked Questions](/doc/FAQ.md)
+- [Troubleshooting](/doc/TROUBLESHOOTING.md)
+- **Requirements Spec (This Document)**
+- [Encryption Spec](/doc/ENCRYPTION.md)
+
+(see `doc/` for more)
+
+# Requirements
+
 Each requirement is identified by a stable prefix and number for reference. Requirements use *must* for invariants the system enforces and *may* for permitted-but-optional behavior. This section is self-contained and does not depend on the surrounding abstract or discussion.
 
 ## Nodes

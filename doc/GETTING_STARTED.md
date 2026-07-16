@@ -1,4 +1,24 @@
-# Getting Started with Aloelite
+# Getting Started
+
+<div align="center">
+
+<img src="aloelite.png" style="height:96px; width:96px;"/>
+
+**Aloelite SQLite Filesystem**
+</div>
+
+### Quick Links 
+
+- [Overview](/README.md)
+- **Getting Started (This Document)**
+- [Frequently Asked Questions](/doc/FAQ.md)
+- [Troubleshooting](/doc/TROUBLESHOOTING.md)
+- [Requirements Spec](/doc/REQUIREMENTS.md)
+- [Encryption Spec](/doc/ENCRYPTION.md)
+
+(see `doc/` for more)
+
+## Getting Started with Aloelite
 
 Aloelite is a filesystem inside a single SQLite file. Files, folders,
 metadata, and content all live in one portable file you can copy, back up,
