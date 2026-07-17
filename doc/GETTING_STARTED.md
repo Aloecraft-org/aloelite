@@ -130,6 +130,8 @@ aloelite -f notebook.fs mkdir -p /docs/2026
 aloelite -f notebook.fs put report.pdf /docs/report.pdf
 aloelite -f notebook.fs get /docs/report.pdf ./copy.pdf
 aloelite -f notebook.fs mv /docs/report.pdf /archive/report.pdf
+aloelite -f notebook.fs cat /docs/report.pdf
+aloelite -f notebook.fs tree /
 aloelite -f notebook.fs rm -r /archive
 ```
 
@@ -173,7 +175,13 @@ Mount and use:
 
 ```bash
 mkdir -p ~/photos
-aloelite-fuse photos.fs photos ~/photos     # file, volume name, mountpoint
+aloelite-fuse photos.fs photos ~/photos --create   # file, volume, mountpoint
+`````
+
+`--create` bootstraps the volume on first run; without it, a missing
+(or typo'd) volume name is an error rather than a silent empty volume.
+
+````bash
 
 cp ~/Pictures/*.jpg ~/photos/               # just a directory now
 ls ~/photos
@@ -228,8 +236,9 @@ curl -s -X POST localhost:8080/volumes \
   -H 'Content-Type: application/json' -d '{"name": "mail"}'
 # → {"id": "abc123...", ...}
 
-curl -s -X POST localhost:8080/volumes/<id>/mount -d '{}' \
-  -H 'Content-Type: application/json'
+curl -s -X POST localhost:8080/volumes/<id>/mount \
+  -H 'Content-Type: application/json' \
+  -d '{"persist": true}'          # survives container restarts
 
 ls /mnt/aloelite/<id>              # it's a directory now
 ```

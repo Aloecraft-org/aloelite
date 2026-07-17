@@ -65,6 +65,13 @@ m.set_retention("/test.db", keep=1)
 aloelite -f file.fs prune --vacuum
 ```
 
+### "no volume named ..." from aloelite-fuse
+
+`aloelite-fuse` no longer creates a volume for an unrecognized name (a
+typo used to silently mint an empty volume). Pass `--create` to
+bootstrap a genuinely new volume, or check the name with
+`aloelite -f file.fs volumes`.
+
 ### Wrong PIN / "volume is encrypted but no PIN was given"
 
 `aloelite-fuse` exits with a message naming the problem. Check which of
@@ -89,7 +96,9 @@ line naming the fix. The usual suspects:
 | `fusermount3 not on PATH` | image problem — rebuild/update the image |
 
 A `[preflight] WARN` about `user_allow_other` means consumer containers
-may see empty mount directories — see the FUSE section above.
+may see empty mount directories — see the FUSE section above. Preflight
+results are also available at `GET /health` and as a banner in the
+admin panel.
 
 ### Volume shows "mounted" but the directory is empty on the host
 
@@ -106,10 +115,13 @@ remount.
 
 ### Container restarted and everything shows unmounted
 
-Expected. FUSE sessions can't survive a process restart, so the manager
-clears mount state at startup and defensively unmounts any kernel-side
-residue. Remount via the API or admin panel. (Auto-remount is on the
-roadmap.)
+FUSE sessions can't survive a process restart, so the manager clears
+mount state at startup and defensively unmounts any kernel-side residue.
+Volumes mounted with `{"persist": true}` are remounted automatically
+(encrypted ones re-read their PIN from the configured `pin_env` /
+`pin_file`); others need a manual remount via the API or admin panel.
+If a persisted volume didn't come back, check the container log for an
+`auto-mount ... failed` line — a missing PIN env var is the usual cause.
 
 ---
 

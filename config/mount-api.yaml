@@ -70,7 +70,9 @@ records:
       modified_at: Timestamp, volume: "VolumeId?",
       note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it)" }
   DirEntry:
-    { node: NodeId, name: string, type: NodeType, visible: bool, edge: EdgeId }
+    { node: NodeId, name: string, type: NodeType, visible: bool, edge: EdgeId,
+      current_directory: Path,
+      note: "current_directory is the listing context stamped at fetch time (host-supplied, not a column); path = current_directory + name is computed" }
   MountInfo:
     { id: MountId, volume: VolumeId, mount_point: NodeId, mount_path: Path,
       state: MountState, expires_at: "Timestamp?", created_at: Timestamp,

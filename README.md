@@ -263,8 +263,16 @@ aloelite -f notebook.fs get /docs/report.pdf -   # to stdout
 aloelite -f notebook.fs mkdir -p /a/b/c
 aloelite -f notebook.fs mv /a.txt /docs/a.txt
 aloelite -f notebook.fs rm -r /old
+aloelite -f notebook.fs cat /docs/report.pdf
+aloelite -f notebook.fs cp /docs/report.pdf /backup/report.pdf   # dedup: near-free
+aloelite -f notebook.fs stat /docs/report.pdf
+aloelite -f notebook.fs tree /
+aloelite -f notebook.fs prune --vacuum
 aloelite -f notebook.fs mounts # List Mounts (ACC-1a)
 ```
+
+note: Set `ALOELITE_FILE` env var to skip `-f` entirely (`export ALOELITE_FILE=notebook.fs`).
+
 
 `-v NAME_OR_ID` selects a volume (name, or uuid7 with/without dashes);
 omit it when the file holds exactly one. Encrypted volumes take the same
@@ -277,8 +285,8 @@ interactively.
 Mount an Aloelite volume as a regular directory (Linux, requires `fuse3`):
 
 ```bash
-# Plain volume
-aloelite-fuse photos.sqlite photos /mnt/photos
+# Plain volume (--create bootstraps a missing volume; a typo'd name errors instead)
+aloelite-fuse photos.sqlite photos /mnt/photos --create
 
 # Encrypted volume — three ways to supply the PIN
 aloelite-fuse vault.sqlite vault /mnt/vault --pin "my secret"
@@ -332,7 +340,14 @@ docker run -d --privileged \
 | `POST` | `/volumes/<id>/files/upload?path=/dir` | Upload a file (multipart field `file`) |
 | `POST` | `/volumes/<id>/files/mkdir?path=/dir` | Create a directory |
 | `DELETE` | `/volumes/<id>/files?path=/f` | Delete a file or directory (recursive) |
+| `GET` | `/health` | Preflight results and warnings |
 | `GET` | `/admin` | Admin panel: volumes + per-volume file explorer |
+
+Mounting with `{"persist": true}` makes the mount survive container
+restarts (auto-mount at startup). Encrypted volumes additionally need
+`"pin_env"` or `"pin_file"` naming where the PIN is read from at each
+startup — the PIN itself is never stored. An explicit unmount revokes
+the persist flag.
 
 ```bash
 # Create and mount
