@@ -61,6 +61,7 @@ def _default_fuse_runner(
             pin,
             stop_event=stop_event,
             allow_other=allow_other,
+            create=True,  # the manager created the volume row; tolerate races
         )
     )
 
@@ -231,6 +232,37 @@ class MountSupervisor:
 
         self._rmdir_quiet(mountpoint)
         self._checkpoint_quiet(record.sqlite_path)
+
+    def _read_auto_pin(self, rec: VolumeRecord) -> bytes | None:
+        if rec.pin_env:
+            val = os.environ.get(rec.pin_env)
+            if val is None:
+                raise KeyError(f"env var {rec.pin_env!r} is not set")
+            return val.encode()
+        if rec.pin_file:
+            with open(os.path.expanduser(rec.pin_file), "rb") as fh:
+                return fh.read().rstrip(b"\n")
+        return None
+
+    def auto_mount_all(self, log=_LOG.warning) -> list[str]:
+        """Mount every record flagged auto_mount. Failures are logged and
+        skipped (one bad volume must not block the rest). Returns the
+        mountpoints that came up."""
+        mounted = []
+        for rec in self.store.list():
+            if not rec.auto_mount or rec.mounted:
+                continue
+            try:
+                pin = self._read_auto_pin(rec)
+                mp = self.mount(rec, pin, mp_path=rec.mount_name)
+            except Exception as e:  # noqa: BLE001 — startup must not die
+                log("auto-mount %s (%s) failed: %s", rec.id, rec.name, e)
+                continue
+            rec.mounted = True
+            rec.mountpoint = mp
+            self.store.put(rec)
+            mounted.append(mp)
+        return mounted
 
     def is_active(self, mountpoint: str | None) -> bool:
         if not mountpoint:

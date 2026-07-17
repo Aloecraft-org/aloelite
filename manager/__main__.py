@@ -37,7 +37,13 @@ def build(store=None, supervisor=None):
 
 def main() -> int:
     store, supervisor, app = build()
-    run_preflight(store, aloelite_root=ALOELITE_ROOT, mnt=MANAGER_MNT)
+    results = run_preflight(store, aloelite_root=ALOELITE_ROOT, mnt=MANAGER_MNT)
+    app.config["PREFLIGHT_RESULTS"] = [
+        {"name": r.name, "ok": r.ok, "fatal": r.fatal, "detail": r.detail}
+        for r in results
+    ]
+    for mp in supervisor.auto_mount_all(log=app.logger.warning):
+        app.logger.info("auto-mounted %s", mp)
 
     def _shutdown(signum, _frame):
         app.logger.info("signal %s received; shutting down", signum)

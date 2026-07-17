@@ -178,6 +178,30 @@ def test_pending_unmount_on_join_failure(tmp_path):
     print("  ok: non-joining thread -> pending unmount recorded")
 
 
+def test_auto_mount_all(tmp_path):
+    store, fb, sup, rec = _mk(tmp_path, "ok")
+    rec.auto_mount = True
+    store.put(rec)
+    mounted = sup.auto_mount_all(log=lambda *a: None)
+    assert mounted == [f"{tmp_path}/v1"]
+    assert store.get("v1").mounted is True
+    sup.unmount(store.get("v1"))
+    print("  ok: auto_mount_all mounts flagged volumes")
+
+
+def test_auto_mount_missing_pin_env_skips(tmp_path):
+    store, fb, sup, rec = _mk(tmp_path, "ok")
+    rec.auto_mount = True
+    rec.encrypted = True
+    rec.pin_env = "ALOE_TEST_PIN_DOES_NOT_EXIST"
+    store.put(rec)
+    logged = []
+    mounted = sup.auto_mount_all(log=lambda msg, *a: logged.append(msg % a))
+    assert mounted == [] and logged, "failure logged, startup not aborted"
+    assert store.get("v1").mounted is False
+    print("  ok: auto-mount failure is logged and skipped")
+
+
 def test_shutdown_stops_all(tmp_path):
     store, fb, sup, rec = _mk(tmp_path, "ok")
     sup.mount(rec, None)

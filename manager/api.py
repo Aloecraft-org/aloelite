@@ -147,6 +147,7 @@ def create_app(
             }
             if rec.mounted:
                 item["mountpoint"] = rec.mountpoint
+            item["auto_mount"] = rec.auto_mount
             out.append(item)
         return jsonify(out), 200
 
@@ -173,6 +174,17 @@ def create_app(
 
         rec.mounted = True
         rec.mountpoint = mountpoint
+        if body.get("persist"):
+            if rec.encrypted and not (body.get("pin_env") or body.get("pin_file")):
+                # roll back nothing: the mount succeeded; just refuse to persist
+                store.put(rec)
+                return jsonify(
+                    error="persist on an encrypted volume needs pin_env or pin_file"
+                ), 400
+            rec.auto_mount = True
+            rec.mount_name = body.get("mount_name")
+            rec.pin_env = body.get("pin_env")
+            rec.pin_file = body.get("pin_file")
         store.put(rec)
         return jsonify(
             id=vid, mountpoint=mountpoint, host_path=_host_path(mount_name)
@@ -190,6 +202,7 @@ def create_app(
             return jsonify(error="not mounted"), 404
         rec.mounted = False
         rec.mountpoint = None
+        rec.auto_mount = False
         store.put(rec)
         return "", 204
 
@@ -422,6 +435,12 @@ def create_app(
         else:
             return jsonify(error="no such file"), 404
         return "", 204
+
+    @app.get("/health")
+    def health():
+        results = app.config.get("PREFLIGHT_RESULTS", [])
+        warnings = [r for r in results if not r["ok"] and not r["fatal"]]
+        return jsonify(ok=True, preflight=results, warnings=warnings), 200
 
     @app.get("/admin")
     def admin():

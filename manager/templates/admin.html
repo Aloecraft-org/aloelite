@@ -42,6 +42,13 @@
 
 <main class="container pb-5">
 
+  <!-- preflight warnings banner -->
+  <template x-for="w in preflightWarnings" :key="w.name">
+    <div class="alert alert-warning py-2 mb-3" role="alert">
+      <strong x-text="w.name"></strong>: <span x-text="w.detail"></span>
+    </div>
+  </template>
+
   <!-- api status banner -->
   <div x-show="!apiOk" x-cloak class="alert alert-danger py-2 mb-3" role="alert">
     Cannot reach API at <strong x-text="apiBase"></strong>. Check that the manager is running.
@@ -102,6 +109,7 @@
               <span class="badge me-1" :class="v.mounted ? 'bg-success' : 'bg-secondary'"
                     x-text="v.mounted ? 'mounted' : 'unmounted'"></span>
               <span x-show="v.encrypted" class="badge bg-primary">encrypted</span>
+              <span x-show="v.auto_mount" class="badge bg-info text-dark">auto-mount</span>
             </div>
             <button class="btn btn-sm btn-outline-danger flex-shrink-0"
                     @click="confirmDelete(v)" title="Delete volume">&#128465;</button>
@@ -358,11 +366,16 @@ function app() {
     delTarget: null,
 
     expVol: null, expPath: '/', expEntries: [], expErr: '', expBusy: false,
+    preflightWarnings: [],
 
     _modal(id) { return bootstrap.Modal.getOrCreateInstance(document.getElementById(id)); },
 
     async init() {
       await this.refresh();
+      try {
+        const h = await this.api('GET', '/health');
+        if (h.ok) this.preflightWarnings = h.data.warnings || [];
+      } catch {}
       // reopen showCreate watcher so Alpine show/hide still works alongside BS modals
       this.$watch('showCreate', v => v ? this._modal('createModal').show() : this._modal('createModal').hide());
     },

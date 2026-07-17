@@ -588,10 +588,14 @@ for _name in dir(AloeFuse):
 del _name, _fn
 
 
-def _find_or_create_volume(fs, name, pin=None):
+def _find_or_create_volume(fs, name, pin=None, create=False):
     for v in fs.list_volumes():
         if v.name == name:
             return v.id
+    if not create:
+        raise aloe_errors.NotFound(
+            f"no volume named {name!r} (pass --create to bootstrap one)"
+        )
     return fs.create_volume(name, pin=pin).id
 
 
@@ -625,6 +629,7 @@ async def fuse_main(
     stop_event=None,
     allow_other: bool = True,
     debug: bool = False,
+    create: bool = False,
 ) -> None:
     """Mount one Aloelite volume at `mountpoint` and serve FUSE until the mount
     is torn down (external `fusermount3 -uz`, or `stop_event` being set).
@@ -639,7 +644,7 @@ async def fuse_main(
     """
     fs = Aloelite(sqlite_path)
     try:
-        vol_id = _find_or_create_volume(fs, volume_name, pin=pin)
+        vol_id = _find_or_create_volume(fs, volume_name, pin=pin, create=create)
         mount = fs.mount(vol_id, pin=pin).__enter__()
         try:
             ops = AloeFuse(mount)
@@ -694,8 +699,13 @@ Examples
 """,
     )
     ap.add_argument("db", help="path to the Aloelite sqlite file")
-    ap.add_argument("volume", help="volume name (created if absent)")
+    ap.add_argument("volume", help="volume name (see --create)")
     ap.add_argument("mountpoint", help="empty directory to mount at")
+    ap.add_argument(
+        "--create",
+        action="store_true",
+        help="create the volume if it does not exist (off by default)",
+    )
     ap.add_argument("--debug", action="store_true")
     ap.add_argument(
         "--allow-other",
@@ -736,9 +746,13 @@ Examples
         pin,
         allow_other=args.allow_other,
         debug=args.debug,
+        create=args.create,
     )
     try:
         trio.run(runner)
+    except aloe_errors.NotFound as e:
+        print(f"aloefuse: {e}", file=sys.stderr)
+        sys.exit(1)
     except aloe_errors.BadKey:
         print(
             f"aloefuse: wrong PIN for volume '{args.volume}' in {args.db!r}.\n"

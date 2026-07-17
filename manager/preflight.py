@@ -226,8 +226,9 @@ def run_preflight(
     mnt: str = MANAGER_MNT,
     strict_allow_other: bool = False,
     log=print,
-) -> None:
-    """Run all checks; log each; exit(1) if any fatal check fails."""
+) -> list[CheckResult]:
+    """Run all checks; log each; exit(1) if any fatal check fails.
+    Returns the results so the API can expose them (GET /health)."""
     results = [
         check_dev_fuse(),
         check_cap_sys_admin(),
@@ -253,6 +254,7 @@ def run_preflight(
         log(f"[preflight] {len(failures)} fatal check(s) failed; exiting.")
         raise SystemExit(1)
     log("[preflight] all fatal checks passed.")
+    return results
 
 
 __all__ = [

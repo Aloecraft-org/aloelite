@@ -52,6 +52,12 @@ class VolumeRecord:
     created_at: float
     mounted: bool
     mountpoint: str | None  # manager-internal path, e.g. /mnt/<id>
+    # auto-mount at startup (opt-in). The PIN is never stored; it is re-read
+    # from the named env var or file at each auto-mount.
+    auto_mount: bool = False
+    mount_name: str | None = None
+    pin_env: str | None = None
+    pin_file: str | None = None
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
