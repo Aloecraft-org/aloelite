@@ -1,9 +1,12 @@
 .dump
+.pytest_cache
+.ruff_cache
 .xtrpatch
 .xtrshow_manifest
 x.md
 x.patch
+dist
 */**/__pycache__
-*/**/.nogit
+**/.nogit
 *.egg-info
 *.sqlite*
