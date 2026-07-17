@@ -46,6 +46,25 @@ risking corruption — notably seeking backwards into already-written bytes
 on a write-only streaming handle. Opening the file read-write (O_RDWR)
 instead gives full random access.
 
+### Running SQLite inside a mounted volume
+
+Rollback-journal mode works; WAL does not yet (needs mmap). The recipe:
+
+```sql
+PRAGMA journal_mode=PERSIST;   -- or TRUNCATE; avoids journal unlink churn
+PRAGMA busy_timeout=5000;      -- readers wait for the writer instead of erroring
+```
+
+Every page write commits a content version, so a busy database grows the
+.fs file until pruned. Set retention on the db file and prune periodically:
+
+```python
+m.set_retention("/test.db", keep=1)
+```
+```bash
+aloelite -f file.fs prune --vacuum
+```
+
 ### Wrong PIN / "volume is encrypted but no PIN was given"
 
 `aloelite-fuse` exits with a message naming the problem. Check which of

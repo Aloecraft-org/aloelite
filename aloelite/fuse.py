@@ -222,7 +222,12 @@ class AloeFuse(pyfuse3.Operations):
         a = pyfuse3.EntryAttributes()
         a.st_ino = inode
         is_dir = info.type.value == "container"
-        a.st_mode = (st_mod.S_IFDIR | 0o777) if is_dir else (st_mod.S_IFREG | 0o666)
+        if is_dir:
+            a.st_mode = st_mod.S_IFDIR | 0o777
+        elif info.metadata.get("symlink"):
+            a.st_mode = st_mod.S_IFLNK | 0o777
+        else:
+            a.st_mode = st_mod.S_IFREG | 0o666
         a.st_nlink = 2 if is_dir else 1
         a.st_size = 0 if is_dir else info.size
         a.st_uid = os.getuid()
@@ -251,9 +256,13 @@ class AloeFuse(pyfuse3.Operations):
                 a.st_size += extra
                 a.st_blocks = (a.st_size + 511) // 512
             for h in self._open.values():
-                if h.get("mode") == "w" and h.get("inode") == inode:
+                if h.get("inode") != inode:
+                    continue
+                if h.get("mode") == "w":
                     a.st_size = max(a.st_size, h["pos"])
-                    a.st_blocks = (a.st_size + 511) // 512
+                elif h.get("mode") == "rw":
+                    a.st_size = max(a.st_size, h["h"].size)
+            a.st_blocks = (a.st_size + 511) // 512
             return a
         except KeyError:
             raise pyfuse3.FUSEError(errno.ENOENT)
@@ -270,6 +279,11 @@ class AloeFuse(pyfuse3.Operations):
         except Exception as e:
             raise _wrap(e)
         return self._attr(self._register(info.id), info)
+
+    async def access(self, inode, mode, ctx):
+        # Single-user mount, world-rw modes in getattr: everything present is
+        # accessible. Existence check is the only meaningful part.
+        return inode == ROOT or inode in self._n
 
     # -- directories --------------------------------------------------------
     async def opendir(self, inode, ctx):
@@ -335,6 +349,25 @@ class AloeFuse(pyfuse3.Operations):
             raise _wrap(e)
         fi = pyfuse3.FileInfo(fh=fh)
         return (fi, self._attr(ino, self.m.stat_by_id(node)))
+
+    async def symlink(self, parent_inode, name, target, ctx):
+        base = self._path(parent_inode).rstrip("/")
+        path = f"{base}/{os.fsdecode(name)}"
+        try:
+            # Convention (no schema change): an ordinary entry whose content is
+            # the target path, flagged via NODE-6 metadata. Round-trips through
+            # copy/pack/unpack for free.
+            node = self.m.create_entry(path, os.fsencode(os.fsdecode(target)))
+            self.m.set_metadata(path, {"symlink": "1"})
+            return self._attr(self._register(node), self.m.stat_by_id(node))
+        except Exception as e:
+            raise _wrap(e)
+
+    async def readlink(self, inode, ctx):
+        try:
+            return self.m.read_all(self._path(inode))
+        except Exception as e:
+            raise _wrap(e)
 
     async def unlink(self, parent_inode, name, ctx):
         base = self._path(parent_inode).rstrip("/")

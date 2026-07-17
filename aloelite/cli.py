@@ -63,8 +63,9 @@ def _select_volume(fs: Aloelite, ref: str | None) -> VolumeId:
         raise SystemExit(_fail(f"multiple volumes; pick one with -v: {names}"))
     ref = _normalize_volume_ref(ref)
     # name-first, id-fallback — same contract as Aloelite.mount
-    if fs.resolve_volume_name(ref) is not None:
-        return fs.resolve_volume_name(ref)
+    resolved = fs.resolve_volume_name(ref)
+    if resolved is not None:
+        return resolved
     for v in vols:
         if v.id == ref:
             return v.id
@@ -108,8 +109,6 @@ def _cmd_put(m: Mount, args) -> int:
         with open(args.src, "rb") as f:
             m.put(args.dst, f.read(), append=True)  # atomic append per call
         return 0
-    if not m.exists(args.dst):
-        m.create_entry(args.dst)
     with open(args.src, "rb") as f, m.open_write(args.dst) as w:
         while chunk := f.read(_CHUNK):
             w.write(chunk)
@@ -143,6 +142,24 @@ def _cmd_rm(m: Mount, args) -> int:
 
 def _cmd_mv(m: Mount, args) -> int:
     m.move(args.src, args.dst)
+    return 0
+
+
+def _cmd_prune(fs: Aloelite, args) -> int:
+    """Reclaim unreferenced state: retired locks and volatile nodes, then
+    superseded/aborted content versions and unreferenced pool chunks.
+    Scoped to -v when given, whole file otherwise. --vacuum compacts the
+    file afterward (returns freed pages to the OS)."""
+    vol = _select_volume(fs, args.volume) if args.volume else None
+    r1 = fs.prune(vol)
+    r2 = fs.prune_content(vol)
+    print(
+        f"pruned: {r1.nodes_pruned} nodes, {r1.locks_pruned} locks, "
+        f"{r2.versions_pruned} versions, {r2.chunks_pruned} chunks"
+    )
+    if args.vacuum:
+        fs.db.connection.execute("VACUUM")
+        print("vacuumed")
     return 0
 
 
@@ -205,6 +222,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("src")
     p.add_argument("dst")
 
+    p = sub.add_parser("prune", help="reclaim unreferenced nodes, locks, and content")
+    p.add_argument(
+        "--vacuum", action="store_true", help="compact the file afterward (VACUUM)"
+    )
+
     p = sub.add_parser("volumes", help="list volumes in the file")
 
     p = sub.add_parser("mounts", help="list durable mounts in the file")
@@ -221,7 +243,7 @@ _MOUNT_VERBS = {
     "rm": _cmd_rm,
     "mv": _cmd_mv,
 }
-_FS_VERBS = {"volumes": _cmd_volumes, "mounts": _cmd_mounts}
+_FS_VERBS = {"volumes": _cmd_volumes, "mounts": _cmd_mounts, "prune": _cmd_prune}
 
 
 def main(argv: list[str] | None = None) -> int:

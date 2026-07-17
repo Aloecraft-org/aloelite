@@ -192,7 +192,9 @@ aloelite-fuse vault.fs vault ~/vault --pin-env VAULT_PIN
 ```
 
 Large sequential copies stream with bounded memory, and random-access
-programs work too — writes are committed in atomic batches.
+programs work too — writes are committed in atomic batches. Symlinks
+are supported, and SQLite databases run in rollback-journal mode (see
+Troubleshooting for the recipe).
 
 ---
 

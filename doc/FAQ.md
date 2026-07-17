@@ -107,10 +107,12 @@ on one machine is fine; a network share underneath the file is not
 
 ### Can I run a database (like SQLite itself) inside a FUSE-mounted volume?
 
-Not yet reliably — a live database needs byte-range locking and shared
-memory the FUSE layer doesn't provide. Ordinary applications (mail
-servers, syncing, editors, build trees) work today. To back up another
-service's SQLite file, snapshot it first (`VACUUM INTO`) and store that.
+Yes, in rollback-journal mode — validated with concurrent readers and
+writers. Use `PRAGMA journal_mode=PERSIST` (or `TRUNCATE`) and a
+`busy_timeout`, and set a retention policy on the database file (see
+Troubleshooting). WAL mode needs mmap support and is not there yet.
+Ordinary applications (mail servers, syncing, editors, build trees)
+work as well.
 
 ### How big can files and volumes get?
 
@@ -128,8 +130,9 @@ staged chunks. This holds for streaming writes too.
 ### Is Aloelite POSIX-complete?
 
 The common paths — sequential and random-access reads/writes,
-directories, rename/move, timestamps — work through FUSE today.
-Symlinks, hard links, and permissions modeling are not there yet.
+directories, rename/move, timestamps, symlinks — work through FUSE
+today, including live SQLite databases in rollback-journal mode.
+Hard links and permissions modeling are not there yet.
 
 ### Which platforms are supported?
 

@@ -1,9 +1,9 @@
 {
   "TECHNO_VERSION": {
     "major": 0,
-    "minor": 2,
+    "minor": 3,
     "patch": 0,
-    "build": 0
+    "build": "rc1"
   },
   "TECHNO_INIT_DIRS": [
     ".nogit",

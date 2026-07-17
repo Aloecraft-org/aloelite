@@ -59,6 +59,13 @@ def test_encrypted_pin_env(fsfile, tmp_path, monkeypatch):
     assert run("-f", p, "--pin", "wrong", "ls") == 1  # BadKey -> exit 1
 
 
+def test_prune(fsfile, capsys):
+    assert run("-f", fsfile, "ls") == 0  # retires a mount (prunable lock-side state)
+    assert run("-f", fsfile, "prune", "--vacuum") == 0
+    out = capsys.readouterr().out
+    assert "pruned:" in out and "vacuumed" in out
+
+
 def test_volumes_and_mounts(fsfile, capsys):
     assert run("-f", fsfile, "ls") == 0  # mints a mount row
     assert run("-f", fsfile, "volumes") == 0
