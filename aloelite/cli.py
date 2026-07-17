@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import re
 import sys
 
@@ -140,6 +141,49 @@ def _cmd_rm(m: Mount, args) -> int:
     return 0
 
 
+def _cmd_cat(m: Mount, args) -> int:
+    with m.open_read(args.path) as r:
+        while chunk := r.read(_CHUNK):
+            sys.stdout.buffer.write(chunk)
+    return 0
+
+
+def _cmd_cp(m: Mount, args) -> int:
+    # engine copy: dedup-preserving, near-free (chunks re-referenced)
+    m.copy(args.src, args.dst)
+    return 0
+
+
+def _cmd_stat(m: Mount, args) -> int:
+    st = m.stat(args.path)
+    print(f"path:     {args.path}")
+    print(f"id:       {st.id}")
+    print(f"type:     {st.type.value}")
+    print(f"size:     {st.size if st.size is not None else '-'}")
+    print(f"created:  {st.created_at}")
+    print(f"modified: {st.modified_at}")
+    if st.metadata:
+        print(f"metadata: {st.metadata}")
+    return 0
+
+
+def _cmd_tree(m: Mount, args) -> int:
+    def walk(path: str, prefix: str) -> None:
+        entries = [e for e in m.list(path) if e.visible]
+        for i, e in enumerate(entries):
+            last = i == len(entries) - 1
+            branch = "└── " if last else "├── "
+            is_dir = e.type.value == "container"
+            print(prefix + branch + e.name + ("/" if is_dir else ""))
+            if is_dir:
+                walk(e.path, prefix + ("    " if last else "│   "))
+
+    root = args.path or "/"
+    print(root)
+    walk(root, "")
+    return 0
+
+
 def _cmd_mv(m: Mount, args) -> int:
     m.move(args.src, args.dst)
     return 0
@@ -182,7 +226,12 @@ def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="aloelite", description="Operate on an Aloelite filesystem file."
     )
-    ap.add_argument("-f", "--file", required=True, help="path to the .sqlite/.fs file")
+    ap.add_argument(
+        "-f",
+        "--file",
+        default=os.environ.get("ALOELITE_FILE"),
+        help="path to the .sqlite/.fs file (default: $ALOELITE_FILE)",
+    )
     ap.add_argument(
         "-v",
         "--volume",
@@ -222,6 +271,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("src")
     p.add_argument("dst")
 
+    p = sub.add_parser("cat", help="print a file to stdout")
+    p.add_argument("path")
+
+    p = sub.add_parser("cp", help="copy (dedup-preserving, near-free)")
+    p.add_argument("src")
+    p.add_argument("dst")
+
+    p = sub.add_parser("stat", help="show a node's details")
+    p.add_argument("path")
+
+    p = sub.add_parser("tree", help="print a directory tree")
+    p.add_argument("path", nargs="?", default="/")
+
     p = sub.add_parser("prune", help="reclaim unreferenced nodes, locks, and content")
     p.add_argument(
         "--vacuum", action="store_true", help="compact the file afterward (VACUUM)"
@@ -239,6 +301,10 @@ _MOUNT_VERBS = {
     "ls": _cmd_ls,
     "put": _cmd_put,
     "get": _cmd_get,
+    "cat": _cmd_cat,
+    "cp": _cmd_cp,
+    "stat": _cmd_stat,
+    "tree": _cmd_tree,
     "mkdir": _cmd_mkdir,
     "rm": _cmd_rm,
     "mv": _cmd_mv,
@@ -248,6 +314,8 @@ _FS_VERBS = {"volumes": _cmd_volumes, "mounts": _cmd_mounts, "prune": _cmd_prune
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if not args.file:
+        return _fail("no file given: pass -f or set ALOELITE_FILE")
     try:
         with Aloelite(args.file) as fs:
             if args.cmd in _FS_VERBS:

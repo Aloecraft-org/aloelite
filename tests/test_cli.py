@@ -59,6 +59,29 @@ def test_encrypted_pin_env(fsfile, tmp_path, monkeypatch):
     assert run("-f", p, "--pin", "wrong", "ls") == 1  # BadKey -> exit 1
 
 
+def test_new_verbs(fsfile, tmp_path, capsys):
+    src = tmp_path / "in.txt"
+    src.write_bytes(b"data")
+    run("-f", fsfile, "put", str(src), "/a.txt")
+    assert run("-f", fsfile, "cat", "/a.txt") == 0
+    assert "data" in capsys.readouterr().out
+    assert run("-f", fsfile, "cp", "/a.txt", "/b.txt") == 0
+    assert run("-f", fsfile, "stat", "/b.txt") == 0
+    assert "entry" in capsys.readouterr().out
+    run("-f", fsfile, "mkdir", "-p", "/d/e")
+    assert run("-f", fsfile, "tree") == 0
+    out = capsys.readouterr().out
+    assert "├── " in out or "└── " in out
+
+
+def test_file_from_env(fsfile, monkeypatch, capsys):
+    monkeypatch.setenv("ALOELITE_FILE", fsfile)
+    assert run("volumes") == 0
+    assert "vol" in capsys.readouterr().out
+    monkeypatch.delenv("ALOELITE_FILE")
+    assert run("volumes") == 1  # no file, no env -> clear error
+
+
 def test_prune(fsfile, capsys):
     assert run("-f", fsfile, "ls") == 0  # retires a mount (prunable lock-side state)
     assert run("-f", fsfile, "prune", "--vacuum") == 0
