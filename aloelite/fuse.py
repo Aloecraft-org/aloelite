@@ -577,7 +577,17 @@ class AloeFuse(pyfuse3.Operations):
             elif h and h["mode"] == "a":
                 self._append_commit(h)
             elif h and h["mode"] == "w":
-                h["w"].close()  # final chunk + pointer swap + unlock, now
+                # Commit now (synchronous with the app's close()) — the
+                # durability contract. But FLUSH fires once per fd close,
+                # and a dup'd fd can keep writing after an earlier close
+                # (sh redirects: open, dup2 to stdout, close the original).
+                # So the handle must survive: convert to a random-access
+                # rw handle over the just-committed state; later writes
+                # land as atomic write_ranges, later flushes flush extents.
+                h["w"].close()
+                h["h"] = _RwHandle(self.m, h["path"], truncate=False)
+                h["mode"] = "rw"
+                del h["w"], h["pos"]
         except Exception as e:
             raise _wrap(e)
 
