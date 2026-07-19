@@ -176,13 +176,12 @@ Mount and use:
 ```bash
 mkdir -p ~/photos
 aloelite-fuse photos.fs photos ~/photos --create   # file, volume, mountpoint
-`````
+```
 
 `--create` bootstraps the volume on first run; without it, a missing
 (or typo'd) volume name is an error rather than a silent empty volume.
 
-````bash
-
+```bash
 cp ~/Pictures/*.jpg ~/photos/               # just a directory now
 ls ~/photos
 ```

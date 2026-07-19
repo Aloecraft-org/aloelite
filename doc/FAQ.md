@@ -111,8 +111,8 @@ Yes, in rollback-journal mode — validated with concurrent readers and
 writers. Use `PRAGMA journal_mode=PERSIST` (or `TRUNCATE`) and a
 `busy_timeout`, and set a retention policy on the database file (see
 Troubleshooting). WAL mode needs mmap support and is not there yet.
-Ordinary applications (mail servers, syncing, editors, build trees)
-work as well.
+Ordinary applications work as well — validated backing a mail server
+(docker-mailserver) and a full git workflow on mounted volumes.
 
 ### How big can files and volumes get?
 
@@ -130,9 +130,11 @@ staged chunks. This holds for streaming writes too.
 ### Is Aloelite POSIX-complete?
 
 The common paths — sequential and random-access reads/writes,
-directories, rename/move, timestamps, symlinks — work through FUSE
-today, including live SQLite databases in rollback-journal mode.
-Hard links and permissions modeling are not there yet.
+directories, rename/move, timestamps, symlinks, and permission bits
+(chmod, executables) — work through FUSE today, including live SQLite
+databases in rollback-journal mode and full git repositories (clone,
+push, gc, hooks). Hard links, shared-writable mmap, and byte-range
+locks across separate mounts are not there yet.
 
 ### Which platforms are supported?
 

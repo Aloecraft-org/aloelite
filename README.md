@@ -28,6 +28,7 @@
     + [Encryption](#encryption)
     + [Pathlib-Style Interface](#pathlib-style-interface)
 - [Command Line](#command-line)
+- [Mount API](#mount-api)
 - [FUSE](#fuse)
 - [Volume Manager and WebUI](#volume-manager-and-webui)
     + [REST API](#rest-api)
@@ -42,6 +43,7 @@
 pip install aloelite
 ```
 
+The core install has no FUSE dependencies and runs anywhere Python does.
 For FUSE support (Linux only):
 
 ```bash
@@ -102,7 +104,7 @@ It is designed for situations where you want filesystem semantics (paths, direct
 - **Content storage** — content-addressed chunk pool with deduplication, per-version manifests, configurable retention, and bounded-memory streaming I/O; production-validated against files in the tens of gigabytes.
 - **Random access** — `write_range` and `truncate` are first-class engine operations: unchanged chunks carry into the new version by reference, so partial overwrites of large files are cheap and bounded-memory.
 - **Encryption** — at-rest at the storage boundary (ChaCha20-Poly1305, Argon2id, per-volume wrapped key), with convergent and random nonce modes.
-- **FUSE** — O_RDWR access through a dirty-extent handle (memory bounded by dirty bytes, flushed atomically on fsync/release); honors utimens; hardened handlers return EIO rather than detaching the mount. Symlinks, byte-range locks, and mmap are not yet implemented.
+- **FUSE** — O_RDWR access through a dirty-extent handle (memory bounded by dirty bytes, flushed atomically on fsync/release); symlinks and permission bits (chmod, executables) persist across remounts; honors utimens; streaming writes commit at flush time, synchronously with the application's `close()`, so a crashed daemon loses only truly in-flight data; hardened handlers return EIO rather than detaching the mount. Hard links, shared-writable mmap, and byte-range locks across separate mounts are not yet implemented.
 - **CLI** — covers the library verbs for scripting.
 - **Volume manager** (`manager/`) — exposes volumes as FUSE-mounted directories over an HTTP API with a WebUI; usable as a Docker/Podman volume provisioner.
 
@@ -115,9 +117,9 @@ Reserved but not yet realized:
 
 ## Getting Started
 
-New here? **[GETTING_STARTED.md](GETTING_STARTED.md)** is the friendly
+New here? **[GETTING_STARTED.md](doc/GETTING_STARTED.md)** is the friendly
 tour, organized by use case (Python / CLI / FUSE / Docker). See also
-**[FAQ.md](FAQ.md)** and **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
+**[FAQ.md](doc/FAQ.md)** and **[TROUBLESHOOTING.md](doc/TROUBLESHOOTING.md)**.
 
 ### Python API
 
@@ -298,6 +300,22 @@ fusermount3 -u /mnt/photos
 ```
 
 The FUSE driver uses bounded-memory I/O throughout — a 15 GB copy does not buffer in RAM. Sequential writes stream one chunk at a time; random access (O_RDWR, partial overwrites, truncation) buffers only the dirty byte ranges and commits them as atomic in-place writes on fsync/release. Handlers are hardened: an unexpected error returns EIO to the caller rather than detaching the mount.
+
+### Running applications on a mounted volume
+
+Ordinary applications work on a mounted volume unmodified. Aloelite has
+been validated backing a mail server (docker-mailserver) and a full git
+workflow — clone, push, gc, packfile reads, executable hooks — directly
+on a mount. SQLite databases run correctly in rollback-journal mode
+(`PRAGMA journal_mode=PERSIST` or `TRUNCATE` with a `busy_timeout`; see
+Troubleshooting for the recipe).
+
+Two categories of software are not yet supported: anything that persists
+state via shared-writable mmap (WAL-mode SQLite, LMDB, boltdb, Dovecot
+index files), and anything that requires hard links. Both usually have a
+configuration escape hatch — point the mmap-backed store at a regular
+directory, or switch the journal mode — while the payload data stays on
+the volume.
 
 ## Volume Manager and WebUI
 
