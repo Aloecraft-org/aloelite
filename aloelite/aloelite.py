@@ -45,10 +45,19 @@ from .models import (
 )
 from .types import MountId, NodeId, VolumeId, WriteMode
 
-# Default spec locations, resolved relative to this package. Override per call.
+# Default spec locations. Preferred: inside the package (shipped as package
+# data in the wheel). Fallback: the old top-level repo layout, so a checkout
+# that predates the move still runs. Override per call.
 _PKG = _FsPath(__file__).resolve().parent
-_DEFAULT_TEMPLATES = _PKG / "../config/sql-templates.yaml"
-_DEFAULT_SCHEMA = _PKG / "../sql/schema.sql"
+
+
+def _spec(primary: str, legacy: str) -> _FsPath:
+    p = _PKG / primary
+    return p if p.exists() else _PKG / legacy
+
+
+_DEFAULT_TEMPLATES = _spec("config/sql-templates.yaml", "../config/sql-templates.yaml")
+_DEFAULT_SCHEMA = _spec("sql/schema.sql", "../sql/schema.sql")
 
 
 class Aloelite:

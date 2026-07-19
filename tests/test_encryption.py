@@ -25,7 +25,7 @@ from aloelite import crypto
 
 def _find(*candidates: str) -> str:
     here = Path(__file__).resolve().parent
-    for root in (here, here.parent, Path.cwd()):
+    for root in (here, here.parent, here.parent / "aloelite", Path.cwd()):
         for c in candidates:
             if (root / c).exists():
                 return str(root / c)

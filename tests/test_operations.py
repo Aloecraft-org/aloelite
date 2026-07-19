@@ -33,7 +33,7 @@ from aloelite import operations as ops
 # --------------------------------------------------------------------------
 def _find(*candidates: str) -> str:
     here = Path(__file__).resolve().parent
-    roots = [here, here.parent, Path.cwd()]
+    roots = [here, here.parent, here.parent / "aloelite", Path.cwd()]
     for root in roots:
         for c in candidates:
             p = root / c

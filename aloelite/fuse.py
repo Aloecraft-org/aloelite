@@ -134,6 +134,19 @@ class _RwHandle:
         # ftruncate-style grow with no bytes is handled in truncate()
 
 
+def _perm_bits(info, default: int) -> int:
+    """Permission bits for a node: the octal string under the 'mode' metadata
+    key (NODE-6 convention, like symlink), else `default`. Masked to 0o7777 so
+    a malformed value can never smuggle in file-type bits."""
+    raw = info.metadata.get("mode")
+    if raw:
+        try:
+            return int(raw, 8) & 0o7777
+        except ValueError:
+            pass
+    return default
+
+
 # --- uuid7 -> 64-bit inode (FNV-1a), root pinned to ROOT -------------------
 def _ino(node_id: str) -> int:
     h = 14695981039346656037
@@ -223,11 +236,11 @@ class AloeFuse(pyfuse3.Operations):
         a.st_ino = inode
         is_dir = info.type.value == "container"
         if is_dir:
-            a.st_mode = st_mod.S_IFDIR | 0o777
+            a.st_mode = st_mod.S_IFDIR | _perm_bits(info, 0o777)
         elif info.metadata.get("symlink"):
             a.st_mode = st_mod.S_IFLNK | 0o777
         else:
-            a.st_mode = st_mod.S_IFREG | 0o666
+            a.st_mode = st_mod.S_IFREG | _perm_bits(info, 0o666)
         a.st_nlink = 2 if is_dir else 1
         a.st_size = 0 if is_dir else info.size
         a.st_uid = os.getuid()
@@ -307,8 +320,12 @@ class AloeFuse(pyfuse3.Operations):
     # -- create / delete ----------------------------------------------------
     async def mkdir(self, parent_inode, name, mode, ctx):
         base = self._path(parent_inode).rstrip("/")
+        path = f"{base}/{os.fsdecode(name)}"
         try:
-            node = self.m.create_container(f"{base}/{os.fsdecode(name)}")
+            node = self.m.create_container(path)
+            perms = mode & 0o7777
+            if perms and perms != 0o777:
+                self.m.set_metadata(path, {"mode": format(perms, "o")})
             return self._attr(self._register(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
@@ -318,6 +335,9 @@ class AloeFuse(pyfuse3.Operations):
         path = f"{base}/{os.fsdecode(name)}"
         try:
             node = self.m.create_entry(path, b"")
+            perms = mode & 0o7777
+            if perms and perms != 0o666:
+                self.m.set_metadata(path, {"mode": format(perms, "o")})
             ino = self._register(node)
             fh = self._next_fh()
             acc = flags & os.O_ACCMODE
@@ -503,7 +523,15 @@ class AloeFuse(pyfuse3.Operations):
             raise _wrap(e)
 
     async def setattr(self, inode, attr, fields, fh, ctx):
-        # size changes and mtime are honored; mode/uid accepted silently
+        # size, mtime, and mode are honored; uid/gid accepted silently
+        if fields.update_mode:
+            try:
+                info = self.m.stat_by_id(self._n[inode])
+                meta = dict(info.metadata)  # merge: preserve symlink & friends
+                meta["mode"] = format(attr.st_mode & 0o7777, "o")
+                self.m.set_metadata(self._path(inode), meta)
+            except Exception as e:
+                raise _wrap(e)
         if fields.update_mtime:
             try:
                 self.m.set_mtime(self._n[inode], attr.st_mtime_ns // 1_000_000)
@@ -532,10 +560,15 @@ class AloeFuse(pyfuse3.Operations):
         return await self.getattr(inode)
 
     # -- commit / close -----------------------------------------------------
-    # For streaming handles, full chunks are already committed as they stream;
-    # the final short chunk + the committed-version pointer swap happen on
-    # close() at release. flush/fsync are no-ops for streaming handles (the
-    # descriptor is closed exactly once, at release).
+    # Streaming "w" handles commit at FLUSH: the kernel delivers FLUSH
+    # synchronously inside the app's close(), while RELEASE arrives async
+    # AFTER close() returns. Committing only at release leaves a window where
+    # an app has closed a file (and e.g. renamed it into place — git's ref
+    # update) while the bytes are still uncommitted; a daemon death in that
+    # window silently reverts the file. Descriptor.close() is idempotent, so
+    # the later RELEASE is a no-op. Tradeoff: a write on the same fd after
+    # a flush (dup'd-fd patterns) now fails — acceptable for sequential
+    # streaming semantics.
     async def flush(self, fh):
         h = self._open.get(fh)
         try:
@@ -543,6 +576,8 @@ class AloeFuse(pyfuse3.Operations):
                 h["h"].flush()
             elif h and h["mode"] == "a":
                 self._append_commit(h)
+            elif h and h["mode"] == "w":
+                h["w"].close()  # final chunk + pointer swap + unlock, now
         except Exception as e:
             raise _wrap(e)
 

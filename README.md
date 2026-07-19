@@ -2,13 +2,13 @@
 
 <div align="center">
 
-<img src="doc/aloelite.png" style="height:96px; width:96px;"/>
+<img src="https://raw.githubusercontent.com/Aloecraft-org/aloelite/refs/heads/main/doc/aloelite.png" style="height:96px; width:96px;"/>
 
 **Aloelite SQLite Filesystem**
 
-**Overview (current)** | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
+**Overview (current)** | [Getting Started](https://github.com/Aloecraft-org/aloelite/blob/main/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](https://github.com/Aloecraft-org/aloelite/blob/main/doc/FAQ.md) 
 
-[Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md)
+[Troubleshooting](https://github.com/Aloecraft-org/aloelite/blob/main/doc/TROUBLESHOOTING.md) | [Requirements Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/REQUIREMENTS.md) | [Encryption Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ENCRYPTION.md)
 
 [![PyPI Version](https://img.shields.io/pypi/v/aloelite.svg)](https://pypi.org/project/aloelite/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/aloelite.svg)](https://pypi.org/project/aloelite/)
