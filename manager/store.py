@@ -12,13 +12,27 @@ file replacement is sufficient for the current scope.
 The abstraction exists so the backing store can be swapped for SQLite later
 without touching any other component.
 
-Layout of the JSON file:
+Layout of the JSON file (schema v2):
 
     {
-      "version": 1,
+      "version": 2,
+      "filesystems": { "<fs_id>": { ...FilesystemRecord fields... }, ... },
       "volumes": { "<id>": { ...VolumeRecord fields... }, ... },
       "pending_unmounts": [ "<mountpoint>", ... ]
     }
+
+A FilesystemRecord is one backing .sqlite file; a VolumeRecord references its
+parent via fs_id and no longer carries a path of its own. The file's on-disk
+name never changes after creation (<fs_id>.sqlite) — display_name is the
+UI-settable, export-time name, so a rename is a store update with no
+rename-while-open hazard.
+
+MIGRATION (v1 -> v2, at load): every v1 volume carried its own sqlite_path
+(1:1 file:volume). Each such record gets a synthesized FilesystemRecord
+wrapping that path, display_name taken from the volume name, and the volume
+is rewritten with fs_id. Distinct v1 volumes sharing a path (never produced
+by the manager, but tolerated) collapse onto one FilesystemRecord. The
+migrated state is flushed immediately so the file on disk becomes v2.
 
 `pending_unmounts` is a side list of mountpoints whose FUSE thread failed to
 join cleanly on shutdown/unmount. Preflight drains it on the next start by
@@ -35,23 +49,45 @@ import json
 import os
 import tempfile
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+
+
+@dataclass
+class FilesystemRecord:
+    """One backing .sqlite file. The unit of portability (import/export)."""
+
+    id: str
+    display_name: str  # UI-settable; used as the export filename
+    sqlite_path: str  # manager-internal path; fixed for the record's life
+    created_at: float
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FilesystemRecord":
+        fields = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in fields})
 
 
 @dataclass
 class VolumeRecord:
-    """One row of volume metadata. Mirrors the spec's dataclass exactly."""
+    """One row of volume metadata. Belongs to a FilesystemRecord via fs_id."""
 
     id: str
     name: str
-    sqlite_path: str  # manager-internal path to backing file
+    fs_id: str  # parent FilesystemRecord
     encrypted: bool
     created_at: float
     mounted: bool
     mountpoint: str | None  # manager-internal path, e.g. /mnt/<id>
+    # which frontend currently serves the volume: "fuse" (FUSE mountpoint),
+    # "direct" (held Mount session, browser/API access only), or None.
+    frontend: str | None = None
     # auto-mount at startup (opt-in). The PIN is never stored; it is re-read
     # from the named env var or file at each auto-mount.
     auto_mount: bool = False
@@ -79,6 +115,14 @@ class VolumeStore(Protocol):
     def delete(self, volume_id: str) -> None: ...
     def list(self) -> list[VolumeRecord]: ...
 
+    # filesystem (backing file) records
+    def get_fs(self, fs_id: str) -> FilesystemRecord | None: ...
+    def put_fs(self, record: FilesystemRecord) -> None: ...
+    def delete_fs(self, fs_id: str) -> None: ...
+    def list_fs(self) -> list[FilesystemRecord]: ...
+    def volumes_of(self, fs_id: str) -> list[VolumeRecord]: ...
+    def sqlite_path_of(self, record: VolumeRecord) -> str: ...
+
     # pending-unmount bookkeeping (recovery aid; see module docstring)
     def add_pending_unmount(self, mountpoint: str) -> None: ...
     def list_pending_unmounts(self) -> list[str]: ...
@@ -99,6 +143,7 @@ class JsonVolumeStore:
     def __init__(self, path: str) -> None:
         self._path = path
         self._lock = threading.RLock()
+        self._filesystems: dict[str, FilesystemRecord] = {}
         self._volumes: dict[str, VolumeRecord] = {}
         self._pending: list[str] = []
         self._load()
@@ -113,16 +158,47 @@ class JsonVolumeStore:
                 return
             with open(self._path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            self._volumes = {
-                vid: VolumeRecord.from_dict(rec)
-                for vid, rec in data.get("volumes", {}).items()
-            }
             self._pending = list(data.get("pending_unmounts", []))
+            self._filesystems = {
+                fid: FilesystemRecord.from_dict(rec)
+                for fid, rec in data.get("filesystems", {}).items()
+            }
+            if data.get("version", 1) < 2:
+                self._migrate_v1_locked(data.get("volumes", {}))
+                self._flush_locked()  # persist as v2 immediately
+            else:
+                self._volumes = {
+                    vid: VolumeRecord.from_dict(rec)
+                    for vid, rec in data.get("volumes", {}).items()
+                }
+
+    def _migrate_v1_locked(self, raw_volumes: dict) -> None:
+        """v1 -> v2: synthesize a FilesystemRecord per distinct sqlite_path and
+        re-key each volume onto it. Caller holds the lock."""
+        by_path: dict[str, str] = {}  # sqlite_path -> fs_id
+        for vid, rec in raw_volumes.items():
+            path = rec.get("sqlite_path")
+            fs_id = by_path.get(path)
+            if fs_id is None:
+                fs_id = uuid.uuid4().hex
+                by_path[path] = fs_id
+                self._filesystems[fs_id] = FilesystemRecord(
+                    id=fs_id,
+                    display_name=rec.get("name") or fs_id,
+                    sqlite_path=path,
+                    created_at=rec.get("created_at", 0.0),
+                )
+            rec = dict(rec)
+            rec["fs_id"] = fs_id
+            self._volumes[vid] = VolumeRecord.from_dict(rec)
 
     def _flush_locked(self) -> None:
         """Atomically write current state. Caller must hold the lock."""
         payload = {
             "version": _SCHEMA_VERSION,
+            "filesystems": {
+                fid: rec.to_dict() for fid, rec in self._filesystems.items()
+            },
             "volumes": {vid: rec.to_dict() for vid, rec in self._volumes.items()},
             "pending_unmounts": list(self._pending),
         }
@@ -167,6 +243,45 @@ class JsonVolumeStore:
         with self._lock:
             return [dataclasses.replace(r) for r in self._volumes.values()]
 
+    # -- filesystem records ---------------------------------------------------
+    def get_fs(self, fs_id: str) -> FilesystemRecord | None:
+        with self._lock:
+            rec = self._filesystems.get(fs_id)
+            return dataclasses.replace(rec) if rec is not None else None
+
+    def put_fs(self, record: FilesystemRecord) -> None:
+        with self._lock:
+            self._filesystems[record.id] = dataclasses.replace(record)
+            self._flush_locked()
+
+    def delete_fs(self, fs_id: str) -> None:
+        """Remove a filesystem record. Refuses while volumes still reference it
+        (delete or re-home them first) — a dangling fs_id is unrepresentable."""
+        with self._lock:
+            if any(v.fs_id == fs_id for v in self._volumes.values()):
+                raise ValueError(f"filesystem {fs_id} still has volumes")
+            if fs_id in self._filesystems:
+                del self._filesystems[fs_id]
+                self._flush_locked()
+
+    def list_fs(self) -> list[FilesystemRecord]:
+        with self._lock:
+            return [dataclasses.replace(r) for r in self._filesystems.values()]
+
+    def volumes_of(self, fs_id: str) -> list[VolumeRecord]:
+        with self._lock:
+            return [
+                dataclasses.replace(v)
+                for v in self._volumes.values()
+                if v.fs_id == fs_id
+            ]
+
+    def sqlite_path_of(self, record: VolumeRecord) -> str:
+        """Resolve a volume's backing file via its parent. KeyError on a
+        dangling fs_id (corruption tripwire, not a soft None)."""
+        with self._lock:
+            return self._filesystems[record.fs_id].sqlite_path
+
     # -- pending unmounts ---------------------------------------------------
     def add_pending_unmount(self, mountpoint: str) -> None:
         with self._lock:
@@ -191,7 +306,7 @@ class JsonVolumeStore:
             self._flush_locked()
 
 
-__all__ = ["VolumeRecord", "VolumeStore", "JsonVolumeStore"]
+__all__ = ["FilesystemRecord", "VolumeRecord", "VolumeStore", "JsonVolumeStore"]
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

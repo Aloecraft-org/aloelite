@@ -15,14 +15,14 @@ import tempfile
 import threading
 import time
 
-from manager.store import JsonVolumeStore, VolumeRecord
+from manager.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
 
 
 def _rec(vid: str, **over) -> VolumeRecord:
     base = dict(
         id=vid,
         name=f"vol-{vid}",
-        sqlite_path=f"/aloelite-root/{vid}.sqlite",
+        fs_id=f"fs-{vid}",
         encrypted=False,
         created_at=time.time(),
         mounted=False,
@@ -40,7 +40,8 @@ def test_empty_store_materializes_file(tmp_path):
     assert store.list() == []
     with open(path) as fh:
         data = json.load(fh)
-    assert data["version"] == 1
+    assert data["version"] == 2
+    assert data["filesystems"] == {}
     assert data["volumes"] == {}
     assert data["pending_unmounts"] == []
     print("  ok: empty store materializes a valid file")
@@ -71,7 +72,26 @@ def test_crud_roundtrip(tmp_path):
     assert store.get("a") is None
     assert sorted(r.id for r in store.list()) == ["b"]
     store.delete("nonexistent")  # must be a no-op, not raise
-    print("  ok: CRUD round-trip")
+
+    # filesystem records: CRUD, resolution, and the still-referenced guard
+    store.put_fs(
+        FilesystemRecord(
+            id="fs-b", display_name="beta.fs", sqlite_path="/r/fs-b.sqlite",
+            created_at=time.time(),
+        )
+    )
+    assert store.sqlite_path_of(store.get("b")) == "/r/fs-b.sqlite"
+    assert [f.id for f in store.list_fs()] == ["fs-b"]
+    assert [v.id for v in store.volumes_of("fs-b")] == ["b"]
+    try:
+        store.delete_fs("fs-b")
+        assert False, "delete_fs must refuse while volumes reference it"
+    except ValueError:
+        pass
+    store.delete("b")
+    store.delete_fs("fs-b")
+    assert store.get_fs("fs-b") is None
+    print("  ok: CRUD round-trip (volumes + filesystems)")
 
 
 def test_persistence_across_reopen(tmp_path):
@@ -120,9 +140,11 @@ def test_pending_unmounts(tmp_path):
     print("  ok: pending-unmount add/dedup/clear")
 
 
-def test_unknown_keys_tolerated(tmp_path):
+def test_v1_migration_and_unknown_keys(tmp_path):
     path = os.path.join(tmp_path, "volumes.json")
-    # Simulate a file written by a future version with an extra field.
+    # A genuine v1 file: volumes carry sqlite_path, no filesystems section.
+    # Extra unknown fields must still be tolerated. Two volumes share one path
+    # (never produced by the manager, but tolerated) -> one fs record.
     payload = {
         "version": 1,
         "volumes": {
@@ -135,15 +157,33 @@ def test_unknown_keys_tolerated(tmp_path):
                 "mounted": False,
                 "mountpoint": None,
                 "some_future_field": "ignored",
-            }
+            },
+            "z2": {
+                "id": "z2",
+                "name": "sibling",
+                "sqlite_path": "/x.sqlite",
+                "encrypted": False,
+                "created_at": 2.0,
+                "mounted": False,
+                "mountpoint": None,
+            },
         },
         "pending_unmounts": [],
     }
     with open(path, "w") as fh:
         json.dump(payload, fh)
     store = JsonVolumeStore(path)
-    assert store.get("z").name == "future"
-    print("  ok: unknown keys tolerated on load")
+    z = store.get("z")
+    assert z.name == "future" and z.fs_id
+    assert z.fs_id == store.get("z2").fs_id  # shared path -> one fs record
+    fs = store.get_fs(z.fs_id)
+    assert fs.sqlite_path == "/x.sqlite" and store.sqlite_path_of(z) == "/x.sqlite"
+    # migration persisted as v2 on load
+    with open(path) as fh:
+        assert json.load(fh)["version"] == 2
+    # and a reopen parses the v2 file directly
+    assert JsonVolumeStore(path).get("z").fs_id == z.fs_id
+    print("  ok: v1 migrated to v2 (shared path collapses), unknown keys tolerated")
 
 
 def test_no_temp_files_left(tmp_path):

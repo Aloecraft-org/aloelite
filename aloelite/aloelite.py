@@ -70,6 +70,7 @@ class Aloelite:
         templates_path: str | _FsPath = _DEFAULT_TEMPLATES,
         schema_path: str | _FsPath | None = _DEFAULT_SCHEMA,
         ensure_schema: bool = True,
+        check_same_thread: bool = True,
     ) -> None:
         # The schema is idempotent (CREATE ... IF NOT EXISTS), so applying it on
         # open is safe for both new and existing files.
@@ -77,6 +78,7 @@ class Aloelite:
             path,
             templates_path,
             schema_path=schema_path if ensure_schema else None,
+            check_same_thread=check_same_thread,
         )
 
     # -- connection lifecycle (this object's context manager) ----------------

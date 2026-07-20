@@ -70,7 +70,15 @@ with Aloelite("notebook.fs") as fs, fs.mount("docs", create=True) as m:
     m.put("/hello.txt", b"hello world")
 ```
 
-**Docker (volume manager + WebUI)**
+**WebUI (no Docker, no FUSE — runs anywhere Python does)**
+```bash
+sudo mkdir -p /aloelite-root && sudo chown $USER /aloelite-root   # once
+ALOELITE_DIRECT_ONLY=1 python3 -m manager
+# open http://localhost:8080/admin — create a volume, drag files in and out,
+# download the .sqlite file and take it with you
+```
+
+**Docker (volume manager + WebUI + FUSE provisioning)**
 ```bash
 docker run -d --privileged --device /dev/fuse -p 8080:8080 \
   -v /aloelite-root:/aloelite-root -v /mnt/aloelite:/mnt:rshared \
@@ -93,7 +101,7 @@ It is designed for situations where you want filesystem semantics (paths, direct
 - **Python API** — full filesystem semantics with bounded-memory streaming I/O and atomic random-access writes (`write_range`/`truncate`)
 - **CLI** (`aloelite`) — the same operations from the shell, with stdin/stdout piping
 - **FUSE** — mount a volume as a plain directory; any application can use it unmodified
-- **Volume manager + WebUI** — a container that provisions volumes for Docker/Podman over HTTP, with a browser admin panel and file explorer
+- **Volume manager + WebUI** — a browser admin panel with a per-volume file explorer (drag-and-drop upload, download, import/export of whole filesystem files) that needs no FUSE or container; optionally also a privileged container that provisions FUSE-mounted volumes for Docker/Podman over HTTP
 - **At-rest encryption** per volume (ChaCha20-Poly1305, Argon2id); the PIN is used only at mount time and never stored
 - **Content deduplication** — identical data is stored once per volume, including across repeated backups
 - **Live snapshots** — export a consistent, self-contained SQLite file while the volume is mounted and in use
@@ -106,7 +114,7 @@ It is designed for situations where you want filesystem semantics (paths, direct
 - **Encryption** — at-rest at the storage boundary (ChaCha20-Poly1305, Argon2id, per-volume wrapped key), with convergent and random nonce modes.
 - **FUSE** — O_RDWR access through a dirty-extent handle (memory bounded by dirty bytes, flushed atomically on fsync/release); symlinks and permission bits (chmod, executables) persist across remounts; honors utimens; streaming writes commit at flush time, synchronously with the application's `close()`, so a crashed daemon loses only truly in-flight data; hardened handlers return EIO rather than detaching the mount. Hard links, shared-writable mmap, and byte-range locks across separate mounts are not yet implemented.
 - **CLI** — covers the library verbs for scripting.
-- **Volume manager** (`manager/`) — exposes volumes as FUSE-mounted directories over an HTTP API with a WebUI; usable as a Docker/Podman volume provisioner.
+- **Volume manager** (`manager/`) — an HTTP API + WebUI with two frontends per volume: **direct** (a held engine session serving the browser file explorer — no FUSE, no privileges, runs anywhere Python does) and **FUSE** (volumes exposed as directories for Docker/Podman consumers). Filesystem files can be imported and exported through the WebUI.
 
 Reserved but not yet realized:
 - cryptographic verification of the node tree (Merkle structure over content and placement)
@@ -319,9 +327,32 @@ the volume.
 
 ## Volume Manager and WebUI
 
-The volume manager is a privileged container that manages multiple Aloelite volumes and exposes each as a FUSE-mounted subdirectory, accessible to other containers via bind mount.
+The volume manager serves Aloelite volumes over an HTTP API with a browser
+admin panel. Each volume is served by one of two frontends:
 
-### Run
+- **Direct** — the manager holds a live engine session and the browser file
+  explorer talks straight to the Mount API. No FUSE, no privileges, no
+  container; runs anywhere Python does (including WSL). This is the
+  lowest-commitment way to use Aloelite: install, run, open a browser.
+- **FUSE** — the volume is exposed as a plain directory that other containers
+  bind-mount (Linux; typically run as the privileged container below).
+
+### Run (direct only — no FUSE, no container)
+
+```bash
+sudo mkdir -p /aloelite-root && sudo chown $USER /aloelite-root   # once
+ALOELITE_DIRECT_ONLY=1 python3 -m manager
+```
+
+Open `http://localhost:8080/admin`: **New volume** creates a filesystem file,
+a volume inside it, and opens the file explorer in one step. Drag files in,
+**Download** the `.sqlite` file from its card to take it with you, and
+**Import** any Aloelite file to pick up where you left off. Encrypted volumes
+prompt for their PIN when opened. `ALOELITE_DIRECT_ONLY=1` skips the FUSE
+environment checks at startup; FUSE mounts requested anyway fail at mount
+time with their own error.
+
+### Run (container, with FUSE provisioning)
 
 ```bash
 # Host directories (once)
@@ -335,7 +366,7 @@ docker run -d --privileged \
   aloecraft/aloelite-manager
 ```
 
-`/aloelite-root` holds the backing SQLite files and persists across restarts. `/mnt/aloelite` is the host-visible mount root; FUSE mounts inside the container propagate here via `rshared`. `--privileged` (or at minimum `CAP_SYS_ADMIN`) is required.
+`/aloelite-root` holds the backing SQLite files and persists across restarts. `/mnt/aloelite` is the host-visible mount root; FUSE mounts inside the container propagate here via `rshared`. `--privileged` (or at minimum `CAP_SYS_ADMIN`) is required for FUSE mounts; direct-mode volumes work in this container too.
 
 
 
@@ -343,10 +374,10 @@ docker run -d --privileged \
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/volumes` | Create a volume |
+| `POST` | `/volumes` | Create a volume (`fs_id` adds it to an existing file; omitted creates a new file) |
 | `GET` | `/volumes` | List all volumes |
-| `DELETE` | `/volumes/<id>` | Delete a volume (unmounts first) |
-| `POST` | `/volumes/<id>/mount` | Mount a volume |
+| `DELETE` | `/volumes/<id>` | Delete a volume (unmounts first; the backing file is removed with its last volume) |
+| `POST` | `/volumes/<id>/mount` | Mount a volume (`{"mode": "direct"}` opens a direct session instead of FUSE) |
 | `DELETE` | `/volumes/<id>/mount` | Unmount a volume |
 | `GET` | `/volumes/<id>/mount` | Mount status |
 | `GET` | `/volumes/<id>/mounts` | List durable engine mounts in the volume file (`?all=1` includes retired) |
@@ -358,14 +389,20 @@ docker run -d --privileged \
 | `POST` | `/volumes/<id>/files/upload?path=/dir` | Upload a file (multipart field `file`) |
 | `POST` | `/volumes/<id>/files/mkdir?path=/dir` | Create a directory |
 | `DELETE` | `/volumes/<id>/files?path=/f` | Delete a file or directory (recursive) |
+| `GET` | `/filesystems` | List filesystem files with their volumes (nested) |
+| `PATCH` | `/filesystems/<id>` | Rename a filesystem file (`display_name`) |
+| `GET` | `/filesystems/<id>/export` | Checkpoint + stream the file, named by `display_name` |
+| `POST` | `/filesystems/import` | Upload an Aloelite `.sqlite` file and register its volumes (multipart field `file`) |
 | `GET` | `/health` | Preflight results and warnings |
 | `GET` | `/admin` | Admin panel: volumes + per-volume file explorer |
 
-Mounting with `{"persist": true}` makes the mount survive container
+Mounting with `{"persist": true}` makes a FUSE mount survive container
 restarts (auto-mount at startup). Encrypted volumes additionally need
 `"pin_env"` or `"pin_file"` naming where the PIN is read from at each
 startup — the PIN itself is never stored. An explicit unmount revokes
-the persist flag.
+the persist flag. Direct sessions end with the manager process, so
+`persist` with `"mode": "direct"` is rejected; re-open the volume from
+the WebUI after a restart.
 
 ```bash
 # Create and mount
@@ -396,7 +433,17 @@ curl -s -X POST http://localhost:8080/volumes \
 
 The export endpoint runs `WAL_CHECKPOINT(TRUNCATE)` before streaming, producing a complete self-contained SQLite file with no accompanying WAL. The volume does not need to be unmounted to export — SQLite's read consistency guarantees a coherent snapshot regardless of active writes.
 
-The admin panel at `/admin` includes a per-volume **file explorer** for any mounted volume: browse with breadcrumbs, upload, download, create folders, and delete. Each volume card also has a **Mounts** button listing the durable engine mounts inside the backing file (label, path, state), independent of any live FUSE session. The file endpoints operate through the live FUSE mountpoint, so they work identically for plain and encrypted volumes (the mount session already holds the key).
+The admin panel at `/admin` shows one card per filesystem file with its
+volumes inside. **Open** on a volume unlocks it (prompting for a PIN when
+encrypted) and drops you into the **file explorer**: browse with
+breadcrumbs, drag-and-drop upload (folders included), download, create
+folders, and delete. Each file card has **Download** (export the `.sqlite`)
+and a rename control; **Import** at the top of the page accepts any Aloelite
+file. Operator features — FUSE mount, checkpoint, stat, and the durable
+engine-mount listing — live in each volume's overflow menu. Explorer
+operations go through the direct engine session (or the live FUSE
+mountpoint for FUSE-fronted volumes), so plain and encrypted volumes behave
+identically once open.
 
 ### Backup Sync Pattern
 

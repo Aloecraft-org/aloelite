@@ -229,13 +229,34 @@ def run_preflight(
 ) -> list[CheckResult]:
     """Run all checks; log each; exit(1) if any fatal check fails.
     Returns the results so the API can expose them (GET /health)."""
-    results = [
-        check_dev_fuse(),
-        check_cap_sys_admin(),
+    # Direct-only mode ($ALOELITE_DIRECT_ONLY): the manager serves volumes over
+    # the direct (browser) frontend only, so /dev/fuse, CAP_SYS_ADMIN, rshared,
+    # and fusermount3 are not requirements — demote those checks to warnings.
+    # A FUSE mount attempted in this mode fails at mount time with its own
+    # error rather than at startup.
+    direct_only = os.environ.get("ALOELITE_DIRECT_ONLY", "") not in ("", "0")
+    if direct_only:
+        # Browser frontend only: FUSE preconditions are not requirements, so
+        # don't probe them — a FUSE mount attempted anyway fails at mount time
+        # with its own error. One ok/info line documents the mode.
+        fuse_checks = [
+            CheckResult(
+                "direct-only mode",
+                True,
+                False,
+                "FUSE checks skipped (ALOELITE_DIRECT_ONLY)",
+            )
+        ]
+    else:
+        fuse_checks = [
+            check_dev_fuse(),
+            check_cap_sys_admin(),
+            check_mnt_rshared(mnt),
+            check_fusermount3(),
+            check_allow_other(strict=strict_allow_other),
+        ]
+    results = fuse_checks + [
         check_aloelite_root(aloelite_root),
-        check_mnt_rshared(mnt),
-        check_fusermount3(),
-        check_allow_other(strict=strict_allow_other),
         check_volume_store(store),
     ]
     results.extend(recover_stale_mounts(store))

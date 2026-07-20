@@ -100,8 +100,12 @@ class Db:
         templates_path: str | _FsPath,
         *,
         schema_path: str | _FsPath | None = None,
+        check_same_thread: bool = True,
     ) -> "Db":
-        conn = sqlite3.connect(str(db_ref))
+        # check_same_thread=False is for holders that serialize every call
+        # through their own lock (manager direct sessions); the engine itself
+        # adds no thread safety.
+        conn = sqlite3.connect(str(db_ref), check_same_thread=check_same_thread)
         db = cls(conn, Templates.load(templates_path))
         if schema_path is not None:
             conn.executescript(_FsPath(schema_path).read_text())

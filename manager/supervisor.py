@@ -43,6 +43,7 @@ def _default_fuse_runner(
     pin: bytes | None,
     mountpoint: str,
     stop_event: threading.Event,
+    sqlite_path: str,
     *,
     allow_other: bool,
 ) -> None:
@@ -55,7 +56,7 @@ def _default_fuse_runner(
     trio.run(
         functools.partial(
             fuse_main,
-            record.sqlite_path,
+            sqlite_path,
             record.name,
             mountpoint,
             pin,
@@ -91,11 +92,12 @@ class MountSupervisor:
         self._ready_probe = ready_probe or _is_fuse_active
         self._unmount_cmd = unmount_cmd or _lazy_unmount
         # Default runner binds allow_other; a custom runner takes the 4 core args.
+        # Runner contract: (record, pin, mountpoint, stop_event, sqlite_path).
         if fuse_runner is not None:
             self._fuse_runner = fuse_runner
         else:
-            self._fuse_runner = lambda rec, pin, mp, ev: _default_fuse_runner(
-                rec, pin, mp, ev, allow_other=self.allow_other
+            self._fuse_runner = lambda rec, pin, mp, ev, sp: _default_fuse_runner(
+                rec, pin, mp, ev, sp, allow_other=self.allow_other
             )
         self._lock = threading.RLock()
         # mountpoint -> {"thread", "stop", "done", "result"}
@@ -144,10 +146,10 @@ class MountSupervisor:
 
     # -- thread body --------------------------------------------------------
     def _thread_main(
-        self, record, pin, mountpoint, stop_event, result_box, done_event
+        self, record, pin, mountpoint, stop_event, result_box, done_event, sqlite_path
     ) -> None:
         try:
-            self._fuse_runner(record, pin, mountpoint, stop_event)
+            self._fuse_runner(record, pin, mountpoint, stop_event, sqlite_path)
         except BaseException as e:  # noqa: BLE001 — capture to report to caller
             result_box["error"] = e
         finally:
@@ -166,6 +168,7 @@ class MountSupervisor:
 
     # -- public API ---------------------------------------------------------
     def mount(self, record: VolumeRecord, pin: bytes | None, mp_path=None) -> str:
+        sqlite_path = self.store.sqlite_path_of(record)
         name = mp_path or record.id
         mountpoint = f"{str(self.mnt_dir).rstrip('/')}/{name}"
         with self._lock:
@@ -178,7 +181,15 @@ class MountSupervisor:
             result_box: dict = {}
             t = threading.Thread(
                 target=self._thread_main,
-                args=(record, pin, mountpoint, stop_event, result_box, done_event),
+                args=(
+                    record,
+                    pin,
+                    mountpoint,
+                    stop_event,
+                    result_box,
+                    done_event,
+                    sqlite_path,
+                ),
                 name=f"fuse-{record.id}",
                 daemon=True,
             )
@@ -231,7 +242,7 @@ class MountSupervisor:
             )
 
         self._rmdir_quiet(mountpoint)
-        self._checkpoint_quiet(record.sqlite_path)
+        self._checkpoint_quiet(self.store.sqlite_path_of(record))
 
     def _read_auto_pin(self, rec: VolumeRecord) -> bytes | None:
         if rec.pin_env:

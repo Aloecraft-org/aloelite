@@ -34,7 +34,8 @@ import uuid
 from flask import Flask, Response, jsonify, request, render_template, send_file
 
 from . import errors as merr
-from .store import VolumeRecord, VolumeStore
+from .direct import FRONTEND_DIRECT, DirectSessionRegistry
+from .store import FilesystemRecord, VolumeRecord, VolumeStore
 
 ALOELITE_ROOT = "/aloelite-root"
 HOST_MNT_PREFIX = "/mnt/aloelite"  # host-visible path consumers bind-mount
@@ -61,16 +62,19 @@ def create_app(
     store: VolumeStore,
     supervisor,
     *,
+    registry: DirectSessionRegistry | None = None,
     aloelite_root: str = ALOELITE_ROOT,
     host_mnt_prefix: str = HOST_MNT_PREFIX,
 ) -> Flask:
     app = Flask(__name__)
+    registry = registry or DirectSessionRegistry()
+    app.config["DIRECT_REGISTRY"] = registry  # reachable for shutdown/tests
 
     def _host_path(volume_id: str) -> str:
         return f"{host_mnt_prefix.rstrip('/')}/{volume_id}"
 
-    def _sqlite_path(volume_id: str) -> str:
-        return os.path.join(aloelite_root, f"{volume_id}.sqlite")
+    def _sqlite_path(fs_id: str) -> str:
+        return os.path.join(aloelite_root, f"{fs_id}.sqlite")
 
     def _require(volume_id: str) -> VolumeRecord | None:
         return store.get(volume_id)
@@ -90,19 +94,39 @@ def create_app(
             return jsonify(error="pin must be omitted when encrypted is false"), 400
 
         vid = uuid.uuid4().hex
-        sqlite_path = _sqlite_path(vid)
+        fs_id = body.get("fs_id")
+        new_fs = fs_id is None
+        if new_fs:
+            fs_id = uuid.uuid4().hex
+            sqlite_path = _sqlite_path(fs_id)
+        else:
+            fsr = store.get_fs(fs_id)
+            if fsr is None:
+                return jsonify(error="no such filesystem"), 404
+            if any(v.name == name for v in store.volumes_of(fs_id)):
+                return jsonify(error="a volume with that name exists here"), 409
+            sqlite_path = fsr.sqlite_path
 
         from aloelite.aloelite import Aloelite  # lazy
 
         with Aloelite(sqlite_path) as fs:
-            fs.create_volume(name, pin=pin.encode() if pin else None)
+            fs.create_volume(
+                name, pin=pin.encode() if pin else None, ensure_unique=True
+            )
 
+        now = time.time()
+        if new_fs:
+            store.put_fs(
+                FilesystemRecord(
+                    id=fs_id, display_name=name, sqlite_path=sqlite_path, created_at=now
+                )
+            )
         rec = VolumeRecord(
             id=vid,
             name=name,
-            sqlite_path=sqlite_path,
+            fs_id=fs_id,
             encrypted=encrypted,
-            created_at=time.time(),
+            created_at=now,
             mounted=False,
             mountpoint=None,
         )
@@ -117,39 +141,43 @@ def create_app(
             return jsonify(error="no such volume"), 404
         if rec.mounted:
             try:
-                supervisor.unmount(rec)
+                if rec.frontend == FRONTEND_DIRECT:
+                    registry.lock(rec)
+                else:
+                    supervisor.unmount(rec)
             except merr.NotMounted:
                 pass  # store said mounted but session already gone; proceed
             rec = _require(vid) or rec
-        try:
-            os.unlink(rec.sqlite_path)
-        except FileNotFoundError:
-            pass
-        # best-effort: drop any sidecar WAL/SHM left behind
-        for suffix in ("-wal", "-shm"):
-            try:
-                os.unlink(rec.sqlite_path + suffix)
-            except FileNotFoundError:
-                pass
+        sqlite_path = store.sqlite_path_of(rec)
         store.delete(vid)
+        if not store.volumes_of(rec.fs_id):
+            # last volume in the file: retire the filesystem record + file
+            store.delete_fs(rec.fs_id)
+            for path in (sqlite_path, sqlite_path + "-wal", sqlite_path + "-shm"):
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
         return "", 204
 
     # -- GET /volumes -------------------------------------------------------
+    def _volume_item(rec: VolumeRecord) -> dict:
+        item = {
+            "id": rec.id,
+            "name": rec.name,
+            "fs_id": rec.fs_id,
+            "encrypted": rec.encrypted,
+            "mounted": rec.mounted,
+            "frontend": rec.frontend,
+        }
+        if rec.mounted:
+            item["mountpoint"] = rec.mountpoint
+        item["auto_mount"] = rec.auto_mount
+        return item
+
     @app.get("/volumes")
     def list_volumes():
-        out = []
-        for rec in store.list():
-            item = {
-                "id": rec.id,
-                "name": rec.name,
-                "encrypted": rec.encrypted,
-                "mounted": rec.mounted,
-            }
-            if rec.mounted:
-                item["mountpoint"] = rec.mountpoint
-            item["auto_mount"] = rec.auto_mount
-            out.append(item)
-        return jsonify(out), 200
+        return jsonify([_volume_item(rec) for rec in store.list()]), 200
 
     # -- POST /volumes/<id>/mount ------------------------------------------
     @app.post("/volumes/<vid>/mount")
@@ -160,6 +188,27 @@ def create_app(
         body = request.get_json(silent=True) or {}
         pin = body.get("pin")
         pin_bytes = pin.encode() if pin else None
+
+        if body.get("mode") == "direct":
+            if body.get("persist"):
+                return jsonify(
+                    error="persist is not supported for direct sessions "
+                    "(they end with the manager process)"
+                ), 400
+            try:
+                registry.unlock(rec, pin_bytes, store.sqlite_path_of(rec))
+            except merr.AlreadyMounted:
+                return jsonify(error="already mounted"), 409
+            except (merr.BadPin, merr.EncryptionMismatch) as e:
+                return jsonify(error=str(e) or e.__class__.__name__), 400
+            except merr.MountFailed as e:
+                return jsonify(error=str(e) or "unlock failed"), 500
+            rec.mounted = True
+            rec.mountpoint = None
+            rec.frontend = FRONTEND_DIRECT
+            store.put(rec)
+            return jsonify(id=vid, frontend=FRONTEND_DIRECT), 200
+
         mount_name = body.get("mount_name") or rec.id
         try:
             mountpoint = supervisor.mount(rec, pin_bytes, mp_path=mount_name)
@@ -174,6 +223,7 @@ def create_app(
 
         rec.mounted = True
         rec.mountpoint = mountpoint
+        rec.frontend = "fuse"
         if body.get("persist"):
             if rec.encrypted and not (body.get("pin_env") or body.get("pin_file")):
                 # roll back nothing: the mount succeeded; just refuse to persist
@@ -197,11 +247,15 @@ def create_app(
         if rec is None:
             return jsonify(error="no such volume"), 404
         try:
-            supervisor.unmount(rec)
+            if rec.frontend == FRONTEND_DIRECT:
+                registry.lock(rec)
+            else:
+                supervisor.unmount(rec)
         except merr.NotMounted:
             return jsonify(error="not mounted"), 404
         rec.mounted = False
         rec.mountpoint = None
+        rec.frontend = None
         rec.auto_mount = False
         store.put(rec)
         return "", 204
@@ -212,9 +266,16 @@ def create_app(
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
-        ready = bool(rec.mounted and supervisor.is_active(rec.mountpoint))
+        if rec.frontend == FRONTEND_DIRECT:
+            ready = registry.is_unlocked(rec.id)
+        else:
+            ready = bool(rec.mounted and supervisor.is_active(rec.mountpoint))
         return jsonify(
-            id=vid, mounted=rec.mounted, mountpoint=rec.mountpoint, ready=ready
+            id=vid,
+            mounted=rec.mounted,
+            mountpoint=rec.mountpoint,
+            frontend=rec.frontend,
+            ready=ready,
         ), 200
 
     # -- GET /volumes/<id>/stat --------------------------------------------
@@ -224,7 +285,7 @@ def create_app(
         if rec is None:
             return jsonify(error="no such volume"), 404
         try:
-            st = os.stat(rec.sqlite_path)
+            st = os.stat(store.sqlite_path_of(rec))
         except OSError as e:
             return jsonify(error=f"cannot stat backing file: {e}"), 500
         return jsonify(
@@ -241,29 +302,25 @@ def create_app(
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
-        checkpointed, remaining = _wal_checkpoint_truncate(rec.sqlite_path)
+        checkpointed, remaining = _wal_checkpoint_truncate(store.sqlite_path_of(rec))
         if remaining:
             app.logger.warning("checkpoint %s left %d WAL frames", vid, remaining)
         return jsonify(
             id=vid, wal_frames_checkpointed=checkpointed, wal_frames_remaining=remaining
         ), 200
 
-    # -- GET /volumes/<id>/export ------------------------------------------
-    @app.get("/volumes/<vid>/export")
-    def export_volume(vid):
-        rec = _require(vid)
-        if rec is None:
-            return jsonify(error="no such volume"), 404
-        checkpointed, remaining = _wal_checkpoint_truncate(rec.sqlite_path)
+    # -- export (shared streamer) ------------------------------------------
+    def _export_response(sqlite_path: str, filename: str, log_key: str):
+        _checkpointed, remaining = _wal_checkpoint_truncate(sqlite_path)
         if remaining:
             app.logger.warning(
-                "export %s checkpoint left %d WAL frames", vid, remaining
+                "export %s checkpoint left %d WAL frames", log_key, remaining
             )
         # Open + fstat the fd so Content-Length matches exactly what we stream,
         # even if writers append a new WAL after the checkpoint (WAL mode does
         # not touch the main file until the next checkpoint, so the first
         # `size` bytes remain a coherent snapshot).
-        fd = os.open(rec.sqlite_path, os.O_RDONLY)
+        fd = os.open(sqlite_path, os.O_RDONLY)
         size = os.fstat(fd).st_size
 
         def generate():
@@ -283,8 +340,29 @@ def create_app(
             mimetype="application/octet-stream",
             headers={
                 "Content-Length": str(size),
-                "Content-Disposition": f'attachment; filename="{vid}.sqlite"',
+                "Content-Disposition": f'attachment; filename="{filename}"',
             },
+        )
+
+    def _export_name(display_name: str) -> str:
+        # display_name is the "take it with you" name; ensure an extension and
+        # strip anything path-like or quote-breaking.
+        name = os.path.basename(display_name.replace("\\", "/")).replace('"', "")
+        if not name:
+            name = "aloelite"
+        if "." not in name:
+            name += ".sqlite"
+        return name
+
+    # -- GET /volumes/<id>/export (kept as an alias of the filesystem export)
+    @app.get("/volumes/<vid>/export")
+    def export_volume(vid):
+        rec = _require(vid)
+        if rec is None:
+            return jsonify(error="no such volume"), 404
+        fsr = store.get_fs(rec.fs_id)
+        return _export_response(
+            store.sqlite_path_of(rec), _export_name(fsr.display_name), vid
         )
 
     # -- GET /volumes/<id>/mounts --------------------------------------------
@@ -302,7 +380,7 @@ def create_app(
 
         from aloelite.aloelite import Aloelite  # lazy
 
-        with Aloelite(rec.sqlite_path) as fs:
+        with Aloelite(store.sqlite_path_of(rec)) as fs:
             names = {v.id: v.name for v in fs.list_volumes()}
             mounts = fs.list_mounts(include_unmounted=include)
         out = [
@@ -340,6 +418,149 @@ def create_app(
             return None
         return os.path.join(root, *parts) if parts else root
 
+    # -- direct-mode file explorer (over the held Mount session) -------------
+    #
+    # Same URL surface and response shapes as the FUSE branch, but every op
+    # goes through registry.session(...) -> the Mount API. Paths are the
+    # volume-relative strings the UI already sends; resolve() treats '..' as
+    # an ordinary (missing) name, so traversal safety is inherent. Engine
+    # mtimes are ms epoch; the UI expects seconds.
+    def _direct_call(fn):
+        from aloelite import errors as aerr  # lazy (mirrors other aloelite use)
+
+        try:
+            return fn()
+        except merr.NotMounted:
+            return jsonify(error="volume is not unlocked"), 409
+        except aerr.NotFound:
+            return jsonify(error="not found"), 404
+        except aerr.ContainerExists:
+            return jsonify(error="already exists"), 409
+        except aerr.NotAContainer:
+            return jsonify(error="not a directory"), 404
+        except aerr.NotAnEntry:
+            return jsonify(error="not a file"), 404
+        except aerr.LockHeld:
+            return jsonify(error="file is locked by another writer"), 423
+        except aerr.FsError as e:
+            return jsonify(error=f"{e.code}: {e}"), 500
+
+    def _req_path() -> str:
+        return request.args.get("path") or "/"
+
+    def _direct_list(rec: VolumeRecord):
+        def run():
+            with registry.session(rec.id) as m:
+                out = []
+                for e in m.list(_req_path()):
+                    if not e.visible:
+                        continue
+                    st = m.stat_by_id(e.node)
+                    is_dir = e.type.value == "container"
+                    out.append(
+                        {
+                            "name": e.name,
+                            "type": "dir" if is_dir else "file",
+                            "size": 0 if is_dir else (st.size or 0),
+                            "mtime": st.modified_at / 1000.0,
+                        }
+                    )
+                return jsonify(out), 200
+
+        return _direct_call(run)
+
+    def _direct_download(rec: VolumeRecord):
+        from contextlib import ExitStack
+
+        path = _req_path()
+
+        def run():
+            # Hold the session for the whole transfer: size and descriptor are
+            # taken under one lock acquisition, so headers match the bytes.
+            # (Serializes other ops on this volume for the duration — known
+            # cost for now.) Werkzeug closes the generator on disconnect, so
+            # the stack always unwinds.
+            stack = ExitStack()
+            m = stack.enter_context(registry.session(rec.id))
+            try:
+                size = m.stat(path).size or 0
+                r = stack.enter_context(m.open_read(path))
+            except BaseException:
+                stack.close()
+                raise
+
+            def generate():
+                try:
+                    remaining = size
+                    while remaining > 0:
+                        chunk = r.read(min(_STREAM_CHUNK, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        yield chunk
+                finally:
+                    stack.close()
+
+            name = path.rstrip("/").rsplit("/", 1)[-1] or rec.id
+            return Response(
+                generate(),
+                mimetype="application/octet-stream",
+                headers={
+                    "Content-Length": str(size),
+                    "Content-Disposition": f'attachment; filename="{name}"',
+                },
+            )
+
+        return _direct_call(run)
+
+    def _direct_upload(rec: VolumeRecord):
+        f = request.files.get("file")
+        if f is None or not f.filename:
+            return jsonify(error="multipart field 'file' is required"), 400
+        name = os.path.basename(f.filename.replace("\\", "/"))
+        if not name or name in (".", ".."):
+            return jsonify(error="bad filename"), 400
+        base = _req_path().rstrip("/")
+        dst = f"{base}/{name}"
+
+        def run():
+            with registry.session(rec.id) as m:
+                # TRUNCATE creates a missing entry; sequential writes ride the
+                # engine's bounded-memory streaming path.
+                with m.open_write(dst) as w:
+                    while chunk := f.stream.read(_STREAM_CHUNK):
+                        w.write(chunk)
+            return jsonify(name=name), 201
+
+        return _direct_call(run)
+
+    def _direct_mkdir(rec: VolumeRecord):
+        path = _req_path()
+        if path == "/":
+            return jsonify(error="path is required"), 400
+
+        def run():
+            with registry.session(rec.id) as m:
+                m.mkdir(path, parents=True)  # parents matches os.makedirs
+            return jsonify(path=path), 201
+
+        return _direct_call(run)
+
+    def _direct_delete(rec: VolumeRecord):
+        path = _req_path()
+        if path == "/":
+            return jsonify(error="refusing to delete the volume root"), 400
+
+        def run():
+            with registry.session(rec.id) as m:
+                if m.stat(path).type.value == "container":
+                    m.remove_recursive(path)
+                else:
+                    m.remove(path)
+            return "", 204
+
+        return _direct_call(run)
+
     def _files_ctx(vid: str, *, want: str | None = None):
         """Resolve (record, root, abs-path) for a files request, or an error
         response tuple. `want` = 'dir'|'file' adds an existence/type check."""
@@ -360,6 +581,9 @@ def create_app(
 
     @app.get("/volumes/<vid>/files")
     def list_files(vid):
+        rec = _require(vid)
+        if rec is not None and rec.frontend == FRONTEND_DIRECT:
+            return _direct_list(rec)
         ctx, err = _files_ctx(vid, want="dir")
         if err:
             return err
@@ -383,6 +607,9 @@ def create_app(
 
     @app.get("/volumes/<vid>/files/download")
     def download_file(vid):
+        rec = _require(vid)
+        if rec is not None and rec.frontend == FRONTEND_DIRECT:
+            return _direct_download(rec)
         ctx, err = _files_ctx(vid, want="file")
         if err:
             return err
@@ -392,6 +619,9 @@ def create_app(
     @app.post("/volumes/<vid>/files/upload")
     def upload_file(vid):
         # multipart form: field 'file'; ?path= is the target directory
+        rec = _require(vid)
+        if rec is not None and rec.frontend == FRONTEND_DIRECT:
+            return _direct_upload(rec)
         ctx, err = _files_ctx(vid, want="dir")
         if err:
             return err
@@ -409,6 +639,9 @@ def create_app(
 
     @app.post("/volumes/<vid>/files/mkdir")
     def mkdir_files(vid):
+        rec = _require(vid)
+        if rec is not None and rec.frontend == FRONTEND_DIRECT:
+            return _direct_mkdir(rec)
         ctx, err = _files_ctx(vid)
         if err:
             return err
@@ -422,6 +655,9 @@ def create_app(
 
     @app.delete("/volumes/<vid>/files")
     def delete_files(vid):
+        rec = _require(vid)
+        if rec is not None and rec.frontend == FRONTEND_DIRECT:
+            return _direct_delete(rec)
         ctx, err = _files_ctx(vid)
         if err:
             return err
@@ -435,6 +671,108 @@ def create_app(
         else:
             return jsonify(error="no such file"), 404
         return "", 204
+
+    # -- filesystems (the unit of portability) -------------------------------
+    @app.get("/filesystems")
+    def list_filesystems():
+        out = []
+        for fsr in store.list_fs():
+            try:
+                size = os.stat(fsr.sqlite_path).st_size
+            except OSError:
+                size = None
+            out.append(
+                {
+                    "id": fsr.id,
+                    "display_name": fsr.display_name,
+                    "created_at": fsr.created_at,
+                    "size_bytes": size,
+                    "volumes": [_volume_item(v) for v in store.volumes_of(fsr.id)],
+                }
+            )
+        return jsonify(out), 200
+
+    @app.patch("/filesystems/<fid>")
+    def rename_filesystem(fid):
+        fsr = store.get_fs(fid)
+        if fsr is None:
+            return jsonify(error="no such filesystem"), 404
+        body = request.get_json(silent=True) or {}
+        name = (body.get("display_name") or "").strip()
+        if not name:
+            return jsonify(error="display_name is required"), 400
+        fsr.display_name = name
+        store.put_fs(fsr)
+        return jsonify(id=fid, display_name=name), 200
+
+    @app.get("/filesystems/<fid>/export")
+    def export_filesystem(fid):
+        fsr = store.get_fs(fid)
+        if fsr is None:
+            return jsonify(error="no such filesystem"), 404
+        return _export_response(
+            fsr.sqlite_path, _export_name(fsr.display_name), fid
+        )
+
+    @app.post("/filesystems/import")
+    def import_filesystem():
+        """Accept an aloelite .sqlite upload, register its volumes. Encrypted
+        volumes are labeled from enc_mode (readable without a PIN); unlocking
+        happens later. The file lands under a fresh fs_id; display_name comes
+        from the upload filename."""
+        f = request.files.get("file")
+        if f is None or not f.filename:
+            return jsonify(error="multipart field 'file' is required"), 400
+        head = f.stream.read(16)
+        f.stream.seek(0)
+        if head != b"SQLite format 3\x00":
+            return jsonify(error="not an SQLite file"), 400
+
+        fs_id = uuid.uuid4().hex
+        sqlite_path = _sqlite_path(fs_id)
+        f.save(sqlite_path)  # werkzeug streams to disk in chunks
+
+        # Read volume rows directly (metadata is never encrypted); a file
+        # without the aloelite schema is rejected and removed.
+        try:
+            con = sqlite3.connect(sqlite_path, timeout=5.0)
+            try:
+                rows = con.execute(
+                    "SELECT volume_id, name, enc_mode, created_at FROM volume "
+                    "ORDER BY volume_id"
+                ).fetchall()
+            finally:
+                con.close()
+        except sqlite3.Error as e:
+            try:
+                os.unlink(sqlite_path)
+            except FileNotFoundError:
+                pass
+            return jsonify(error=f"not an aloelite filesystem: {e}"), 400
+
+        display = os.path.basename(f.filename.replace("\\", "/")) or fs_id
+        store.put_fs(
+            FilesystemRecord(
+                id=fs_id,
+                display_name=display,
+                sqlite_path=sqlite_path,
+                created_at=time.time(),
+            )
+        )
+        vols = []
+        for volume_id, vname, enc_mode, created_at in rows:
+            rec = VolumeRecord(
+                id=uuid.uuid4().hex,
+                name=vname or volume_id[:8],
+                fs_id=fs_id,
+                encrypted=(enc_mode != "none"),
+                created_at=(created_at or 0) / 1000.0,
+                mounted=False,
+                mountpoint=None,
+            )
+            store.put(rec)
+            vols.append(_volume_item(rec))
+        return jsonify(id=fs_id, display_name=display, volumes=vols), 201
 
     @app.get("/health")
     def health():

@@ -23,14 +23,21 @@ from .supervisor import MountSupervisor
 VOLUMES_JSON = os.path.join(ALOELITE_ROOT, "volumes.json")
 
 
-def build(store=None, supervisor=None):
+def build(store=None, supervisor=None, registry=None):
     """Construct the (store, supervisor, app) triple. Exposed for tests."""
+    from .direct import DirectSessionRegistry
+
     store = store or JsonVolumeStore(VOLUMES_JSON)
     supervisor = supervisor or MountSupervisor(
         store, aloelite_root=ALOELITE_ROOT, mnt_dir=MANAGER_MNT
     )
+    registry = registry or DirectSessionRegistry()
     app = create_app(
-        store, supervisor, aloelite_root=ALOELITE_ROOT, host_mnt_prefix=HOST_MNT_PREFIX
+        store,
+        supervisor,
+        registry=registry,
+        aloelite_root=ALOELITE_ROOT,
+        host_mnt_prefix=HOST_MNT_PREFIX,
     )
     return store, supervisor, app
 
@@ -49,6 +56,7 @@ def main() -> int:
         app.logger.info("signal %s received; shutting down", signum)
         try:
             supervisor.shutdown()
+            app.config["DIRECT_REGISTRY"].shutdown()
         finally:
             store.close()
         sys.exit(0)

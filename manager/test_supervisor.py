@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from manager.store import JsonVolumeStore, VolumeRecord
+from manager.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
 from manager.supervisor import MountSupervisor
 from manager import errors as merr
 
@@ -37,7 +37,7 @@ class FakeBackend:
         self._lock = threading.Lock()
         self.unmount_calls: list[str] = []
 
-    def runner(self, record, pin, mountpoint, stop_event):
+    def runner(self, record, pin, mountpoint, stop_event, sqlite_path=None):
         b = self.behavior
         if b == "badkey":
             raise type("BadKey", (Exception,), {})("wrong pin")
@@ -79,10 +79,18 @@ def _mk(tmp, behavior="ok", **kw):
         poll_interval=0.02,
         **kw,
     )
+    store.put_fs(
+        FilesystemRecord(
+            id="fs1",
+            display_name="vol1",
+            sqlite_path=f"{tmp}/v1.sqlite",
+            created_at=time.time(),
+        )
+    )
     rec = VolumeRecord(
         id="v1",
         name="vol1",
-        sqlite_path=f"{tmp}/v1.sqlite",
+        fs_id="fs1",
         encrypted=False,
         created_at=time.time(),
         mounted=False,
