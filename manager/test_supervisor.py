@@ -210,6 +210,21 @@ def test_auto_mount_missing_pin_env_skips(tmp_path):
     print("  ok: auto-mount failure is logged and skipped")
 
 
+def test_recover_stale_direct(tmp_path):
+    from manager.preflight import recover_stale_mounts
+
+    store, fb, sup, rec = _mk(tmp_path, "ok")
+    rec.mounted = True
+    rec.frontend = "direct"
+    store.put(rec)
+    results = recover_stale_mounts(store)
+    assert any("stale direct" in r.name for r in results)
+    got = store.get("v1")
+    assert got.mounted is False and got.frontend is None
+    assert fb.unmount_calls == []  # no fusermount for a direct record
+    print("  ok: stale direct session cleared at startup")
+
+
 def test_shutdown_stops_all(tmp_path):
     store, fb, sup, rec = _mk(tmp_path, "ok")
     sup.mount(rec, None)

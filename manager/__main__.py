@@ -64,7 +64,18 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
-    host = os.environ.get("ALOELITE_API_HOST", "0.0.0.0")
+    # The manager has no authentication. In direct-only mode (the local,
+    # no-container on-ramp) bind loopback unless explicitly overridden; the
+    # container/provisioner deployment keeps the 0.0.0.0 default.
+    direct_only = os.environ.get("ALOELITE_DIRECT_ONLY", "") not in ("", "0")
+    default_host = "127.0.0.1" if direct_only else "0.0.0.0"
+    host = os.environ.get("ALOELITE_API_HOST", default_host)
+    if direct_only and host not in ("127.0.0.1", "localhost", "::1"):
+        app.logger.warning(
+            "binding %s: the manager API has no authentication — anyone who "
+            "can reach this address can read and write every volume",
+            host,
+        )
     port = int(os.environ.get("ALOELITE_API_PORT", "8080"))
     # threaded=True: mount/export endpoints block; serve them concurrently.
     app.run(host=host, port=port, threaded=True)

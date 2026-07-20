@@ -197,8 +197,14 @@
         </div>
         <div x-show="newEnc" class="mb-3">
           <label class="form-label small">PIN</label>
-          <input type="password" class="form-control form-control-sm" x-model="newPin"
+          <input type="password" class="form-control form-control-sm mb-2" x-model="newPin"
                  placeholder="passphrase" @keydown.enter="doCreate()">
+          <label class="form-label small">Confirm PIN</label>
+          <input type="password" class="form-control form-control-sm" x-model="newPin2"
+                 placeholder="repeat passphrase" @keydown.enter="doCreate()">
+          <div class="form-text text-danger" style="font-size:.72rem;">
+            There is no recovery. If you lose the PIN, the data is gone.
+          </div>
         </div>
         <div x-show="fss.length && !newFsId" class="mb-2">
           <a href="#" class="small" @click.prevent="newShowTarget = !newShowTarget">Advanced…</a>
@@ -386,7 +392,7 @@ function app() {
     apiOk: false,
 
     showCreate: false,
-    newName: '', newEnc: false, newPin: '', newFsId: '', newShowTarget: false,
+    newName: '', newEnc: false, newPin: '', newPin2: '', newFsId: '', newShowTarget: false,
     createErr: '', creating: false,
 
     mountTarget: null,
@@ -458,6 +464,7 @@ function app() {
     async doCreate() {
       if (!this.newName.trim()) { this.createErr = 'Name is required.'; return; }
       if (this.newEnc && !this.newPin) { this.createErr = 'PIN is required for encrypted volumes.'; return; }
+      if (this.newEnc && this.newPin !== this.newPin2) { this.createErr = 'PINs do not match.'; return; }
       this.creating = true; this.createErr = '';
       try {
         const body = { name: this.newName.trim(), encrypted: this.newEnc };
@@ -471,7 +478,7 @@ function app() {
           this.newEnc ? { mode: 'direct', pin: this.newPin } : { mode: 'direct' });
         this.addLog(`Created "${this.newName.trim()}"`);
         this._modal('createModal').hide();
-        this.newName = ''; this.newEnc = false; this.newPin = '';
+        this.newName = ''; this.newEnc = false; this.newPin = ''; this.newPin2 = '';
         this.newFsId = ''; this.newShowTarget = false;
         await this.refresh();
         if (m.ok) {
@@ -675,6 +682,14 @@ function app() {
         const r = await this.api('GET',
           `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expPath)}`);
         if (r.ok) this.expEntries = r.data;
+        else if (r.status === 409) {
+          // Session gone (e.g. manager restarted): route back into Open.
+          this.expEntries = [];
+          this._modal('expModal').hide();
+          await this.refresh();
+          const v = this._vol(this.expVol.id);
+          if (v) this.openVol(v);
+        }
         else { this.expEntries = []; this.expErr = r.data?.error || 'Failed to list files.'; }
       } catch { this.expErr = 'Could not reach API.'; }
       this.expBusy = false;

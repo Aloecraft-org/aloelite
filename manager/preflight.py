@@ -195,14 +195,31 @@ def _lazy_unmount(mountpoint: str) -> None:
 
 def recover_stale_mounts(store: VolumeStore) -> list[CheckResult]:
     """For each mounted=True record with no live FUSE session, clear the flag
-    and defensively lazy-unmount. Also drain the pending-unmounts side list.
-    All results are warnings."""
+    and defensively lazy-unmount. Direct sessions always die with the process,
+    so any record still marked direct is stale by definition and cleared
+    unconditionally. Also drain the pending-unmounts side list. All results
+    are warnings."""
     results: list[CheckResult] = []
     for rec in store.list():
+        if rec.mounted and getattr(rec, "frontend", None) == "direct":
+            rec.mounted = False
+            rec.mountpoint = None
+            rec.frontend = None
+            store.put(rec)
+            results.append(
+                CheckResult(
+                    f"stale direct session {rec.id}",
+                    True,
+                    False,
+                    "cleared (direct sessions end with the manager process)",
+                )
+            )
+            continue
         if rec.mounted and rec.mountpoint and not _is_fuse_active(rec.mountpoint):
             _lazy_unmount(rec.mountpoint)
             rec.mounted = False
             rec.mountpoint = None
+            rec.frontend = None
             store.put(rec)
             results.append(
                 CheckResult(
