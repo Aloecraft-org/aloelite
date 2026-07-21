@@ -125,6 +125,29 @@ If a persisted volume didn't come back, check the container log for an
 
 ---
 
+## WebUI (`aloelite-web`)
+
+### "Address already in use" on start
+
+Another process holds port 8080 (possibly an earlier manager). Start on a
+different port with `aloelite-web -p 9090`, or find and stop the holder.
+
+### Data ended up in /root/.aloelite
+
+`aloelite-web` was run with sudo. Direct mode needs no root; run it as
+yourself and the data root defaults to `~/.aloelite` (or pass `--root`).
+Move the `.sqlite` files and `volumes.json` across if anything was
+already created.
+
+### FUSE mount from the WebUI fails in direct-only mode
+
+`aloelite-web` runs direct-only by default, so FUSE preconditions are
+never checked at startup and a FUSE mount fails at mount time instead.
+Start with `aloelite-web --fuse` (needs the container-grade environment:
+`/dev/fuse`, CAP_SYS_ADMIN, rshared `/mnt`) or use the Docker manager.
+
+---
+
 ## CLI
 
 ### "multiple volumes; pick one with -v"

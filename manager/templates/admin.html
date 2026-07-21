@@ -343,6 +343,15 @@
           </div>
         </div>
         <div x-show="expErr" x-cloak class="alert alert-danger py-1 px-2 small" x-text="expErr"></div>
+        <template x-for="u in expUploads" :key="u.id">
+          <div class="d-flex align-items-center gap-2 mb-1" style="font-size:.78rem;">
+            <span class="text-truncate" style="max-width:40%;" x-text="u.name"></span>
+            <div class="progress flex-grow-1" style="height:6px;">
+              <div class="progress-bar" :style="`width:${u.pct}%`"></div>
+            </div>
+            <span style="min-width:2.5em;" class="text-end" x-text="u.pct + '%'"></span>
+          </div>
+        </template>
         <div :class="expDropHover ? 'border border-primary rounded' : ''"
              @dragover.prevent="expDropHover = true"
              @dragleave.prevent="expDropHover = false"
@@ -357,11 +366,20 @@
                 <td>
                   <a x-show="e.type === 'dir'" href="#" class="text-decoration-none"
                      @click.prevent="navTo(expJoin(e.name))">&#128193; <span x-text="e.name"></span></a>
-                  <span x-show="e.type === 'file'">&#128196; <span x-text="e.name"></span></span>
+                  <a x-show="e.type === 'file' && canPreview(e.name)" href="#"
+                     class="text-decoration-none text-body"
+                     @click.prevent="expPreview(e)">&#128196; <span x-text="e.name"></span></a>
+                  <span x-show="e.type === 'file' && !canPreview(e.name)">&#128196; <span x-text="e.name"></span></span>
                 </td>
                 <td class="text-end" x-text="e.type === 'file' ? fmtBytes(e.size) : ''"></td>
                 <td x-text="fmtTime(e.mtime)"></td>
                 <td class="text-end text-nowrap">
+                  <button class="btn btn-sm btn-outline-secondary py-0"
+                          title="Rename" @click="expRename(e)">&#9998;</button>
+                  <button class="btn btn-sm btn-outline-secondary py-0"
+                          title="Move" @click="expMove(e)">&#10132;</button>
+                  <button class="btn btn-sm btn-outline-secondary py-0"
+                          title="Copy" @click="expCopy(e)">&#10697;</button>
                   <button x-show="e.type === 'file'" class="btn btn-sm btn-outline-secondary py-0"
                           title="Download" @click="expDownload(e)">&#8595;</button>
                   <button class="btn btn-sm btn-outline-danger py-0"
@@ -377,6 +395,37 @@
           </tbody>
         </table>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:1080;" x-data>
+  <template x-for="t in toasts" :key="t.id">
+    <div class="alert py-2 px-3 mb-2 shadow-sm" style="font-size:.85rem;"
+         :class="t.ok ? 'alert-success' : 'alert-danger'" x-text="t.msg"></div>
+  </template>
+</div>
+
+<!-- preview modal -->
+<div class="modal fade" id="pvModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title" x-text="pvName"></h6>
+        <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"
+                @click="pvUrl = ''"></button>
+      </div>
+      <div class="modal-body text-center">
+        <img x-show="pvKind === 'img'" :src="pvKind === 'img' ? pvUrl : ''" class="img-fluid">
+        <!-- sandbox="" so an uploaded .html can't script against the manager origin -->
+        <iframe x-show="pvKind === 'frame'" sandbox=""
+                :src="pvKind === 'frame' ? pvUrl : ''"
+                style="width:100%; height:70vh; border:0;"></iframe>
+        <!-- pdf viewer refuses to render sandboxed; PDFs are inert enough -->
+        <iframe x-show="pvKind === 'pdf'"
+                :src="pvKind === 'pdf' ? pvUrl : ''"
+                style="width:100%; height:70vh; border:0;"></iframe>
       </div>
     </div>
   </div>
@@ -404,6 +453,9 @@ function app() {
 
     expVol: null, expPath: '/', expEntries: [], expErr: '', expBusy: false,
     expDropHover: false,
+    expUploads: [],
+    toasts: [],
+    pvName: '', pvUrl: '', pvKind: '',
     preflightWarnings: [],
 
     _modal(id) { return bootstrap.Modal.getOrCreateInstance(document.getElementById(id)); },
@@ -422,6 +474,12 @@ function app() {
       const t = new Date().toLocaleTimeString();
       this.log.unshift(`[${t}]  ${msg}`);
       if (this.log.length > 60) this.log.pop();
+    },
+
+    toast(msg, ok = true) {
+      const t = { id: Date.now() + Math.random(), msg, ok };
+      this.toasts.push(t);
+      setTimeout(() => { this.toasts = this.toasts.filter(x => x.id !== t.id); }, 3500);
     },
 
     async api(method, path, body) {
@@ -708,7 +766,8 @@ function app() {
       if (!confirm(`Delete ${e.name}${e.type === 'dir' ? ' and its contents' : ''}?`)) return;
       const r = await this.api('DELETE',
         `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expJoin(e.name))}`);
-      if (!r.ok) this.expErr = r.data?.error || 'delete failed.';
+      if (!r.ok) { this.expErr = r.data?.error || 'delete failed.'; this.toast(this.expErr, false); }
+      else this.toast(`Deleted ${e.name}`);
       this.loadFiles();
     },
 
@@ -717,6 +776,44 @@ function app() {
       a.href = `${this.apiBase}/volumes/${this.expVol.id}/files/download?path=${encodeURIComponent(this.expJoin(e.name))}`;
       a.download = e.name;
       a.click();
+    },
+
+    async expRename(e) {
+      const name = prompt('New name:', e.name);
+      if (!name || name === e.name) return;
+      await this._transfer('move', this.expJoin(e.name), this.expJoin(name), 'Renamed');
+    },
+
+    async expMove(e) {
+      const dst = prompt('Move to (full path):', this.expJoin(e.name));
+      if (!dst || dst === this.expJoin(e.name)) return;
+      await this._transfer('move', this.expJoin(e.name), dst, 'Moved');
+    },
+
+    async expCopy(e) {
+      const dst = prompt('Copy to (full path):', this.expJoin(e.name) + '.copy');
+      if (!dst) return;
+      await this._transfer('copy', this.expJoin(e.name), dst, 'Copied');
+    },
+
+    async _transfer(op, src, dst, verb) {
+      const r = await this.api('POST', `/volumes/${this.expVol.id}/files/transfer`, { op, src, dst });
+      if (r.ok) this.toast(`${verb} to ${dst}`);
+      else { this.expErr = r.data?.error || `${op} failed.`; this.toast(this.expErr, false); }
+      this.loadFiles();
+    },
+
+    canPreview(name) {
+      return /\.(png|jpe?g|gif|webp|svg|bmp|pdf|txt|md|log|json|csv|ya?ml|py|js|html?|css|sh|toml|ini|xml)$/i.test(name);
+    },
+
+    expPreview(e) {
+      this.pvName = e.name;
+      this.pvKind = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(e.name) ? 'img'
+        : (/\.pdf$/i.test(e.name) ? 'pdf' : 'frame');
+      this.pvUrl = `${this.apiBase}/volumes/${this.expVol.id}/files/download` +
+        `?path=${encodeURIComponent(this.expJoin(e.name))}&inline=1`;
+      this._modal('pvModal').show();
     },
 
     async expUpload(ev) {
@@ -744,17 +841,38 @@ function app() {
           }
         }
       }
-      const fd = new FormData();
-      fd.append('file', file);
-      try {
-        const r = await fetch(
-          `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(dirPath)}`,
-          { method: 'POST', body: fd });
-        if (!r.ok) {
-          const d = await r.json().catch(() => null);
-          this.expErr = d?.error || `upload of ${file.name} failed`;
-        }
-      } catch { this.expErr = 'Could not reach API.'; }
+      await this._uploadXhr(file, dirPath);
+    },
+
+    _uploadXhr(file, dirPath) {
+      return new Promise(res => {
+        this.expUploads.push({ id: Date.now() + Math.random(), name: file.name, pct: 0 });
+        const item = this.expUploads[this.expUploads.length - 1]; // proxied ref
+        const done = () => { this.expUploads = this.expUploads.filter(u => u.id !== item.id); };
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST',
+          `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(dirPath)}`);
+        xhr.upload.onprogress = e => {
+          if (e.lengthComputable) item.pct = Math.round(e.loaded / e.total * 100);
+        };
+        xhr.onload = () => {
+          done();
+          if (xhr.status >= 200 && xhr.status < 300) {
+            this.toast(`Uploaded ${file.name}`); res(true);
+          } else {
+            let d = null; try { d = JSON.parse(xhr.responseText); } catch {}
+            this.expErr = d?.error || `upload of ${file.name} failed`;
+            this.toast(this.expErr, false); res(false);
+          }
+        };
+        xhr.onerror = () => {
+          done(); this.expErr = 'Could not reach API.';
+          this.toast(this.expErr, false); res(false);
+        };
+        const fd = new FormData();
+        fd.append('file', file);
+        xhr.send(fd);
+      });
     },
 
     async expDrop(ev) {
@@ -791,7 +909,9 @@ function app() {
     fmtBytes(n) {
       if (n < 1024) return `${n} B`;
       if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
-      return `${(n / 1048576).toFixed(2)} MB`;
+      if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
+      if (n < 1099511627776) return `${(n / 1073741824).toFixed(2)} GB`;
+      return `${(n / 1099511627776).toFixed(2)} TB`;
     },
 
     fmtTime(ts) { return new Date(ts * 1000).toLocaleString(); },

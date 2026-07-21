@@ -205,6 +205,26 @@ Troubleshooting for the recipe).
 
 ---
 
+## WebUI
+
+The quickest way to *see* Aloelite: a browser file manager over your
+filesystem files.
+
+```bash
+pip install aloelite
+aloelite-web
+```
+
+Open `http://localhost:8080`. **New volume** creates a file, a volume
+inside it, and opens the explorer in one step — drag files in, preview
+them, and **Download** the `.sqlite` from its card whenever you want to
+take everything with you. Data lives in `~/.aloelite` by default; run
+`aloelite-web --help` for port, bind, and root options. The server binds
+loopback and has no authentication — front it with a reverse proxy if it
+must be reachable remotely.
+
+---
+
 ## Volume manager
 
 The manager is a container that hosts multiple volumes and exposes each
@@ -250,10 +270,11 @@ docker run -d -v /mnt/aloelite/<id>:/var/mail my-mail-server
 
 ### Admin panel
 
-Open `http://localhost:8080/admin` in a browser. The WebUI covers the
-whole manager without touching the API: create, mount, and delete
-volumes, browse/upload/download files in mounted volumes with a built-in
-file explorer, inspect each file's durable mounts, and download a live
+Open `http://localhost:8080` in a browser (the same UI `aloelite-web`
+serves). The WebUI covers the whole manager without touching the API:
+create, mount, and delete volumes, browse/upload/download/preview files
+with a built-in file explorer (rename, move, copy, drag-and-drop with
+progress), inspect each file's durable mounts, and download a live
 snapshot of any volume.
 
 ### Backups

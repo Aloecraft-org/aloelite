@@ -23,8 +23,8 @@
   repeated backups
 - **Atomic and versioned**: writes commit fully or not at all; history
   is kept until you prune
-- **Use it your way**: Python API, CLI, FUSE directory, or
-  container-volume manager over one format
+- **Use it your way**: Python API, CLI, browser WebUI (`aloelite-web`),
+  FUSE directory, or container-volume manager over one format
 - **Runs anywhere SQLite does**: which is nearly everywhere
 
 ### What is Aloelite, in one sentence?
@@ -138,8 +138,9 @@ locks across separate mounts are not there yet.
 
 ### Which platforms are supported?
 
-The Python library and CLI run anywhere Python does. FUSE is Linux-only.
-The manager targets Linux containers (Docker/Podman).
+The Python library, CLI, and WebUI (`aloelite-web`, direct mode) run
+anywhere Python does. FUSE is Linux-only. The manager's FUSE-provisioning
+mode targets Linux containers (Docker/Podman).
 
 ### What license does this use?
 

@@ -43,6 +43,7 @@ def build(store=None, supervisor=None, registry=None):
 
 
 def main() -> int:
+    os.makedirs(ALOELITE_ROOT, exist_ok=True)
     store, supervisor, app = build()
     results = run_preflight(store, aloelite_root=ALOELITE_ROOT, mnt=MANAGER_MNT)
     app.config["PREFLIGHT_RESULTS"] = [
@@ -53,13 +54,11 @@ def main() -> int:
         app.logger.info("auto-mounted %s", mp)
 
     def _shutdown(signum, _frame):
+        # Do NOT tear down here: blocking in a signal handler leaves the
+        # process (and the port) alive. Just break out of app.run; the
+        # finally below cleans up after the socket has closed.
         app.logger.info("signal %s received; shutting down", signum)
-        try:
-            supervisor.shutdown()
-            app.config["DIRECT_REGISTRY"].shutdown()
-        finally:
-            store.close()
-        sys.exit(0)
+        raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -77,8 +76,21 @@ def main() -> int:
             host,
         )
     port = int(os.environ.get("ALOELITE_API_PORT", "8080"))
+    print(f"aloelite manager: http://{'localhost' if host in ('127.0.0.1', '::1') else host}:{port}/admin")
+    print(f"  data root: {ALOELITE_ROOT}")
+    if direct_only:
+        print("  mode: direct only (browser access; set ALOELITE_DIRECT_ONLY=0 for FUSE)")
     # threaded=True: mount/export endpoints block; serve them concurrently.
-    app.run(host=host, port=port, threaded=True)
+    try:
+        app.run(host=host, port=port, threaded=True)
+    finally:
+        # Socket is closed by the time we get here. A second Ctrl-C during a
+        # hung teardown raises KeyboardInterrupt and kills the process.
+        try:
+            supervisor.shutdown()
+            app.config["DIRECT_REGISTRY"].shutdown()
+        finally:
+            store.close()
     return 0
 
 

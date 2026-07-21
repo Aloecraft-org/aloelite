@@ -30,7 +30,6 @@ ALOELITE_ROOT = "/aloelite-root"
 MANAGER_MNT = "/mnt"
 CAP_SYS_ADMIN_BIT = 21
 
-
 @dataclass
 class CheckResult:
     name: str

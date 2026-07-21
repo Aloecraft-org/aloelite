@@ -25,19 +25,27 @@ Endpoints:
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import shutil
 import sqlite3
 import time
 import uuid
 
-from flask import Flask, Response, jsonify, request, render_template, send_file
+from flask import Flask, Response, jsonify, redirect, request, render_template, send_file
 
 from . import errors as merr
 from .direct import FRONTEND_DIRECT, DirectSessionRegistry
 from .store import FilesystemRecord, VolumeRecord, VolumeStore
 
-ALOELITE_ROOT = "/aloelite-root"
+def _default_root() -> str:
+    if os.environ.get("ALOELITE_ROOT"):
+        return os.environ["ALOELITE_ROOT"]
+    if os.environ.get("ALOELITE_DIRECT_ONLY", "") not in ("", "0"):
+        return os.path.expanduser("~/.aloelite")
+    return "/aloelite-root"
+
+ALOELITE_ROOT = _default_root()
 HOST_MNT_PREFIX = "/mnt/aloelite"  # host-visible path consumers bind-mount
 _STREAM_CHUNK = 1 << 20
 
@@ -502,12 +510,16 @@ def create_app(
                     stack.close()
 
             name = path.rstrip("/").rsplit("/", 1)[-1] or rec.id
+            inline = request.args.get("inline") in ("1", "true")
+            mt = (mimetypes.guess_type(name)[0] if inline else None) \
+                or "application/octet-stream"
+            disp = "inline" if inline else "attachment"
             return Response(
                 generate(),
-                mimetype="application/octet-stream",
+                mimetype=mt,
                 headers={
                     "Content-Length": str(size),
-                    "Content-Disposition": f'attachment; filename="{name}"',
+                    "Content-Disposition": f'{disp}; filename="{name}"',
                 },
             )
 
@@ -614,7 +626,10 @@ def create_app(
         if err:
             return err
         _rec, _root, p = ctx
-        return send_file(p, as_attachment=True, download_name=os.path.basename(p))
+        inline = request.args.get("inline") in ("1", "true")
+        return send_file(
+            p, as_attachment=not inline, download_name=os.path.basename(p)
+        )
 
     @app.post("/volumes/<vid>/files/upload")
     def upload_file(vid):
@@ -671,6 +686,43 @@ def create_app(
         else:
             return jsonify(error="no such file"), 404
         return "", 204
+
+    @app.post("/volumes/<vid>/files/transfer")
+    def transfer_files(vid):
+        """{"op": "move"|"copy", "src": "/a", "dst": "/b"} — rename is a move
+        within the same directory."""
+        body = request.get_json(silent=True) or {}
+        op, src, dst = body.get("op"), body.get("src"), body.get("dst")
+        if op not in ("move", "copy") or not src or not dst or dst == "/":
+            return jsonify(error="op (move|copy), src, dst are required"), 400
+        rec = _require(vid)
+        if rec is None:
+            return jsonify(error="no such volume"), 404
+        if rec.frontend == FRONTEND_DIRECT:
+            def run():
+                with registry.session(rec.id) as m:
+                    if op == "copy":
+                        m.copy(src, dst)
+                    else:
+                        m.move(src, dst)
+                return jsonify(src=src, dst=dst), 200
+
+            return _direct_call(run)
+        root = _files_root(rec)
+        if root is None:
+            return jsonify(error="volume is not mounted"), 409
+        ps, pd = _safe_join(root, src), _safe_join(root, dst)
+        if ps is None or pd is None or ps == root:
+            return jsonify(error="bad path"), 400
+        if not os.path.exists(ps):
+            return jsonify(error="no such file"), 404
+        if os.path.exists(pd):
+            return jsonify(error="destination exists"), 409
+        if op == "copy":
+            (shutil.copytree if os.path.isdir(ps) else shutil.copy2)(ps, pd)
+        else:
+            os.replace(ps, pd)
+        return jsonify(src=src, dst=dst), 200
 
     # -- filesystems (the unit of portability) -------------------------------
     @app.get("/filesystems")
@@ -779,6 +831,10 @@ def create_app(
         results = app.config.get("PREFLIGHT_RESULTS", [])
         warnings = [r for r in results if not r["ok"] and not r["fatal"]]
         return jsonify(ok=True, preflight=results, warnings=warnings), 200
+
+    @app.get("/")
+    def index():
+        return redirect("/admin")
 
     @app.get("/admin")
     def admin():

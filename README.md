@@ -70,11 +70,10 @@ with Aloelite("notebook.fs") as fs, fs.mount("docs", create=True) as m:
     m.put("/hello.txt", b"hello world")
 ```
 
-**WebUI (no Docker, no FUSE — runs anywhere Python does)**
+**WebUI (no Docker, no FUSE, no sudo — runs anywhere Python does)**
 ```bash
-sudo mkdir -p /aloelite-root && sudo chown $USER /aloelite-root   # once
-ALOELITE_DIRECT_ONLY=1 python3 -m manager
-# open http://localhost:8080/admin — create a volume, drag files in and out,
+aloelite-web
+# open http://localhost:8080 — create a volume, drag files in and out,
 # download the .sqlite file and take it with you
 ```
 
@@ -340,17 +339,23 @@ admin panel. Each volume is served by one of two frontends:
 ### Run (direct only — no FUSE, no container)
 
 ```bash
-sudo mkdir -p /aloelite-root && sudo chown $USER /aloelite-root   # once
-ALOELITE_DIRECT_ONLY=1 python3 -m manager
+aloelite-web
 ```
 
-Open `http://localhost:8080/admin`: **New volume** creates a filesystem file,
-a volume inside it, and opens the file explorer in one step. Drag files in,
-**Download** the `.sqlite` file from its card to take it with you, and
-**Import** any Aloelite file to pick up where you left off. Encrypted volumes
-prompt for their PIN when opened. `ALOELITE_DIRECT_ONLY=1` skips the FUSE
-environment checks at startup; FUSE mounts requested anyway fail at mount
-time with their own error.
+That's the whole setup: direct mode, bound to `127.0.0.1:8080`, data in
+`~/.aloelite`. No sudo, no directories to prepare. Flags (see
+`aloelite-web --help`): `-p/--port`, `--host`, `--root`, and `--fuse` to
+run the container-grade FUSE provisioning mode instead; the matching
+`ALOELITE_*` environment variables are honored when a flag is absent.
+The manager API has no authentication — keep the default loopback bind
+and put a reverse proxy with auth in front if you need remote access.
+
+Open `http://localhost:8080`: **New volume** creates a filesystem file,
+a volume inside it, and opens the file explorer in one step. Drag files
+in (with upload progress), preview images, PDFs, and text in place,
+rename/move/copy from each row, **Download** the `.sqlite` file from its
+card to take it with you, and **Import** any Aloelite file to pick up
+where you left off. Encrypted volumes prompt for their PIN when opened.
 
 ### Run (container, with FUSE provisioning)
 
@@ -389,6 +394,7 @@ docker run -d --privileged \
 | `POST` | `/volumes/<id>/files/upload?path=/dir` | Upload a file (multipart field `file`) |
 | `POST` | `/volumes/<id>/files/mkdir?path=/dir` | Create a directory |
 | `DELETE` | `/volumes/<id>/files?path=/f` | Delete a file or directory (recursive) |
+| `POST` | `/volumes/<id>/files/transfer` | Rename, move, or copy (`{"op": "move"\|"copy", "src", "dst"}`) |
 | `GET` | `/filesystems` | List filesystem files with their volumes (nested) |
 | `PATCH` | `/filesystems/<id>` | Rename a filesystem file (`display_name`) |
 | `GET` | `/filesystems/<id>/export` | Checkpoint + stream the file, named by `display_name` |

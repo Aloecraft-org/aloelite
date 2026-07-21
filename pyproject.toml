@@ -38,6 +38,7 @@ test = [
 [project.scripts]
 aloelite = "aloelite.cli:main"
 aloelite-fuse = "aloelite.fuse:main"
+aloelite-web = "manager.web:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -737,10 +737,10 @@ If it already exists and is plain, a PIN must NOT be given.
 Examples
 --------
   # plain
-  python3 aloefuse.py photos.sqlite photos /mnt/photos
+  aloelite-fuse photos.sqlite photos /mnt/photos
 
   # encrypted (new or existing)
-  python3 aloefuse.py vault.sqlite vault /mnt/vault --pin-env VAULT_PIN
+  aloelite-fuse vault.sqlite vault /mnt/vault --pin-env VAULT_PIN
 """,
     )
     ap.add_argument("db", help="path to the Aloelite sqlite file")
