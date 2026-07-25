@@ -40,27 +40,17 @@ def read_pin(
         # an interactive prompt. Only a truly detached process (no ctty:
         # cron, CI, a daemon) has no way to ask.
         try:
-            tty_in = open("/dev/tty", "r")
+            open("/dev/tty", "r").close()  # availability probe only
         except OSError:
             raise PinError(
                 "--pin with no value requires a controlling terminal to "
                 "prompt; use --pin-file or --pin-env in non-interactive "
                 "contexts"
             ) from None
-        try:
-            first = getpass.getpass("PIN: ", stream=tty_in)
-        finally:
-            tty_in.close()
+        first = getpass.getpass("PIN: ")
         if confirm:
-            try:
-                tty_in = open("/dev/tty", "r")
-            except OSError:
-                raise PinError("PINs did not match (no terminal to confirm)") from None
-            try:
-                if getpass.getpass("Confirm PIN: ", stream=tty_in) != first:
-                    raise PinError("PINs did not match")
-            finally:
-                tty_in.close()
+            if getpass.getpass("Confirm PIN: ") != first:
+                raise PinError("PINs did not match")
         return first.encode()
     if pin is not None:
         return pin.encode()
@@ -87,8 +77,9 @@ def add_pin_arguments(parser) -> None:
         metavar="SECRET",
         nargs="?",
         const=_PROMPT,
-        help="PIN; with no SECRET, prompt interactively (put bare --pin "
-        "last on the line). Plaintext; prefer --pin-file or --pin-env "
+        help="PIN; with no SECRET, prompt interactively (place bare --pin "
+        "before the subcommand, followed by another flag, e.g. "
+        "'--pin -f FILE ls'). Plaintext; prefer --pin-file or --pin-env "
         "for scripts.",
     )
     grp.add_argument(

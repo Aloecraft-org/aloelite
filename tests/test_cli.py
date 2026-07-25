@@ -22,6 +22,17 @@ def run(*argv):
     return main(list(argv))
 
 
+def _tty_ok(real_open):
+    import io
+
+    def fake(path, *a, **k):
+        if path == "/dev/tty":
+            return io.StringIO()
+        return real_open(path, *a, **k)
+
+    return fake
+
+
 def test_roundtrip(fsfile, tmp_path, capsys):
     src = tmp_path / "in.txt"
     src.write_bytes(b"hello cli")
@@ -59,6 +70,16 @@ def test_encrypted_pin_env(fsfile, tmp_path, monkeypatch):
     assert run("-f", p, "--pin", "wrong", "ls") == 1  # BadKey -> exit 1
     # pin flag against an UNencrypted volume: early, pointed error
     assert run("-f", fsfile, "--pin-env", "ALOE_PIN", "ls") == 1
+
+
+def test_bare_pin_prompts(fsfile, tmp_path, monkeypatch, capsys):
+    p = str(tmp_path / "enc2.fs")
+    with Aloelite(p) as fs:
+        fs.create_volume("vault", pin=b"s3cret")
+    import aloelite.pin as pinmod
+    monkeypatch.setattr(pinmod.getpass, "getpass", lambda *a, **k: "s3cret")
+    monkeypatch.setattr("builtins.open", _tty_ok(open), raising=False)
+    assert run("--pin", "-f", p, "ls") == 0
 
 
 def test_new_verbs(fsfile, tmp_path, capsys):

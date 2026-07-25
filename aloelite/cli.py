@@ -101,7 +101,7 @@ def _mount(fs: Aloelite, args) -> Mount:
         raise SystemExit(_fail(str(e)))
     if encrypted and pin is None:
         try:
-            tty_in = open("/dev/tty", "r")
+            open("/dev/tty", "r").close()  # probe: can we prompt at all?
         except OSError:
             raise SystemExit(
                 _fail(
@@ -109,10 +109,7 @@ def _mount(fs: Aloelite, args) -> Mount:
                     "(no controlling terminal to prompt)"
                 )
             )
-        try:
-            pin = getpass.getpass("PIN: ", stream=tty_in).encode()
-        finally:
-            tty_in.close()
+        pin = getpass.getpass("PIN: ").encode()
     return fs.mount(vol, pin=pin)
 
 
@@ -250,7 +247,7 @@ def _cmd_status(fs: Aloelite, args) -> int:
         print(f"  volume 'main' created (default, {enc})")
         if pin is None:
             print("  for an encrypted volume: "
-                  f"aloelite -f {args.file} volume create NAME --pin")
+                  f"aloelite --pin -f {args.file} volume create NAME")
         print(f"try: aloelite -f {args.file} ls /")
     else:
         size = os.path.getsize(args.file)
@@ -497,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
     except errors.FsError as e:
         return _fail(f"{e.code}: {e}")
     except OSError as e:
-        return _fail(str(e))
+        return _fail(f"{type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

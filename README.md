@@ -279,7 +279,7 @@ aloelite -f notebook.fs stat /docs/report.pdf
 aloelite -f notebook.fs tree /
 aloelite -f notebook.fs prune --vacuum
 aloelite -f notebook.fs mounts # List Mounts (ACC-1a)
-aloelite -f notebook.fs volume create vault --pin   # explicit (encrypted) volume
+aloelite --pin -f notebook.fs volume create vault   # explicit (encrypted) volume
 aloelite -f notebook.fs volume ls                   # alias of `volumes`
 aloelite --version
 ```
@@ -306,7 +306,8 @@ note: Set `ALOELITE_FILE` env var to skip `-f` entirely (`export ALOELITE_FILE=n
 `-v NAME_OR_ID` selects a volume (name, or uuid7 with/without dashes);
 omit it when the file holds exactly one. Encrypted volumes take the same
 `--pin` / `--pin-file` / `--pin-env` flags as `aloelite-fuse`; a bare
-`--pin` (no value, placed last on the line) prompts via getpass, and an
+`--pin` (no value; place it before the subcommand, followed by another
+flag, e.g. `aloelite --pin -f file.fs ls /`) prompts via getpass, and an
 encrypted volume with no pin flag prompts interactively too. Pin flags
 against an unencrypted volume are rejected up front with a pointed
 error. When a prompted PIN *creates* a volume, it is asked for twice

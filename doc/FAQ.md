@@ -57,7 +57,7 @@ Running `aloelite -f FILE` on a file that doesn't exist yet creates it
 with one default volume named `main` (encrypted if a `--pin*` flag was
 given), so the CLI works immediately without learning volume management
 first. Additional volumes are created explicitly with
-`aloelite -f FILE volume create NAME [--pin]`.
+`aloelite [--pin] -f FILE volume create NAME`.
 
 ### What's the difference between a volume and a mount?
 

@@ -171,13 +171,13 @@ interactively and you'll be prompted):
 aloelite -f vault.fs --pin-env VAULT_PIN ls /
 aloelite -f vault.fs --pin-file ~/.vaultpin ls /
 aloelite -f vault.fs --pin "my secret" ls /      # avoid on shared hosts
-aloelite -f vault.fs ls / --pin                  # bare --pin: getpass prompt
+aloelite --pin -f vault.fs ls /                  # bare --pin: getpass prompt
 ```
 
 Extra volumes are created explicitly (encryption is decided here, once):
 
 ```bash
-aloelite -f notebook.fs volume create vault --pin   # prompts twice to confirm
+aloelite --pin -f notebook.fs volume create vault   # prompts twice to confirm
 aloelite -f notebook.fs volume ls
 ```
 

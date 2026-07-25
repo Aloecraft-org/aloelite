@@ -164,10 +164,12 @@ meant with `-v` — `aloelite -f file.fs volume ls` shows which is which.
 
 ### Bare `--pin` swallowed the next word
 
-`--pin` with no value prompts interactively, but argparse will consume
-a following bare word as the value: `--pin volume create x` parses
-`volume` as the PIN. Put bare `--pin` **last** on the line
-(`aloelite -f f.fs volume create x --pin`).
+`--pin` with no value prompts interactively, but argparse consumes a
+following bare word as the value: `--pin volume create x` parses
+`volume` as the PIN. And because `--pin` belongs to the main parser, it
+can't go **after** the subcommand either (`ls / --pin` is rejected).
+Place bare `--pin` before the subcommand, immediately followed by
+another flag: `aloelite --pin -f f.fs volume create x`.
 
 ### "wrong PIN" on a volume you just created
 
