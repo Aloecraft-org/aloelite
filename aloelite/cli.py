@@ -33,6 +33,15 @@ from .aloelite import Aloelite, Mount
 from .pin import PinError, add_pin_arguments, read_pin
 from .types import VolumeId
 
+def _version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("aloelite")
+    except PackageNotFoundError:
+        return "unknown (not installed)"
+
+
 _CHUNK = 1 << 20
 _HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
 
@@ -225,6 +234,9 @@ def _cmd_mounts(fs: Aloelite, args) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="aloelite", description="Operate on an Aloelite filesystem file."
+    )
+    ap.add_argument(
+        "--version", action="version", version=f"%(prog)s {_version()}"
     )
     ap.add_argument(
         "-f",

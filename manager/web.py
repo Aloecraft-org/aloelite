@@ -18,6 +18,15 @@ import argparse
 import os
 
 
+def _version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("aloelite")
+    except PackageNotFoundError:
+        return "unknown (not installed)"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="aloelite-web",
@@ -26,6 +35,12 @@ def main() -> int:
         epilog="Environment variables ALOELITE_API_PORT, ALOELITE_API_HOST, "
         "ALOELITE_ROOT, and ALOELITE_DIRECT_ONLY are honored when the "
         "corresponding flag is absent.",
+    )
+    ap.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"%(prog)s {_version()}",
     )
     ap.add_argument("-p", "--port", type=int, help="listen port (default 8080)")
     ap.add_argument(

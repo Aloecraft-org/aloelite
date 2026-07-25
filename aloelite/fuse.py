@@ -54,6 +54,15 @@ from aloelite.aloelite import Aloelite
 import aloelite.errors as aloe_errors
 from aloelite.types import WriteMode, Whence
 
+def _version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("aloelite")
+    except PackageNotFoundError:
+        return "unknown (not installed)"
+
+
 ROOT = pyfuse3.ROOT_INODE  # == 1
 _APPEND_BATCH = 1 << 20  # commit a buffered append once it reaches this many bytes
 _DIRTY_FLUSH = 32 << 20  # flush a rw handle once dirty bytes reach this
@@ -742,6 +751,9 @@ Examples
   # encrypted (new or existing)
   aloelite-fuse vault.sqlite vault /mnt/vault --pin-env VAULT_PIN
 """,
+    )
+    ap.add_argument(
+        "-v", "--version", action="version", version=f"%(prog)s {_version()}"
     )
     ap.add_argument("db", help="path to the Aloelite sqlite file")
     ap.add_argument("volume", help="volume name (see --create)")

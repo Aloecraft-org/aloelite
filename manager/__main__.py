@@ -43,6 +43,11 @@ def build(store=None, supervisor=None, registry=None):
 
 
 def main() -> int:
+    if any(a in ("-v", "--version") for a in sys.argv[1:]):
+        from manager.web import _version
+
+        print(f"aloelite {_version()}")
+        return 0
     os.makedirs(ALOELITE_ROOT, exist_ok=True)
     store, supervisor, app = build()
     results = run_preflight(store, aloelite_root=ALOELITE_ROOT, mnt=MANAGER_MNT)
