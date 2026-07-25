@@ -100,14 +100,19 @@ def _mount(fs: Aloelite, args) -> Mount:
     except PinError as e:
         raise SystemExit(_fail(str(e)))
     if encrypted and pin is None:
-        if not sys.stdin.isatty():
+        try:
+            tty_in = open("/dev/tty", "r")
+        except OSError:
             raise SystemExit(
                 _fail(
                     "volume is encrypted; supply --pin-file or --pin-env "
-                    "(no terminal to prompt)"
+                    "(no controlling terminal to prompt)"
                 )
             )
-        pin = getpass.getpass("PIN: ").encode()
+        try:
+            pin = getpass.getpass("PIN: ", stream=tty_in).encode()
+        finally:
+            tty_in.close()
     return fs.mount(vol, pin=pin)
 
 

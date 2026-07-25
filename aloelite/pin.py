@@ -35,15 +35,32 @@ def read_pin(
     A bare --pin (no SECRET) prompts via getpass on a terminal. Returns
     None if no flag was given."""
     if pin is _PROMPT:
-        if not sys.stdin.isatty():
+        # Prompt on the controlling terminal (/dev/tty), like ssh/sudo do,
+        # so a piped stdin (data flowing through the command) still allows
+        # an interactive prompt. Only a truly detached process (no ctty:
+        # cron, CI, a daemon) has no way to ask.
+        try:
+            tty_in = open("/dev/tty", "r")
+        except OSError:
             raise PinError(
-                "--pin with no value requires a terminal to prompt; "
-                "use --pin-file or --pin-env in scripts"
-            )
-        first = getpass.getpass("PIN: ")
+                "--pin with no value requires a controlling terminal to "
+                "prompt; use --pin-file or --pin-env in non-interactive "
+                "contexts"
+            ) from None
+        try:
+            first = getpass.getpass("PIN: ", stream=tty_in)
+        finally:
+            tty_in.close()
         if confirm:
-            if getpass.getpass("Confirm PIN: ") != first:
-                raise PinError("PINs did not match")
+            try:
+                tty_in = open("/dev/tty", "r")
+            except OSError:
+                raise PinError("PINs did not match (no terminal to confirm)") from None
+            try:
+                if getpass.getpass("Confirm PIN: ", stream=tty_in) != first:
+                    raise PinError("PINs did not match")
+            finally:
+                tty_in.close()
         return first.encode()
     if pin is not None:
         return pin.encode()
