@@ -233,7 +233,11 @@ def _cmd_mounts(fs: Aloelite, args) -> int:
 # -- wiring ------------------------------------------------------------------
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="aloelite", description="Operate on an Aloelite filesystem file."
+        prog="aloelite",
+        description="Operate on an Aloelite filesystem file.",
+        epilog="Also: 'aloelite fuse ...' (mount via FUSE, needs "
+        "aloelite[fuse]) and 'aloelite web ...' (browser manager) "
+        "delegate to aloelite-fuse / aloelite-web.",
     )
     ap.add_argument(
         "--version", action="version", version=f"%(prog)s {_version()}"
@@ -325,6 +329,21 @@ _FS_VERBS = {"volumes": _cmd_volumes, "mounts": _cmd_mounts, "prune": _cmd_prune
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["fuse"]:
+        try:
+            from .fuse import main as fuse_main
+        except ImportError:
+            return _fail(
+                "FUSE support is not installed; run: pip install aloelite[fuse]"
+            )
+        sys.argv = ["aloelite-fuse"] + argv[1:]
+        return fuse_main() or 0
+    if argv[:1] == ["web"]:
+        from manager.web import main as web_main
+
+        sys.argv = ["aloelite-web"] + argv[1:]
+        return web_main()
     args = _build_parser().parse_args(argv)
     if not args.file:
         return _fail("no file given: pass -f or set ALOELITE_FILE")
