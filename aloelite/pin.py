@@ -3,14 +3,21 @@
 """
 Shared PIN resolution for front-ends (fuse.py, cli.py).
 
-Precedence: --pin > --pin-file > --pin-env. Returns None when no flag was
-given (unencrypted mount, or defer to an interactive prompt). Errors are
-raised as PinError so each front-end reports them its own way.
+Precedence: --pin > --pin-file > --pin-env. A bare --pin (no SECRET)
+prompts interactively via getpass (terminal required). Returns None when
+no flag was given (unencrypted mount, or defer to a front-end's own
+prompt). Errors are raised as PinError so each front-end reports them
+its own way.
 """
 
 from __future__ import annotations
 
+import getpass
 import os
+import sys
+
+# Sentinel: --pin was given with no SECRET => prompt interactively.
+_PROMPT = object()
 
 
 class PinError(Exception):
@@ -18,10 +25,26 @@ class PinError(Exception):
 
 
 def read_pin(
-    pin: str | None, pin_file: str | None, pin_env: str | None
+    pin: object | None,
+    pin_file: str | None,
+    pin_env: str | None,
+    *,
+    confirm: bool = False,
 ) -> bytes | None:
     """Resolve a PIN from the three standard flags, in precedence order.
-    Returns None if none were given."""
+    A bare --pin (no SECRET) prompts via getpass on a terminal. Returns
+    None if no flag was given."""
+    if pin is _PROMPT:
+        if not sys.stdin.isatty():
+            raise PinError(
+                "--pin with no value requires a terminal to prompt; "
+                "use --pin-file or --pin-env in scripts"
+            )
+        first = getpass.getpass("PIN: ")
+        if confirm:
+            if getpass.getpass("Confirm PIN: ") != first:
+                raise PinError("PINs did not match")
+        return first.encode()
     if pin is not None:
         return pin.encode()
     if pin_file is not None:
@@ -45,7 +68,11 @@ def add_pin_arguments(parser) -> None:
     grp.add_argument(
         "--pin",
         metavar="SECRET",
-        help="PIN (plaintext; prefer --pin-file or --pin-env)",
+        nargs="?",
+        const=_PROMPT,
+        help="PIN; with no SECRET, prompt interactively (put bare --pin "
+        "last on the line). Plaintext; prefer --pin-file or --pin-env "
+        "for scripts.",
     )
     grp.add_argument(
         "--pin-file", metavar="PATH", help="file whose contents are the PIN"

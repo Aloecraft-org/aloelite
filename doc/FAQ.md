@@ -51,6 +51,14 @@ SQLite tool to inspect or audit it, but the supported interface is the
 Mount API (Python/CLI/FUSE/HTTP); writing to the tables directly bypasses
 the invariants the API enforces.
 
+### Where did the volume named 'main' come from?
+
+Running `aloelite -f FILE` on a file that doesn't exist yet creates it
+with one default volume named `main` (encrypted if a `--pin*` flag was
+given), so the CLI works immediately without learning volume management
+first. Additional volumes are created explicitly with
+`aloelite -f FILE volume create NAME [--pin]`.
+
 ### What's the difference between a volume and a mount?
 
 A **volume** is a filesystem tree with a root and everything under it. A

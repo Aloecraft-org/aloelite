@@ -84,17 +84,31 @@ def _select_volume(fs: Aloelite, ref: str | None) -> VolumeId:
 
 def _mount(fs: Aloelite, args) -> Mount:
     vol = _select_volume(fs, args.volume)
+    crow = fs.db.one("resolution.get_volume_crypto", {"volume": vol})
+    encrypted = crow is not None and crow["enc_mode"] != "none"
+    if not encrypted and (
+        args.pin is not None or args.pin_file or args.pin_env
+    ):
+        raise SystemExit(
+            _fail(
+                "this volume is not encrypted; drop --pin / --pin-file / "
+                "--pin-env (or pick an encrypted volume with -v)"
+            )
+        )
     try:
         pin = read_pin(args.pin, args.pin_file, args.pin_env)
     except PinError as e:
         raise SystemExit(_fail(str(e)))
-    try:
-        return fs.mount(vol, pin=pin)
-    except errors.EncryptionRequired:
-        if pin is None and sys.stdin.isatty():
-            pin = getpass.getpass("PIN: ").encode()
-            return fs.mount(vol, pin=pin)
-        raise
+    if encrypted and pin is None:
+        if not sys.stdin.isatty():
+            raise SystemExit(
+                _fail(
+                    "volume is encrypted; supply --pin-file or --pin-env "
+                    "(no terminal to prompt)"
+                )
+            )
+        pin = getpass.getpass("PIN: ").encode()
+    return fs.mount(vol, pin=pin)
 
 
 # -- verbs -------------------------------------------------------------------
@@ -216,9 +230,72 @@ def _cmd_prune(fs: Aloelite, args) -> int:
     return 0
 
 
+def _cmd_status(fs: Aloelite, args) -> int:
+    vols = fs.list_volumes()
+    fresh = not vols
+    if fresh:
+        try:
+            pin = read_pin(args.pin, args.pin_file, args.pin_env, confirm=True)
+        except PinError as e:
+            raise SystemExit(_fail(str(e)))
+        fs.create_volume("main", pin=pin)
+        vols = fs.list_volumes()
+        enc = "encrypted" if pin is not None else "unencrypted"
+        print(f"{args.file}: created")
+        print(f"  volume 'main' created (default, {enc})")
+        if pin is None:
+            print("  for an encrypted volume: "
+                  f"aloelite -f {args.file} volume create NAME --pin")
+        print(f"try: aloelite -f {args.file} ls /")
+    else:
+        size = os.path.getsize(args.file)
+        print(f"{args.file}: {size} bytes, {len(vols)} volume(s)")
+        for v in vols:
+            print("  " + _volume_line(fs, v))
+    return 0
+
+
+def _cmd_volume(fs: Aloelite, args) -> int:
+    if args.volume_cmd == "ls":
+        return _cmd_volumes(fs, args)
+    if args.volume_cmd == "create":
+        try:
+            pin = read_pin(args.pin, args.pin_file, args.pin_env, confirm=True)
+        except PinError as e:
+            raise SystemExit(_fail(str(e)))
+        try:
+            v = fs.create_volume(args.name, pin=pin, ensure_unique=True)
+        except errors.FsError as e:
+            return _fail(str(e))
+        enc = "encrypted" if pin is not None else "unencrypted"
+        print(f"created volume '{v.name}' ({enc})  {v.id}")
+        return 0
+    return _fail("unknown volume command")
+
+
+def _enc_label(fs: Aloelite, vol_id) -> str:
+    crow = fs.db.one("resolution.get_volume_crypto", {"volume": vol_id})
+    return "encrypted" if crow and crow["enc_mode"] != "none" else "plain"
+
+
+def _ts(ms) -> str:
+    import datetime
+
+    if ms is None:
+        return "-"
+    return datetime.datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M")
+
+
+def _volume_line(fs: Aloelite, v) -> str:
+    return (
+        f"{v.id}  {_enc_label(fs, v.id):<9}  "
+        f"{_ts(getattr(v, 'created_at', None))}  {v.name or '(unnamed)'}"
+    )
+
+
 def _cmd_volumes(fs: Aloelite, args) -> int:
     for v in fs.list_volumes():
-        print(f"{v.id}  {v.name or '(unnamed)'}")
+        print(_volume_line(fs, v))
     return 0
 
 
@@ -226,7 +303,10 @@ def _cmd_mounts(fs: Aloelite, args) -> int:
     names = {v.id: v.name for v in fs.list_volumes()}
     for i in fs.list_mounts(include_unmounted=args.all):
         label = f"{names.get(i.volume) or i.volume[:8]}:{i.mount_path or '?'}"
-        print(f"{i.id}  {i.state.value:<9}  {label}")
+        print(
+            f"{i.id}  {i.state.value:<9}  "
+            f"{_ts(getattr(i, 'created_at', None))}  {label}"
+        )
     return 0
 
 
@@ -254,8 +334,24 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="NAME_OR_ID",
         help="volume name or id (optional if the file has exactly one)",
     )
+    ap.add_argument(
+        "-i",
+        "--in",
+        dest="in_path",
+        metavar="PATH",
+        help="write stdin to PATH (create/overwrite); with no piped "
+        "stdin, touch-like create",
+    )
+    ap.add_argument(
+        "-a",
+        "--append",
+        dest="append_path",
+        metavar="PATH",
+        help="append stdin to PATH (creates it); with no piped stdin, "
+        "touch-like create",
+    )
     add_pin_arguments(ap)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=False)
 
     p = sub.add_parser("ls", help="list a directory")
     p.add_argument("path", nargs="?", default="/")
@@ -305,6 +401,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--vacuum", action="store_true", help="compact the file afterward (VACUUM)"
     )
 
+    p = sub.add_parser("volume", help="manage volumes (create ...)")
+    vsub = p.add_subparsers(dest="volume_cmd", required=True)
+    vsub.add_parser("ls", help="list volumes (same as 'volumes')")
+    vc = vsub.add_parser(
+        "create",
+        help="create a volume (encrypted iff a --pin* flag is given)",
+    )
+    vc.add_argument("name")
+
     p = sub.add_parser("volumes", help="list volumes in the file")
 
     p = sub.add_parser("mounts", help="list durable mounts in the file")
@@ -325,7 +430,12 @@ _MOUNT_VERBS = {
     "rm": _cmd_rm,
     "mv": _cmd_mv,
 }
-_FS_VERBS = {"volumes": _cmd_volumes, "mounts": _cmd_mounts, "prune": _cmd_prune}
+_FS_VERBS = {
+    "volumes": _cmd_volumes,
+    "mounts": _cmd_mounts,
+    "prune": _cmd_prune,
+    "volume": _cmd_volume,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -349,6 +459,26 @@ def main(argv: list[str] | None = None) -> int:
         return _fail("no file given: pass -f or set ALOELITE_FILE")
     try:
         with Aloelite(args.file) as fs:
+            if args.cmd is None and (args.in_path or args.append_path):
+                if args.in_path and args.append_path:
+                    return _fail("--in and --append are mutually exclusive")
+                data = b"" if sys.stdin.isatty() else sys.stdin.buffer.read()
+                with _mount(fs, args) as m:
+                    if args.append_path:
+                        m.put(args.append_path, data, append=True)
+                    else:
+                        m.put(args.in_path, data)
+                return 0
+            if args.cmd is None:
+                if fs.list_volumes() and (
+                    args.pin is not None or args.pin_file or args.pin_env
+                ):
+                    print(
+                        "aloelite: note: this file already exists; pin flags "
+                        "have no effect on the status view",
+                        file=sys.stderr,
+                    )
+                return _cmd_status(fs, args)
             if args.cmd in _FS_VERBS:
                 return _FS_VERBS[args.cmd](fs, args)
             with _mount(fs, args) as m:

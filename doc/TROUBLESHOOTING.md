@@ -156,6 +156,19 @@ The file holds more than one volume and the CLI won't guess. It lists the
 candidates in the error; pass `-v NAME` or `-v ID` (ids work with or
 without dashes).
 
+### "this volume is not encrypted; drop --pin ..."
+
+Pin flags against an unencrypted volume are rejected up front (before
+any prompt). Either drop the flag, or select the encrypted volume you
+meant with `-v` — `aloelite -f file.fs volume ls` shows which is which.
+
+### Bare `--pin` swallowed the next word
+
+`--pin` with no value prompts interactively, but argparse will consume
+a following bare word as the value: `--pin volume create x` parses
+`volume` as the PIN. Put bare `--pin` **last** on the line
+(`aloelite -f f.fs volume create x --pin`).
+
 ### "wrong PIN" on a volume you just created
 
 Encryption is decided at volume **creation**. If the first-ever command

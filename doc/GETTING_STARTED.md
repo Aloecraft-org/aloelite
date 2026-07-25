@@ -120,8 +120,16 @@ decided once, at creation — make sure the PIN is there on the *first* run.
 
 ## CLI
 
-The `aloelite` command works on any Aloelite file. One command, one
-operation:
+The `aloelite` command works on any Aloelite file. The fastest possible
+start is the bare command:
+
+```bash
+aloelite -f notebook.fs        # first run: creates the file + a default
+                               # volume named 'main'; later runs: status
+aloelite -f notebook.fs --pin  # same, but encrypted (prompts twice)
+```
+
+Then one command, one operation:
 
 ```bash
 aloelite -f notebook.fs volumes              # what's inside?
@@ -142,6 +150,13 @@ cat access.log | aloelite -f logs.fs put - /today.log --append
 aloelite -f logs.fs get /today.log - | grep ERROR
 ```
 
+Or skip the subcommand entirely for quick writes:
+
+```bash
+echo "hello" | aloelite -f logs.fs --in /note.txt       # create/overwrite
+echo "more"  | aloelite -f logs.fs --append /note.txt   # append (creates)
+```
+
 If the file has exactly one volume, you're done. If it has several, pick
 one with `-v` (by name or id):
 
@@ -156,6 +171,14 @@ interactively and you'll be prompted):
 aloelite -f vault.fs --pin-env VAULT_PIN ls /
 aloelite -f vault.fs --pin-file ~/.vaultpin ls /
 aloelite -f vault.fs --pin "my secret" ls /      # avoid on shared hosts
+aloelite -f vault.fs ls / --pin                  # bare --pin: getpass prompt
+```
+
+Extra volumes are created explicitly (encryption is decided here, once):
+
+```bash
+aloelite -f notebook.fs volume create vault --pin   # prompts twice to confirm
+aloelite -f notebook.fs volume ls
 ```
 
 ---
@@ -176,6 +199,7 @@ Mount and use:
 ```bash
 mkdir -p ~/photos
 aloelite-fuse photos.fs photos ~/photos --create   # file, volume, mountpoint
+# equivalently: aloelite fuse photos.fs photos ~/photos --create
 ```
 
 `--create` bootstraps the volume on first run; without it, a missing
@@ -196,6 +220,7 @@ Encrypted volumes take the same PIN flags as the CLI:
 
 ```bash
 aloelite-fuse vault.fs vault ~/vault --pin-env VAULT_PIN
+aloelite-fuse vault.fs vault ~/vault --pin       # bare --pin: prompts
 ```
 
 Large sequential copies stream with bounded memory, and random-access
@@ -212,7 +237,7 @@ filesystem files.
 
 ```bash
 pip install aloelite
-aloelite-web
+aloelite-web          # or: aloelite web
 ```
 
 Open `http://localhost:8080`. **New volume** creates a file, a volume

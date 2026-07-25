@@ -31,7 +31,7 @@
 - [Mount API](#mount-api)
 - [FUSE](#fuse)
 - [Volume Manager and WebUI](#volume-manager-and-webui)
-    + [REST API](#rest-api)
+    + [API](#api)
     + [Backup Sync Pattern](#backup-sync-pattern)
 - [Security Notes](#security-notes)
 - [Design Background](#design-background)
@@ -61,6 +61,7 @@ docker pull aloecraft/aloelite
 
 **CLI**
 ```bash
+aloelite -f notebook.fs               # creates the file (with a default volume) or shows what's inside
 aloelite -f notebook.fs put report.pdf /docs/report.pdf
 ```
 
@@ -278,15 +279,38 @@ aloelite -f notebook.fs stat /docs/report.pdf
 aloelite -f notebook.fs tree /
 aloelite -f notebook.fs prune --vacuum
 aloelite -f notebook.fs mounts # List Mounts (ACC-1a)
+aloelite -f notebook.fs volume create vault --pin   # explicit (encrypted) volume
+aloelite -f notebook.fs volume ls                   # alias of `volumes`
+aloelite --version
 ```
+
+Running `aloelite -f FILE` with no command creates the file on first
+run (bootstrapping a default volume named `main` — encrypted if a
+`--pin*` flag is given, plain otherwise) and prints a status summary on
+later runs.
+
+Quick one-liners write stdin without a subcommand:
+
+```bash
+echo "hello" | aloelite -f notebook.fs --in /file.txt       # create/overwrite
+echo "more"  | aloelite -f notebook.fs --append /file.txt   # append (creates)
+```
+
+`aloelite fuse ...` and `aloelite web ...` delegate to `aloelite-fuse`
+and `aloelite-web`, so one command covers every interface (a helpful
+message appears if the FUSE extra isn't installed).
 
 note: Set `ALOELITE_FILE` env var to skip `-f` entirely (`export ALOELITE_FILE=notebook.fs`).
 
 
 `-v NAME_OR_ID` selects a volume (name, or uuid7 with/without dashes);
 omit it when the file holds exactly one. Encrypted volumes take the same
-`--pin` / `--pin-file` / `--pin-env` flags as `aloelite-fuse`, or prompt
-interactively.
+`--pin` / `--pin-file` / `--pin-env` flags as `aloelite-fuse`; a bare
+`--pin` (no value, placed last on the line) prompts via getpass, and an
+encrypted volume with no pin flag prompts interactively too. Pin flags
+against an unencrypted volume are rejected up front with a pointed
+error. When a prompted PIN *creates* a volume, it is asked for twice
+(confirmation), since a mistyped creation PIN is unrecoverable.
 
 
 ## FUSE

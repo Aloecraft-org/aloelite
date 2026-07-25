@@ -11,6 +11,24 @@
 [Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | **Encryption Spec (This Document)**
 </div>
 
+> **WARNING — spec drift (code is authoritative until this is revised):**
+> two statements below do not match the reference implementation
+> (`aloelite/crypto.py`), and ports MUST follow the code, not this text:
+>
+> 1. **Sections 3–4 say `mount_secret` seals K_u.** The implementation
+>    seals **K_v** (`seal_mount_secret(token, N_m, volume_key)`), so
+>    per-operation recovery is one unwrap (`open_mount_secret -> K_v`),
+>    not the two-step `mount_secret -> K_u -> S_vk -> K_v` shown in §4.
+> 2. **Section 5 says `N_c = SHA256(len || plaintext)[:16]` (16 bytes).**
+>    The implementation uses a **12-byte** nonce (ChaCha20-Poly1305 IETF)
+>    with a domain-separation prefix:
+>    `N_c = SHA256("aloelite-nc" || len_8be || plaintext)[:12]`.
+>    (The schema note "16 bytes" for `content_chunk.N_c` is likewise 12
+>    in practice.)
+>
+> Volumes on disk follow the code's construction. A port implementing
+> this document as written will fail to open real volumes.
+
 ## Lexicon
 
 **Operations**

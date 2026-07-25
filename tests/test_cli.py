@@ -57,6 +57,8 @@ def test_encrypted_pin_env(fsfile, tmp_path, monkeypatch):
     monkeypatch.setenv("ALOE_PIN", "s3cret")
     assert run("-f", p, "--pin-env", "ALOE_PIN", "mkdir", "/d") == 0
     assert run("-f", p, "--pin", "wrong", "ls") == 1  # BadKey -> exit 1
+    # pin flag against an UNencrypted volume: early, pointed error
+    assert run("-f", fsfile, "--pin-env", "ALOE_PIN", "ls") == 1
 
 
 def test_new_verbs(fsfile, tmp_path, capsys):

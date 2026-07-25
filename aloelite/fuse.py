@@ -648,7 +648,8 @@ def _find_or_create_volume(fs, name, pin=None, create=False):
             return v.id
     if not create:
         raise aloe_errors.NotFound(
-            f"no volume named {name!r} (pass --create to bootstrap one)"
+            f"no volume named {name!r} — run 'aloelite -f FILE' to see "
+            "volumes, or pass --create to bootstrap one"
         )
     return fs.create_volume(name, pin=pin).id
 
@@ -771,18 +772,9 @@ Examples
         "(requires user_allow_other in /etc/fuse.conf)",
     )
 
-    pin_grp = ap.add_argument_group("encryption")
-    pin_grp.add_argument(
-        "--pin",
-        metavar="SECRET",
-        help="PIN (plaintext, prefer --pin-file or --pin-env)",
-    )
-    pin_grp.add_argument(
-        "--pin-file", metavar="PATH", help="file whose contents are the PIN"
-    )
-    pin_grp.add_argument(
-        "--pin-env", metavar="VAR", help="environment variable holding the PIN"
-    )
+    from aloelite.pin import add_pin_arguments
+
+    add_pin_arguments(ap)
 
     args = ap.parse_args()
     import logging
