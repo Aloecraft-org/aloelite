@@ -490,6 +490,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if not args.file:
         return _fail("no file given: pass -f or set ALOELITE_FILE")
+    bare = args.cmd is None and not (args.in_path or args.append_path)
+    if not bare and not os.path.exists(args.file):
+        return _fail(
+            f"{args.file}: no such file (run 'aloelite -f {args.file}' "
+            "to create it)"
+        )
     try:
         with Aloelite(args.file) as fs:
             if args.cmd is None and (args.in_path or args.append_path):
