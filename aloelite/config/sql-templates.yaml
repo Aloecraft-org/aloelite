@@ -154,6 +154,31 @@ resolution:
     consumed_by: ["every chunked write (read the volume's fixed chunk size)"]
     notes: "CV-1: chunk size is a per-volume property read from the volume row on every write — never a host constant."
 
+  verify_manifest:
+    sql: |
+      SELECT c.node_id, c.version, c.size, cv.chunk_index, cv.chunk_hash,
+             cc.length AS chunk_length,
+             (cc.chunk_hash IS NOT NULL) AS present
+      FROM content c
+      JOIN node n ON n.node_id = c.node_id AND n.volume_id = :volume
+      JOIN content_version cv
+        ON cv.content_id = c.node_id AND cv.version = c.version
+      LEFT JOIN content_chunk cc ON cc.chunk_hash = cv.chunk_hash
+      ORDER BY c.node_id, cv.chunk_index
+    params: { volume: "VolumeId" }
+    returns: "[{ node_id, version, size, chunk_index, chunk_hash, chunk_length, present }]"
+    consumed_by: [verify]
+    notes: "Committed-version manifest walk WITHOUT blobs (memory-bounded). Zero-chunk committed versions produce no rows and are vacuously fine."
+
+  get_chunk:
+    sql: |
+      SELECT data, length, N_c, enc_tag FROM content_chunk
+      WHERE chunk_hash = :hash
+    params: { hash: "chunk pool address" }
+    returns: "{ data, length, N_c, enc_tag } or empty"
+    consumed_by: [verify]
+    notes: "Deep-verify fetch, one chunk at a time so verify never holds a volume's bytes in memory."
+
   path_of:
     sql: |
       WITH RECURSIVE up (node_id, name, parent_id, depth, is_root) AS (
@@ -522,8 +547,8 @@ mutation:
       WHERE volume_id = :volume
     params: { volume: "VolumeId", enc_mode: "'convergent'|'random'", wrapped_key: "S_vk blob", wrap_nonce: "N_wrap blob" }
     returns: rowcount
-    consumed_by: [create_volume]
-    notes: "Seals the volume key after the root is known (H_v needs root_node_id). Runs in the create_volume txn."
+    consumed_by: [create_volume, change_pin]
+    notes: "Seals the volume key after the root is known (H_v needs root_node_id). Runs in the create_volume txn; change_pin re-wraps with enc_mode unchanged."
 
   link_root:
     sql: |

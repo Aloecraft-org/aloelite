@@ -184,6 +184,17 @@ class Anomaly(_Record):
         return cls(kind=r["kind"], id=r["id"])
 
 
+class VerifyReport(_Record):
+    # verify: committed-version integrity sweep. Empty problems = clean.
+    entries_checked: int
+    chunks_checked: int
+    problems: list[str]
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems
+
+
 class PruneReport(_Record):
     nodes_pruned: int
     locks_pruned: int

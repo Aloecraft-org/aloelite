@@ -240,6 +240,31 @@ pip install aloelite
 aloelite-web          # or: aloelite web
 ```
 
+---
+
+## Maintenance & backup
+
+`aloelite-admin` (alias: `aloelite admin`) operates on volumes, keys,
+and the file itself:
+
+```bash
+aloelite-admin -f vault.fs pin change            # rotate the PIN; data untouched
+aloelite-admin -f vault.fs snapshot before-upgrade
+aloelite-admin -f vault.fs export offsite.fs --dest-pin-env BACKUP_PIN
+aloelite-admin -f vault.fs verify --deep         # prove every chunk is intact
+aloelite-admin -f vault.fs health                # structural consistency
+aloelite-admin -f vault.fs info                  # sizes, volumes, mounts
+```
+
+Transfers copy the volume's **current committed state** with metadata
+and mtimes; the destination volume gets its own fresh key ladder, so an
+export is also a re-encryption (encrypted iff a destination pin is
+given via `--encrypt`, `--dest-pin-env`, or `--dest-pin-file`). On
+`import`, `-f` is the destination file and the positional argument is
+the source. Snapshots of unencrypted volumes are near-free (shared
+chunks dedup); snapshots of encrypted volumes are a full copy, because
+chunk encryption is domain-separated per volume.
+
 Open `http://localhost:8080`. **New volume** creates a file, a volume
 inside it, and opens the explorer in one step — drag files in, preview
 them, and **Download** the `.sqlite` from its card whenever you want to

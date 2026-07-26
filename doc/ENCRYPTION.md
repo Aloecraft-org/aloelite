@@ -28,6 +28,12 @@
 >
 > Volumes on disk follow the code's construction. A port implementing
 > this document as written will fail to open real volumes.
+>
+> **Update:** PIN rotation (previously reserved) is implemented as the
+> `change_pin` operation: unwrap K_v with the old K_u, re-wrap under the
+> new K_u with a fresh N_wrap; K_v, chunk addresses, and dedup are
+> unchanged, and live mounts are unaffected (they hold K_v, not K_u).
+> CLI: `aloelite-admin pin change`.
 
 ## Lexicon
 

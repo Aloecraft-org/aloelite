@@ -300,6 +300,20 @@ echo "more"  | aloelite -f notebook.fs --append /file.txt   # append (creates)
 and `aloelite-web`, so one command covers every interface (a helpful
 message appears if the FUSE extra isn't installed).
 
+Maintenance lives in `aloelite-admin` (alias: `aloelite admin`) — it
+operates on volumes, keys, and the file itself, where the main CLI
+operates on files inside volumes:
+
+```bash
+aloelite-admin -f notebook.fs pin change     # rotate a PIN (data untouched)
+aloelite-admin -f notebook.fs snapshot friday          # in-place fork
+aloelite-admin -f notebook.fs export backup.fs         # volume -> another file
+aloelite-admin -f backup.fs import notebook.fs         # the same, other way
+aloelite-admin -f notebook.fs verify --deep  # integrity-check every chunk
+aloelite-admin -f notebook.fs health         # structural consistency check
+aloelite-admin -f notebook.fs info           # one-screen file dossier
+```
+
 note: Set `ALOELITE_FILE` env var to skip `-f` entirely (`export ALOELITE_FILE=notebook.fs`).
 
 

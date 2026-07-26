@@ -122,6 +122,18 @@ Troubleshooting). WAL mode needs mmap support and is not there yet.
 Ordinary applications work as well — validated backing a mail server
 (docker-mailserver) and a full git workflow on mounted volumes.
 
+### How do I back up a volume?
+
+Three layers, cheapest first: the file itself is a single SQLite
+database, so copying the file (while no writer is active) is a complete
+backup of everything in it. Within a file,
+`aloelite-admin snapshot NAME` forks a volume in place — near-free for
+unencrypted volumes. Across files, `aloelite-admin export dest.fs`
+copies a volume's committed state into another file with a fresh key
+ladder (optionally under a different PIN), and `verify --deep` proves
+the result byte-perfect. Superseded version history and retention
+policies stay behind on the source; transfers carry current state.
+
 ### Can I store an aloelite file inside another aloelite volume?
 
 Yes, two ways. As plain content (`put`/`get`) it behaves like any other

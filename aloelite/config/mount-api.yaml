@@ -125,6 +125,11 @@ operations:
       returns: VolumeInfo
       flags:   { mutates: true, atomic: true, locks: false }
       note:    "creates volume + its root container, links root (bootstrap)"
+    change_pin:
+      params:  { fs: FsHandle, volume: VolumeId, old_pin: bytes, new_pin: bytes }
+      returns: none
+      flags:   { mutates: true, atomic: true, locks: false }
+      note:    "PIN rotation: unwrap K_v with old K_u, re-wrap under new K_u (fresh N_wrap). K_v immutable; EncryptionRequired on 'none', BadKey on wrong old pin. Live mounts unaffected."
     list_volumes:
       params:  { fs: FsHandle }
       returns: [VolumeInfo]
@@ -303,6 +308,10 @@ operations:
       returns: PruneReport
       flags:   { mutates: true, atomic: true }
       note:    "lazy sweep: volatile nodes (PI-3) + invalid locks (ACC-10)"
+    verify:
+      params:  { fs: FsHandle, mount: MountId, deep: "bool = false" }
+      returns: VerifyReport
+      note:    "committed-version integrity sweep: manifest refs/contiguity/sizes; deep adds per-chunk address recompute + AEAD decrypt under the mount cipher"
     health_check:
       params:  { fs: FsHandle }
       returns: [Anomaly]

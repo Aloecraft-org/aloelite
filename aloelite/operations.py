@@ -49,6 +49,7 @@ from .models import (
     MountInfo,
     NodeInfo,
     PruneReport,
+    VerifyReport,
     VolumeInfo,
 )
 from .resolve import resolve, resolve_parent, split_path
@@ -218,6 +219,44 @@ def create_volume(
                 },
             )
     return VolumeInfo.from_row(db.one("resolution.get_volume", {"volume": vid}))
+
+
+def change_pin(
+    db: Db, volume: VolumeId, old_pin: bytes, new_pin: bytes
+) -> None:
+    """Rotate an encrypted volume's PIN.
+
+    Unwraps K_v with the old PIN's K_u, re-wraps it under the new PIN's K_u
+    (fresh wrap nonce), and updates the volume row. The volume key — and
+    therefore every chunk, address, and dedup relationship — is unchanged.
+    Raises EncryptionRequired for an unencrypted volume, BadKey for a wrong
+    old PIN. Live mounts are unaffected (they hold K_v, not K_u).
+    """
+    with db.txn():
+        crow = db.one("resolution.get_volume_crypto", {"volume": volume})
+        if crow is None or crow["root_node_id"] is None:
+            raise NotFound("volume or its root not found", volume=volume)
+        if crow["enc_mode"] == "none":
+            raise EncryptionRequired("volume is not encrypted; no PIN to change")
+        h_v = crypto.volume_hash(str(volume), str(crow["root_node_id"]))
+        k_u_old = crypto.derive_unlock_key(old_pin, h_v)
+        try:
+            k_v = crypto.unwrap_volume_key(
+                k_u_old, crow["wrapped_key"], crow["wrap_nonce"]
+            )
+        except Exception:
+            raise BadKey("old pin did not unlock the volume", volume=volume)
+        k_u_new = crypto.derive_unlock_key(new_pin, h_v)
+        wrapped, wrap_nonce = crypto.wrap_volume_key(k_u_new, k_v)
+        db.rowcount(
+            "mutation.update_volume_crypto",
+            {
+                "volume": volume,
+                "enc_mode": crow["enc_mode"],
+                "wrapped_key": wrapped,
+                "wrap_nonce": wrap_nonce,
+            },
+        )
 
 
 def list_volumes(db: Db) -> list[VolumeInfo]:
@@ -1107,6 +1146,67 @@ def prune_content(db: Db, volume: VolumeId | None = None) -> ContentPruneReport:
     return ContentPruneReport(versions_pruned=versions, chunks_pruned=chunks)
 
 
+def verify(db: Db, mount: MountId, *, deep: bool = False) -> VerifyReport:
+    """Check every entry's COMMITTED version in the mount's volume.
+
+    Shallow (always): manifest refs resolve to pool rows, chunk indexes are
+    contiguous from 0, and per-entry chunk lengths sum to the manifest size.
+    Deep (--deep): additionally fetch each referenced chunk once, recompute
+    its content address over the stored bytes (bitrot), and decrypt it under
+    the mount's cipher (AEAD tag => authenticity; identity cipher for plain
+    volumes makes decrypt a no-op but the address recompute still bites).
+    Superseded/staged versions are out of scope — prune owns those.
+    """
+    from .db import chunk_hash as _addr
+
+    m = _require_mount(db, mount)
+    problems: "builtins.list[str]" = []
+    rows = db.all("resolution.verify_manifest", {"volume": m.volume})
+
+    per_node: dict[tuple[str, int], list[Any]] = {}
+    for r in rows:
+        per_node.setdefault((r["node_id"], r["version"]), []).append(r)
+
+    seen_chunks: set[str] = set()
+    for (node, version), refs in per_node.items():
+        idxs = [r["chunk_index"] for r in refs]
+        if idxs != [*range(len(idxs))]:
+            problems.append(f"gap node={node} v={version} indexes={idxs}")
+        total = 0
+        for r in refs:
+            if not r["present"]:
+                problems.append(f"missing-chunk node={node} hash={r['chunk_hash']}")
+                continue
+            total += r["chunk_length"]
+            seen_chunks.add(r["chunk_hash"])
+        if total != refs[0]["size"]:
+            problems.append(
+                f"size-mismatch node={node} manifest={refs[0]['size']} chunks={total}"
+            )
+
+    if deep:
+        for h in seen_chunks:
+            c = db.one("resolution.get_chunk", {"hash": h})
+            if c is None:
+                continue  # already reported as missing
+            if _addr(c["data"]) != h:
+                problems.append(f"address-mismatch hash={h}")
+                continue
+            try:
+                pt = db.cipher.decrypt_chunk(c["data"], c["N_c"], c["enc_tag"])
+            except Exception:
+                problems.append(f"decrypt-failed hash={h}")
+                continue
+            if len(pt) != c["length"]:
+                problems.append(f"length-mismatch hash={h}")
+
+    return VerifyReport(
+        entries_checked=len(per_node),
+        chunks_checked=len(seen_chunks) if deep else 0,
+        problems=problems,
+    )
+
+
 def health_check(db: Db) -> "builtins.list[Anomaly]":
     return [Anomaly.from_row(r) for r in db.all("maintenance.health_check")]
 
@@ -1115,6 +1215,7 @@ import builtins  # noqa: E402  (used only in return annotations above)
 
 __all__ = [
     "create_volume",
+    "change_pin",
     "list_volumes",
     "mount",
     "unmount",
@@ -1147,6 +1248,7 @@ __all__ = [
     "set_retention",
     "prune_content",
     "health_check",
+    "verify",
 ]
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #

@@ -113,6 +113,11 @@ class Aloelite:
                 raise errors.FsError(f"a volume named {name!r} already exists")
         return ops.create_volume(self._db, name, chunk_size, pin, enc_mode=enc_mode)
 
+    def change_pin(
+        self, volume: VolumeId, old_pin: bytes, new_pin: bytes
+    ) -> None:
+        ops.change_pin(self._db, volume, old_pin, new_pin)
+
     def resolve_volume_name(self, name: str) -> VolumeId | None:
         """VolumeId for `name`, or None. On duplicates the greatest (latest)
         id wins — mirroring NODE-5's greatest-uuid7-is-visible convention."""
@@ -224,6 +229,9 @@ class Mount:
         return self.path("/") / other
 
     # -- read ----------------------------------------------------------------
+    def verify(self, *, deep: bool = False):
+        return ops.verify(self._db, self.id, deep=deep)
+
     def stat(self, path: str) -> NodeInfo:
         return ops.stat(self._db, self.id, path)
 

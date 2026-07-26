@@ -482,6 +482,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         sys.argv = ["aloelite-fuse"] + argv[1:]
         return fuse_main() or 0
+    if argv[:1] == ["admin"]:
+        from .admin import main as admin_main
+
+        return admin_main(argv[1:])
     if argv[:1] == ["web"]:
         from manager.web import main as web_main
 
