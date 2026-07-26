@@ -221,9 +221,7 @@ def create_volume(
     return VolumeInfo.from_row(db.one("resolution.get_volume", {"volume": vid}))
 
 
-def change_pin(
-    db: Db, volume: VolumeId, old_pin: bytes, new_pin: bytes
-) -> None:
+def change_pin(db: Db, volume: VolumeId, old_pin: bytes, new_pin: bytes) -> None:
     """Rotate an encrypted volume's PIN.
 
     Unwraps K_v with the old PIN's K_u, re-wraps it under the new PIN's K_u

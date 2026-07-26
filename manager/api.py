@@ -32,11 +32,20 @@ import sqlite3
 import time
 import uuid
 
-from flask import Flask, Response, jsonify, redirect, request, render_template, send_file
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    request,
+    render_template,
+    send_file,
+)
 
 from . import errors as merr
 from .direct import FRONTEND_DIRECT, DirectSessionRegistry
 from .store import FilesystemRecord, VolumeRecord, VolumeStore
+
 
 def _default_root() -> str:
     if os.environ.get("ALOELITE_ROOT"):
@@ -44,6 +53,7 @@ def _default_root() -> str:
     if os.environ.get("ALOELITE_DIRECT_ONLY", "") not in ("", "0"):
         return os.path.expanduser("~/.aloelite")
     return "/aloelite-root"
+
 
 ALOELITE_ROOT = _default_root()
 HOST_MNT_PREFIX = "/mnt/aloelite"  # host-visible path consumers bind-mount
@@ -511,8 +521,9 @@ def create_app(
 
             name = path.rstrip("/").rsplit("/", 1)[-1] or rec.id
             inline = request.args.get("inline") in ("1", "true")
-            mt = (mimetypes.guess_type(name)[0] if inline else None) \
-                or "application/octet-stream"
+            mt = (
+                mimetypes.guess_type(name)[0] if inline else None
+            ) or "application/octet-stream"
             disp = "inline" if inline else "attachment"
             return Response(
                 generate(),
@@ -627,9 +638,7 @@ def create_app(
             return err
         _rec, _root, p = ctx
         inline = request.args.get("inline") in ("1", "true")
-        return send_file(
-            p, as_attachment=not inline, download_name=os.path.basename(p)
-        )
+        return send_file(p, as_attachment=not inline, download_name=os.path.basename(p))
 
     @app.post("/volumes/<vid>/files/upload")
     def upload_file(vid):
@@ -699,6 +708,7 @@ def create_app(
         if rec is None:
             return jsonify(error="no such volume"), 404
         if rec.frontend == FRONTEND_DIRECT:
+
             def run():
                 with registry.session(rec.id) as m:
                     if op == "copy":
@@ -762,9 +772,7 @@ def create_app(
         fsr = store.get_fs(fid)
         if fsr is None:
             return jsonify(error="no such filesystem"), 404
-        return _export_response(
-            fsr.sqlite_path, _export_name(fsr.display_name), fid
-        )
+        return _export_response(fsr.sqlite_path, _export_name(fsr.display_name), fid)
 
     @app.post("/filesystems/import")
     def import_filesystem():

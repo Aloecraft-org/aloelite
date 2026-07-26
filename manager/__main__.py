@@ -81,10 +81,14 @@ def main() -> int:
             host,
         )
     port = int(os.environ.get("ALOELITE_API_PORT", "8080"))
-    print(f"aloelite manager: http://{'localhost' if host in ('127.0.0.1', '::1') else host}:{port}/admin")
+    print(
+        f"aloelite manager: http://{'localhost' if host in ('127.0.0.1', '::1') else host}:{port}/admin"
+    )
     print(f"  data root: {ALOELITE_ROOT}")
     if direct_only:
-        print("  mode: direct only (browser access; set ALOELITE_DIRECT_ONLY=0 for FUSE)")
+        print(
+            "  mode: direct only (browser access; set ALOELITE_DIRECT_ONLY=0 for FUSE)"
+        )
     # threaded=True: mount/export endpoints block; serve them concurrently.
     try:
         app.run(host=host, port=port, threaded=True)

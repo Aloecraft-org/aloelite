@@ -116,6 +116,7 @@ def test_full_request_cycle(tmp_path):
     # explorer over the Mount API
     assert c.post(f"/volumes/{dvid}/files/mkdir?path=/docs").status_code == 201
     import io
+
     r = c.post(
         f"/volumes/{dvid}/files/upload?path=/docs",
         data={"file": (io.BytesIO(b"direct bytes"), "a.txt")},
@@ -124,9 +125,10 @@ def test_full_request_cycle(tmp_path):
     assert r.status_code == 201
     names = {e["name"] for e in c.get(f"/volumes/{dvid}/files?path=/docs").get_json()}
     assert names == {"a.txt"}
-    assert c.get(
-        f"/volumes/{dvid}/files/download?path=/docs/a.txt"
-    ).get_data() == b"direct bytes"
+    assert (
+        c.get(f"/volumes/{dvid}/files/download?path=/docs/a.txt").get_data()
+        == b"direct bytes"
+    )
     assert c.delete(f"/volumes/{dvid}/mount").status_code == 204
     assert store.get(dvid).frontend is None
 
@@ -135,9 +137,10 @@ def test_full_request_cycle(tmp_path):
     mine = [x for x in fss if any(v["id"] == dvid for v in x["volumes"])]
     assert len(mine) == 1
     fid = mine[0]["id"]
-    assert c.patch(
-        f"/filesystems/{fid}", json={"display_name": "travel.fs"}
-    ).status_code == 200
+    assert (
+        c.patch(f"/filesystems/{fid}", json={"display_name": "travel.fs"}).status_code
+        == 200
+    )
     r = c.get(f"/filesystems/{fid}/export")
     assert r.status_code == 200
     assert 'filename="travel.fs"' in r.headers["Content-Disposition"]
@@ -156,16 +159,20 @@ def test_full_request_cycle(tmp_path):
     # imported volume unlocks and reads back the content
     ivid = imp["volumes"][0]["id"]
     assert c.post(f"/volumes/{ivid}/mount", json={"mode": "direct"}).status_code == 200
-    assert c.get(
-        f"/volumes/{ivid}/files/download?path=/docs/a.txt"
-    ).get_data() == b"direct bytes"
+    assert (
+        c.get(f"/volumes/{ivid}/files/download?path=/docs/a.txt").get_data()
+        == b"direct bytes"
+    )
     assert c.delete(f"/volumes/{ivid}/mount").status_code == 204
     # junk import is rejected and leaves nothing behind
-    assert c.post(
-        "/filesystems/import",
-        data={"file": (io.BytesIO(b"not a database"), "junk.bin")},
-        content_type="multipart/form-data",
-    ).status_code == 400
+    assert (
+        c.post(
+            "/filesystems/import",
+            data={"file": (io.BytesIO(b"not a database"), "junk.bin")},
+            content_type="multipart/form-data",
+        ).status_code
+        == 400
+    )
 
     sup.shutdown()
     app.config["DIRECT_REGISTRY"].shutdown()

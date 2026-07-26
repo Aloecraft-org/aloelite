@@ -144,8 +144,10 @@ def _cmd_verify(fs: Aloelite, args) -> int:
         rep = m.verify(deep=args.deep)
     label = "deep" if args.deep else "shallow"
     if rep.ok:
-        print(f"ok ({label}): {rep.entries_checked} entries"
-              + (f", {rep.chunks_checked} chunks" if args.deep else ""))
+        print(
+            f"ok ({label}): {rep.entries_checked} entries"
+            + (f", {rep.chunks_checked} chunks" if args.deep else "")
+        )
         return 0
     for p in rep.problems:
         print(p)
@@ -222,16 +224,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "dest" if verb == "export" else "src",
             help="the other .fs file (created if missing on export/import)",
         )
-        p.add_argument("--rename", metavar="NAME",
-                       help="volume name on the destination (default: keep)")
-        p.add_argument("--encrypt", action="store_true",
-                       help="prompt (with confirm) for a destination PIN")
+        p.add_argument(
+            "--rename",
+            metavar="NAME",
+            help="volume name on the destination (default: keep)",
+        )
+        p.add_argument(
+            "--encrypt",
+            action="store_true",
+            help="prompt (with confirm) for a destination PIN",
+        )
         p.add_argument("--dest-pin-file", metavar="PATH")
         p.add_argument("--dest-pin-env", metavar="VAR")
 
-    p = sub.add_parser("verify", help="integrity-check committed content (exit 1 on problems)")
-    p.add_argument("--deep", action="store_true",
-                   help="also fetch, address-check, and decrypt every chunk")
+    p = sub.add_parser(
+        "verify", help="integrity-check committed content (exit 1 on problems)"
+    )
+    p.add_argument(
+        "--deep",
+        action="store_true",
+        help="also fetch, address-check, and decrypt every chunk",
+    )
 
     sub.add_parser("health", help="run the consistency check (exit 1 on anomalies)")
     sub.add_parser("info", help="one-screen file dossier")

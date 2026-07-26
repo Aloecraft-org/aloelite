@@ -77,6 +77,7 @@ def test_bare_pin_prompts(fsfile, tmp_path, monkeypatch, capsys):
     with Aloelite(p) as fs:
         fs.create_volume("vault", pin=b"s3cret")
     import aloelite.pin as pinmod
+
     monkeypatch.setattr(pinmod.getpass, "getpass", lambda *a, **k: "s3cret")
     monkeypatch.setattr("builtins.open", _tty_ok(open), raising=False)
     assert run("--pin", "-f", p, "ls") == 0

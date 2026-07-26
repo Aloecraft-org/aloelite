@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="aloelite.png" style="height:96px; width:96px;"/>
+<img src="https://raw.githubusercontent.com/Aloecraft-org/aloelite/refs/heads/main/doc/aloelite.png" style="height:96px; width:96px;"/>
 
 **Aloelite SQLite Filesystem**
 
@@ -58,6 +58,40 @@ with one default volume named `main` (encrypted if a `--pin*` flag was
 given), so the CLI works immediately without learning volume management
 first. Additional volumes are created explicitly with
 `aloelite [--pin] -f FILE volume create NAME`.
+
+### Which command do I use — aloelite, aloelite-fuse, aloelite-web, aloelite-admin?
+
+One rule: `aloelite` operates on files *inside* volumes (ls, put, cat);
+`aloelite-admin` operates on volumes, keys, and the file itself (pin
+change, snapshot, export, verify); `aloelite-fuse` mounts a volume as a
+real directory; `aloelite-web` runs the browser manager. You only ever
+need the first one installed to reach the others: `aloelite fuse ...`,
+`aloelite web ...`, and `aloelite admin ...` dispatch to them.
+
+### Why does every command on an encrypted volume take a second, and why must I re-enter the PIN?
+
+Each invocation opens a fresh session: the PIN is stretched through
+Argon2id (deliberately expensive — that cost is what makes a stolen
+file resist brute force) and forgotten when the command exits. Nothing
+PIN-derived is ever stored. For scripts, read the PIN once and pass it
+by environment (`--pin-env`) so you type it once per script, not per
+command; the KDF cost remains per command and is the honest price of
+the security model.
+
+### Is it safe to Ctrl-C a FUSE mount (or kill a writer)?
+
+Yes. Committed versions are the only definition of current bytes, and
+commits are atomic — an interrupted write leaves the previous committed
+version intact and at most some staged chunks for `prune` to reclaim.
+Ctrl-C on `aloelite-fuse` also unmounts cleanly on the way out. What you
+lose is only the write that was in flight, never existing data.
+
+### When does a file get created vs required to exist?
+
+Only the bare invocation (`aloelite -f new.fs`, with or without pin
+flags) creates a missing file — that is the deliberate on-ramp. Every
+other command, including quick writes and `pin check`, errors on a
+missing file instead of silently creating an empty one.
 
 ### What's the difference between a volume and a mount?
 

@@ -63,9 +63,7 @@ class DirectSessionRegistry:
         return Aloelite(sqlite_path, check_same_thread=False)
 
     # -- lifecycle -----------------------------------------------------------
-    def unlock(
-        self, record: VolumeRecord, pin: bytes | None, sqlite_path: str
-    ) -> None:
+    def unlock(self, record: VolumeRecord, pin: bytes | None, sqlite_path: str) -> None:
         """Open the engine session for a volume. `sqlite_path` is resolved by
         the caller (store.sqlite_path_of) so the registry needs no store.
         BadKey -> BadPin and EncryptionRequired -> EncryptionMismatch,
@@ -85,7 +83,9 @@ class DirectSessionRegistry:
                 raise EncryptionMismatch(str(e) or "PIN/encryption mismatch") from e
             raise MountFailed(f"{name}: {e}") from e
         snapshot = getattr(fs.db, "active_session", None)
-        entry = DirectSession(fs=fs, mount=mount, session=dict(snapshot) if snapshot else None)
+        entry = DirectSession(
+            fs=fs, mount=mount, session=dict(snapshot) if snapshot else None
+        )
         with self._lock:
             if record.id in self._sessions:  # lost a race to another unlock
                 mount.unmount()

@@ -54,6 +54,7 @@ from aloelite.aloelite import Aloelite
 import aloelite.errors as aloe_errors
 from aloelite.types import WriteMode, Whence
 
+
 def _version() -> str:
     from importlib.metadata import PackageNotFoundError, version
 

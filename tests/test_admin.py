@@ -35,11 +35,18 @@ def test_admin_cli(tmp_path, monkeypatch):
         fs.create_volume("vault", pin=b"old")
     monkeypatch.setenv("OLD", "old")
     monkeypatch.setenv("NEW", "new")
-    assert admin_main(
-        ["-f", p, "--pin-env", "OLD", "pin", "change", "--new-pin-env", "NEW"]
-    ) == 0
-    assert admin_main(["-f", p, "--pin-env", "OLD", "pin", "change",
-                       "--new-pin-env", "NEW"]) == 1  # old pin now wrong
+    assert (
+        admin_main(
+            ["-f", p, "--pin-env", "OLD", "pin", "change", "--new-pin-env", "NEW"]
+        )
+        == 0
+    )
+    assert (
+        admin_main(
+            ["-f", p, "--pin-env", "OLD", "pin", "change", "--new-pin-env", "NEW"]
+        )
+        == 1
+    )  # old pin now wrong
     assert admin_main(["-f", p, "health"]) == 0
     assert admin_main(["-f", p, "info"]) == 0
 
@@ -126,6 +133,6 @@ def test_verify(tmp_path):
         c.commit()
         c.close()
         with fs.mount(v.id, pin=b"pw") as m:
-            assert m.verify().ok            # shallow can't see bitrot
+            assert m.verify().ok  # shallow can't see bitrot
             rep = m.verify(deep=True)
             assert not rep.ok and any("address-mismatch" in x for x in rep.problems)

@@ -2,10 +2,10 @@
 
 <div align="center">
 
-<img src="aloelite.png" style="height:96px; width:96px;"/>
+<img src="https://raw.githubusercontent.com/Aloecraft-org/aloelite/refs/heads/main/doc/aloelite.png" style="height:96px; width:96px;"/>
 
 **Aloelite SQLite Filesystem**
-</div>
+
 
 [Overview](/README.md) | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
 

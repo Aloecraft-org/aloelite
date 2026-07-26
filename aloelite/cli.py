@@ -33,6 +33,7 @@ from .aloelite import Aloelite, Mount
 from .pin import PinError, add_pin_arguments, read_pin
 from .types import VolumeId
 
+
 def _version() -> str:
     from importlib.metadata import PackageNotFoundError, version
 
@@ -86,9 +87,7 @@ def _mount(fs: Aloelite, args) -> Mount:
     vol = _select_volume(fs, args.volume)
     crow = fs.db.one("resolution.get_volume_crypto", {"volume": vol})
     encrypted = crow is not None and crow["enc_mode"] != "none"
-    if not encrypted and (
-        args.pin is not None or args.pin_file or args.pin_env
-    ):
+    if not encrypted and (args.pin is not None or args.pin_file or args.pin_env):
         raise SystemExit(
             _fail(
                 "this volume is not encrypted; drop --pin / --pin-file / "
@@ -246,8 +245,10 @@ def _cmd_status(fs: Aloelite, args) -> int:
         print(f"{args.file}: created")
         print(f"  volume 'main' created (default, {enc})")
         if pin is None:
-            print("  for an encrypted volume: "
-                  f"aloelite --pin -f {args.file} volume create NAME")
+            print(
+                "  for an encrypted volume: "
+                f"aloelite --pin -f {args.file} volume create NAME"
+            )
         print(f"try: aloelite -f {args.file} ls /")
     else:
         size = os.path.getsize(args.file)
@@ -347,9 +348,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "aloelite[fuse]) and 'aloelite web ...' (browser manager) "
         "delegate to aloelite-fuse / aloelite-web.",
     )
-    ap.add_argument(
-        "--version", action="version", version=f"%(prog)s {_version()}"
-    )
+    ap.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     ap.add_argument(
         "-f",
         "--file",
@@ -497,8 +496,7 @@ def main(argv: list[str] | None = None) -> int:
     bare = args.cmd is None and not (args.in_path or args.append_path)
     if not bare and not os.path.exists(args.file):
         return _fail(
-            f"{args.file}: no such file (run 'aloelite -f {args.file}' "
-            "to create it)"
+            f"{args.file}: no such file (run 'aloelite -f {args.file}' to create it)"
         )
     try:
         with Aloelite(args.file) as fs:

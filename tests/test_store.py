@@ -76,7 +76,9 @@ def test_crud_roundtrip(tmp_path):
     # filesystem records: CRUD, resolution, and the still-referenced guard
     store.put_fs(
         FilesystemRecord(
-            id="fs-b", display_name="beta.fs", sqlite_path="/r/fs-b.sqlite",
+            id="fs-b",
+            display_name="beta.fs",
+            sqlite_path="/r/fs-b.sqlite",
             created_at=time.time(),
         )
     )

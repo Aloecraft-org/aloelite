@@ -76,8 +76,7 @@ def export_volume(
         dv = dfs.create_volume(
             name, pin=dest_pin, ensure_unique=True, enc_mode=enc_mode
         )
-        with sfs.mount(volume, pin=src_pin) as s, \
-             dfs.mount(dv.id, pin=dest_pin) as d:
+        with sfs.mount(volume, pin=src_pin) as s, dfs.mount(dv.id, pin=dest_pin) as d:
             c, e = copy_tree(s, d)
     return str(dv.id), c, e
 
@@ -100,9 +99,7 @@ def snapshot_volume(
     ciphertext never aliases across volumes — see the admin docs).
     Returns (snapshot_volume_id, containers, entries).
     """
-    return export_volume(
-        file, volume, file, src_pin=pin, dest_pin=pin, dest_name=name
-    )
+    return export_volume(file, volume, file, src_pin=pin, dest_pin=pin, dest_name=name)
 
 
 __all__ = ["copy_tree", "export_volume", "snapshot_volume"]
