@@ -86,7 +86,13 @@ class Db:
         # Multi-connection model (mount is a row, not a connection): WAL lets
         # readers and the single writer coexist; busy_timeout makes a second
         # writer wait briefly rather than fail instantly. (No-op on :memory:.)
-        self._conn.execute("PRAGMA journal_mode = WAL")
+        try:
+            self._conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            # WAL needs a shared-memory file (mmap); filesystems without it
+            # (notably an aloelite FUSE mount) can still run in a rollback
+            # journal mode. PERSIST avoids journal unlink churn.
+            self._conn.execute("PRAGMA journal_mode = PERSIST")
         self._conn.execute("PRAGMA busy_timeout = 5000")
         # We manage transactions explicitly via txn(); disable the driver's
         # implicit BEGIN-before-DML so autocommit is the default outside txn().

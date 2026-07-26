@@ -257,6 +257,32 @@ def _cmd_status(fs: Aloelite, args) -> int:
     return 0
 
 
+def _cmd_pin(fs: Aloelite, args) -> int:
+    if args.pin_cmd == "check":
+        vol = _select_volume(fs, args.volume)
+        crow = fs.db.one("resolution.get_volume_crypto", {"volume": vol})
+        if crow is None or crow["enc_mode"] == "none":
+            return _fail("volume is not encrypted; nothing to check")
+        try:
+            pin = read_pin(args.pin, args.pin_file, args.pin_env)
+        except PinError as e:
+            raise SystemExit(_fail(str(e)))
+        if pin is None:
+            try:
+                open("/dev/tty", "r").close()
+            except OSError:
+                return _fail("no PIN given and no terminal to prompt")
+            pin = getpass.getpass("PIN: ").encode()
+        try:
+            with fs.mount(vol, pin=pin):
+                pass  # mount+unmount: full Argon2id verification
+        except errors.BadKey:
+            return _fail("wrong PIN")
+        print("ok")
+        return 0
+    return _fail("unknown pin command")
+
+
 def _cmd_volume(fs: Aloelite, args) -> int:
     if args.volume_cmd == "ls":
         return _cmd_volumes(fs, args)
@@ -403,6 +429,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--vacuum", action="store_true", help="compact the file afterward (VACUUM)"
     )
 
+    p = sub.add_parser("pin", help="PIN utilities (check)")
+    psub = p.add_subparsers(dest="pin_cmd", required=True)
+    psub.add_parser("check", help="verify a PIN against the volume (exit 0/1)")
+
     p = sub.add_parser("volume", help="manage volumes (create ...)")
     vsub = p.add_subparsers(dest="volume_cmd", required=True)
     vsub.add_parser("ls", help="list volumes (same as 'volumes')")
@@ -437,6 +467,7 @@ _FS_VERBS = {
     "mounts": _cmd_mounts,
     "prune": _cmd_prune,
     "volume": _cmd_volume,
+    "pin": _cmd_pin,
 }
 
 
@@ -491,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
         return _fail("wrong PIN")
     except errors.EncryptionRequired as e:
         return _fail(str(e))
+    except errors.ContainerExists:
+        return _fail("already exists (use mkdir -p to tolerate)")
     except errors.FsError as e:
         return _fail(f"{e.code}: {e}")
     except OSError as e:

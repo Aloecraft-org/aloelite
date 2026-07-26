@@ -189,6 +189,27 @@ under a different name and copy the data across.
 
 ## Python
 
+### Opening an aloelite file that lives on a FUSE mount (nesting)
+
+An aloelite file stored *inside* a mounted volume can be opened live —
+the engine detects that WAL mode is unavailable there (no shared-memory
+mmap) and falls back to a rollback journal (`PERSIST`) automatically.
+Two consequences: readers and the writer no longer coexist on the inner
+file (fine for one-shot CLI commands, not for long concurrent
+sessions), and every inner page write commits a content version in the
+outer volume, growing the outer file. For an inner file that sees real
+write traffic, set retention and prune the outer file periodically:
+
+```bash
+# on the OUTER file
+aloelite -f outer.fs -v vol stat /backups/inner.aloelite   # sanity
+python3 -c "..."   # m.set_retention('/backups/inner.aloelite', keep=1)
+aloelite -f outer.fs prune --vacuum
+```
+
+Storing an aloelite file as plain *content* (`put` / `get`, no live
+access) has none of these caveats and dedups across repeated backups.
+
 ### `InvalidTag` on read
 
 Almost always a wrong key reaching the decryptor. If this appears on a

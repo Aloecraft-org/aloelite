@@ -122,6 +122,17 @@ Troubleshooting). WAL mode needs mmap support and is not there yet.
 Ordinary applications work as well — validated backing a mail server
 (docker-mailserver) and a full git workflow on mounted volumes.
 
+### Can I store an aloelite file inside another aloelite volume?
+
+Yes, two ways. As plain content (`put`/`get`) it behaves like any other
+file — chunked, deduplicated across repeated backups, byte-identical on
+the way out. Opened *live* on a FUSE mount of the outer volume, it also
+works: the engine falls back from WAL to a rollback journal
+automatically. Live nesting trades away reader/writer concurrency on
+the inner file and amplifies writes into outer-volume versions, so set
+a retention policy and prune the outer file if the inner one is busy
+(see Troubleshooting).
+
 ### How big can files and volumes get?
 
 Streaming I/O is bounded-memory and validated against files in the tens

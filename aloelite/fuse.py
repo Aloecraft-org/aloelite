@@ -799,6 +799,17 @@ Examples
     )
     try:
         trio.run(runner)
+    except (KeyboardInterrupt, BaseExceptionGroup) as e:
+        # SIGINT cancels the trio nursery; by the time we're here the
+        # finally chain (pyfuse3.close(unmount=True), engine unmount,
+        # fs.close) has already run. Anything in the group that is NOT
+        # a KeyboardInterrupt is a real error and must not be hidden.
+        if isinstance(e, BaseExceptionGroup):
+            _ki, rest = e.split(KeyboardInterrupt)
+            if rest is not None:
+                raise rest
+        print("\naloefuse: interrupted; unmounted cleanly", file=sys.stderr)
+        sys.exit(130)
     except aloe_errors.NotFound as e:
         print(f"aloefuse: {e}", file=sys.stderr)
         sys.exit(1)
