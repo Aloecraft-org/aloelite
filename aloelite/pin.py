@@ -77,10 +77,8 @@ def add_pin_arguments(parser) -> None:
         metavar="SECRET",
         nargs="?",
         const=_PROMPT,
-        help="PIN; with no SECRET, prompt interactively (place bare --pin "
-        "before the subcommand, followed by another flag, e.g. "
-        "'--pin -f FILE ls'). Plaintext; prefer --pin-file or --pin-env "
-        "for scripts.",
+        help="PIN; with no SECRET, prompt interactively. Plaintext; "
+        "prefer --pin-file or --pin-env for scripts.",
     )
     grp.add_argument(
         "--pin-file", metavar="PATH", help="file whose contents are the PIN"

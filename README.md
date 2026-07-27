@@ -4,7 +4,43 @@
 
 <img src="https://raw.githubusercontent.com/Aloecraft-org/aloelite/refs/heads/main/doc/aloelite.png" style="height:96px; width:96px;"/>
 
-**Aloelite SQLite Filesystem**
+**Aloelite Single-File Filesystem**
+
+A portable encrypted filesystem stored inside one file
+
+
+
+    aloelite
+        ls
+        put
+        get
+        mkdir
+        rm
+        mv
+        cat
+        cp
+        stat
+        tree
+        prune
+        pin
+        volume
+        volumes
+        mounts
+    
+    aloelite fuse
+
+    aloelite web
+
+    aloelite admin
+        pin
+        snapshot
+        export
+        import
+        verify
+        health
+        info
+
+
 
 **Overview (current)** | [Getting Started](https://github.com/Aloecraft-org/aloelite/blob/main/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](https://github.com/Aloecraft-org/aloelite/blob/main/doc/FAQ.md) 
 

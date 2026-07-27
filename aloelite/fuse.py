@@ -747,18 +747,32 @@ If it already exists and is plain, a PIN must NOT be given.
 
 Examples
 --------
-  # plain
-  aloelite-fuse photos.sqlite photos /mnt/photos
+  # plain (single-volume file: -v optional)
+  aloelite-fuse -f photos.fs /mnt/photos
 
   # encrypted (new or existing)
-  aloelite-fuse vault.sqlite vault /mnt/vault --pin-env VAULT_PIN
+  aloelite-fuse -f vault.fs -v vault /mnt/vault --pin-env VAULT_PIN
+
+A bare --pin (no SECRET) prompts on your terminal; place it last.
 """,
     )
     ap.add_argument(
-        "-v", "--version", action="version", version=f"%(prog)s {_version()}"
+        "--version", action="version", version=f"%(prog)s {_version()}"
     )
-    ap.add_argument("db", help="path to the Aloelite sqlite file")
-    ap.add_argument("volume", help="volume name (see --create)")
+    ap.add_argument(
+        "-f",
+        "--file",
+        dest="db",
+        default=os.environ.get("ALOELITE_FILE"),
+        help="path to the .sqlite/.fs file (default: $ALOELITE_FILE)",
+    )
+    ap.add_argument(
+        "-v",
+        "--volume",
+        metavar="NAME",
+        help="volume name (optional if the file has exactly one; "
+        "required with --create)",
+    )
     ap.add_argument("mountpoint", help="empty directory to mount at")
     ap.add_argument(
         "--create",
@@ -778,6 +792,34 @@ Examples
     add_pin_arguments(ap)
 
     args = ap.parse_args()
+    if not args.db:
+        print("aloefuse: no file given: pass -f or set ALOELITE_FILE",
+              file=sys.stderr)
+        sys.exit(1)
+    if not os.path.exists(args.db) and not args.create:
+        print(f"aloefuse: {args.db}: no such file (pass --create with -v "
+              "NAME to bootstrap one)", file=sys.stderr)
+        sys.exit(1)
+    if args.volume is None:
+        if args.create:
+            print("aloefuse: --create requires an explicit -v NAME",
+                  file=sys.stderr)
+            sys.exit(1)
+        from aloelite.aloelite import Aloelite as _Aloe
+
+        with _Aloe(args.db) as _fs:
+            _vols = _fs.list_volumes()
+        if len(_vols) == 1:
+            args.volume = _vols[0].name or str(_vols[0].id)
+        elif not _vols:
+            print(f"aloefuse: {args.db} contains no volumes "
+                  "(pass --create with -v NAME)", file=sys.stderr)
+            sys.exit(1)
+        else:
+            names = ", ".join(v.name or str(v.id) for v in _vols)
+            print(f"aloefuse: multiple volumes; pick one with -v: {names}",
+                  file=sys.stderr)
+            sys.exit(1)
     import logging
 
     logging.basicConfig(

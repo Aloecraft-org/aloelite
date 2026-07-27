@@ -185,7 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Aloelite maintenance utilities (volumes, keys, file health).",
     )
     ap.add_argument(
-        "-v", "--version", action="version", version=f"%(prog)s {_version()}"
+        "--version", action="version", version=f"%(prog)s {_version()}"
     )
     ap.add_argument(
         "-f",
@@ -194,15 +194,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="path to the .sqlite/.fs file (default: $ALOELITE_FILE)",
     )
     ap.add_argument(
+        "-v",
         "--volume",
         metavar="NAME_OR_ID",
         help="volume name or id (optional if the file has exactly one)",
     )
+    ap.epilog = (
+        "Bare --pin (no SECRET) prompts interactively; place it before "
+        "the subcommand, followed by another flag."
+    )
     add_pin_arguments(ap)  # the OLD pin, where one is needed
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("pin", help="PIN management (change)")
+    p = sub.add_parser("pin", help="PIN management (change, check)")
     psub = p.add_subparsers(dest="pin_cmd", required=True)
+    psub.add_parser("check", help="verify a PIN against the volume (exit 0/1)")
     pc = psub.add_parser("change", help="rotate a volume's PIN (K_v unchanged)")
     pc.add_argument("--new-pin-file", metavar="PATH", help="file holding the new PIN")
     pc.add_argument("--new-pin-env", metavar="VAR", help="env var holding the new PIN")
@@ -259,6 +265,10 @@ def main(argv: list[str] | None = None) -> int:
         return _fail(f"{args.file}: no such file")
     try:
         with Aloelite(args.file) as fs:
+            if args.cmd == "pin" and args.pin_cmd == "check":
+                from .cli import _cmd_pin
+
+                return _cmd_pin(fs, args)
             if args.cmd == "pin" and args.pin_cmd == "change":
                 return _cmd_pin_change(fs, args)
             if args.cmd == "snapshot":

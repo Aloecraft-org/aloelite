@@ -198,8 +198,9 @@ Mount and use:
 
 ```bash
 mkdir -p ~/photos
-aloelite-fuse photos.fs photos ~/photos --create   # file, volume, mountpoint
-# equivalently: aloelite fuse photos.fs photos ~/photos --create
+aloelite-fuse -f photos.fs -v photos ~/photos --create
+# equivalently: aloelite fuse -f photos.fs -v photos ~/photos --create
+# single-volume file? -v is optional: aloelite fuse -f photos.fs ~/photos
 ```
 
 `--create` bootstraps the volume on first run; without it, a missing
@@ -219,8 +220,8 @@ fusermount3 -u ~/photos
 Encrypted volumes take the same PIN flags as the CLI:
 
 ```bash
-aloelite-fuse vault.fs vault ~/vault --pin-env VAULT_PIN
-aloelite-fuse vault.fs vault ~/vault --pin       # bare --pin: prompts
+aloelite-fuse -f vault.fs ~/vault --pin-env VAULT_PIN
+aloelite-fuse -f vault.fs ~/vault --pin          # bare --pin: prompts
 ```
 
 Large sequential copies stream with bounded memory, and random-access

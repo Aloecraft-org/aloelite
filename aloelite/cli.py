@@ -344,9 +344,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="aloelite",
         description="Operate on an Aloelite filesystem file.",
-        epilog="Also: 'aloelite fuse ...' (mount via FUSE, needs "
-        "aloelite[fuse]) and 'aloelite web ...' (browser manager) "
-        "delegate to aloelite-fuse / aloelite-web.",
+        epilog="Bare --pin (no SECRET) prompts interactively; place it "
+        "before the subcommand, followed by another flag: "
+        "aloelite --pin -f FILE ls. Also: 'aloelite fuse ...', "
+        "'aloelite web ...', and 'aloelite admin ...' delegate to "
+        "aloelite-fuse / aloelite-web / aloelite-admin.",
     )
     ap.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     ap.add_argument(
