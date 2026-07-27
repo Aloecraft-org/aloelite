@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import builtins
 from pathlib import Path as _FsPath
-from typing import Iterator
+from typing import TYPE_CHECKING
 
 from . import errors
 from . import operations as ops
@@ -44,6 +44,11 @@ from .models import (
     VolumeInfo,
 )
 from .types import MountId, NodeId, VolumeId, WriteMode
+
+if TYPE_CHECKING:
+    # Runtime import lives inside Mount.path() to break the aloelite <-> path
+    # cycle; this arm exists so type checkers can still resolve the annotation.
+    from .path import AloelitePath
 
 # Default spec locations. Preferred: inside the package (shipped as package
 # data in the wheel). Fallback: the old top-level repo layout, so a checkout

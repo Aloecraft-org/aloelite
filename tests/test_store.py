@@ -19,15 +19,15 @@ from manager.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
 
 
 def _rec(vid: str, **over) -> VolumeRecord:
-    base = dict(
-        id=vid,
-        name=f"vol-{vid}",
-        fs_id=f"fs-{vid}",
-        encrypted=False,
-        created_at=time.time(),
-        mounted=False,
-        mountpoint=None,
-    )
+    base = {
+        "id": vid,
+        "name": f"vol-{vid}",
+        "fs_id": f"fs-{vid}",
+        "encrypted": False,
+        "created_at": time.time(),
+        "mounted": False,
+        "mountpoint": None,
+    }
     base.update(over)
     return VolumeRecord(**base)
 

@@ -17,9 +17,9 @@ Layering, bottom to top:
 """
 
 from . import errors, operations
+from .aloelite import Aloelite, Mount
 from .db import Db, Templates
 from .descriptor import Descriptor
-from .path import AloelitePath
 from .models import (
     Anomaly,
     ContentPruneReport,
@@ -30,6 +30,7 @@ from .models import (
     PruneReport,
     VolumeInfo,
 )
+from .path import AloelitePath
 from .resolve import Parent, Resolved, resolve, resolve_parent, split_path
 from .types import (
     EdgeId,
@@ -46,8 +47,6 @@ from .types import (
     Whence,
     WriteMode,
 )
-
-from .aloelite import Aloelite, Mount
 
 __all__ = [
     "Aloelite",

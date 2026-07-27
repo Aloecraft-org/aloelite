@@ -17,11 +17,9 @@ import sys
 from . import errors
 from .aloelite import Aloelite
 from .cli import (
-    _enc_label,
     _fail,
     _mount,
     _select_volume,
-    _ts,
     _version,
     _volume_line,
 )
@@ -184,9 +182,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="aloelite-admin",
         description="Aloelite maintenance utilities (volumes, keys, file health).",
     )
-    ap.add_argument(
-        "--version", action="version", version=f"%(prog)s {_version()}"
-    )
+    ap.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     ap.add_argument(
         "-f",
         "--file",

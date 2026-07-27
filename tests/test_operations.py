@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from aloelite import Db, NodeType, WriteMode, Whence, errors
+from aloelite import Db, NodeType, Whence, WriteMode, errors
 from aloelite import operations as ops
 
 
@@ -453,7 +453,8 @@ def _chunk_lengths(db, nid):
         for r in db.connection.execute(
             "SELECT cc.length FROM content_version cv "
             "JOIN content_chunk cc ON cc.chunk_hash=cv.chunk_hash "
-            "WHERE cv.content_id=? AND cv.version=(SELECT version FROM content WHERE node_id=?) "
+            "WHERE cv.content_id=? "
+            "AND cv.version=(SELECT version FROM content WHERE node_id=?) "
             "ORDER BY cv.chunk_index",
             (nid, nid),
         ).fetchall()
@@ -772,8 +773,6 @@ def test_streaming_append_multichunk_carry(db, streamvol):
     cs = 64
     base = bytes((i % 251) for i in range(cs * 5 + 20))  # 5 full + 20-byte tail
     ops.create_entry(db, streamvol, "/f", base)
-    nid = _nid(db, streamvol, "/f")
-    pool_before = _pool_count(db)
     add = bytes(((i * 7) % 251) for i in range(cs * 2 + 9))
     with ops.open_write(db, streamvol, "/f", WriteMode.APPEND) as w:
         assert w.tell() == len(base)
@@ -839,7 +838,6 @@ def test_orphan_collected_after_lock_gone(db, streamvol):
     ops.create_entry(db, streamvol, "/f", b"good")
     nid = _nid(db, streamvol, "/f")
     committed_before = _committed(db, nid)
-    vol = ops.mount_info(db, streamvol).volume
     v = db.alloc_version(nid)
     with db.txn():  # stage without a lock, without swap
         db.stage_chunk(nid, v, 0, bytes(cs))

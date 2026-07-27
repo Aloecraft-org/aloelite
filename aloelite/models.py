@@ -19,19 +19,17 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Optional
 
-from pydantic import computed_field
-
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, computed_field
 
 from .types import (
     EdgeId,
     LockId,
     MountId,
+    MountState,
     NodeId,
     NodeType,
     Timestamp,
     VolumeId,
-    MountState,
 )
 
 

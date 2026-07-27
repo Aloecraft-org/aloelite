@@ -18,9 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from aloelite import Db, errors
+from aloelite import Db, crypto, errors
 from aloelite import operations as ops
-from aloelite import crypto
 
 
 def _find(*candidates: str) -> str:

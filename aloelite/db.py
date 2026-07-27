@@ -28,7 +28,7 @@ import hashlib
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path as _FsPath
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping
 
 import yaml
 

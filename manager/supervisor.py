@@ -50,7 +50,9 @@ def _default_fuse_runner(
     """Run one mount's FUSE loop to completion (real path). Imports lazily so
     tests that inject a fake runner never need the aloelite package."""
     import functools
+
     import trio
+
     from aloelite.fuse import fuse_main
 
     trio.run(

@@ -1,8 +1,8 @@
 import pytest
 
+from aloelite import errors
 from aloelite.admin import main as admin_main
 from aloelite.aloelite import Aloelite
-from aloelite import errors
 
 
 def test_change_pin_rotates(tmp_path):

@@ -81,9 +81,8 @@ def main() -> int:
             host,
         )
     port = int(os.environ.get("ALOELITE_API_PORT", "8080"))
-    print(
-        f"aloelite manager: http://{'localhost' if host in ('127.0.0.1', '::1') else host}:{port}/admin"
-    )
+    display_host = "localhost" if host in ("127.0.0.1", "::1") else host
+    print(f"aloelite manager: http://{display_host}:{port}/admin")
     print(f"  data root: {ALOELITE_ROOT}")
     if direct_only:
         print(

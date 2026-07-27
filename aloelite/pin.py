@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import getpass
 import os
-import sys
 
 # Sentinel: --pin was given with no SECRET => prompt interactively.
 _PROMPT = object()

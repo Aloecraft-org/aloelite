@@ -15,15 +15,15 @@ from manager.store import VolumeRecord
 
 
 def _rec(tmp_path, vid="v1", name="vol", **over):
-    base = dict(
-        id=vid,
-        name=name,
-        fs_id=f"fs-{vid}",
-        encrypted=False,
-        created_at=0.0,
-        mounted=False,
-        mountpoint=None,
-    )
+    base = {
+        "id": vid,
+        "name": name,
+        "fs_id": f"fs-{vid}",
+        "encrypted": False,
+        "created_at": 0.0,
+        "mounted": False,
+        "mountpoint": None,
+    }
     base.update(over)
     return VolumeRecord(**base)
 

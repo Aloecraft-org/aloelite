@@ -50,9 +50,9 @@ import sys
 import pyfuse3
 import trio
 
-from aloelite.aloelite import Aloelite
 import aloelite.errors as aloe_errors
-from aloelite.types import WriteMode, Whence
+from aloelite.aloelite import Aloelite
+from aloelite.types import Whence, WriteMode
 
 
 def _version() -> str:
@@ -218,11 +218,15 @@ class AloeFuse(pyfuse3.Operations):
         self.m = mount
         root = self.m.stat("/")
         self._n = {ROOT: root.id}  # inode -> NodeId
-        # fh -> handle state, one of:
-        #   {"mode":"w",  "path", "w": Descriptor, "pos", "inode"}  sequential stream write
-        #   {"mode":"r",  "path", "r": Descriptor}                  ranged stream read
-        #   {"mode":"a",  "path", "buf": bytearray, "inode"}        append batcher
-        #   {"mode":"rw", "path", "h": _RwHandle, "inode"}          dirty-extent random access
+        # fh -> handle state, keyed by "mode":
+        #   "w"   sequential stream write
+        #         {"mode":"w",  "path", "w": Descriptor, "pos", "inode"}
+        #   "r"   ranged stream read
+        #         {"mode":"r",  "path", "r": Descriptor}
+        #   "a"   append batcher
+        #         {"mode":"a",  "path", "buf": bytearray, "inode"}
+        #   "rw"  dirty-extent random access
+        #         {"mode":"rw", "path", "h": _RwHandle, "inode"}
         self._open = {}
         self._fh = 0
 
@@ -756,9 +760,7 @@ Examples
 A bare --pin (no SECRET) prompts on your terminal; place it last.
 """,
     )
-    ap.add_argument(
-        "--version", action="version", version=f"%(prog)s {_version()}"
-    )
+    ap.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     ap.add_argument(
         "-f",
         "--file",
@@ -793,17 +795,18 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
 
     args = ap.parse_args()
     if not args.db:
-        print("aloefuse: no file given: pass -f or set ALOELITE_FILE",
-              file=sys.stderr)
+        print("aloefuse: no file given: pass -f or set ALOELITE_FILE", file=sys.stderr)
         sys.exit(1)
     if not os.path.exists(args.db) and not args.create:
-        print(f"aloefuse: {args.db}: no such file (pass --create with -v "
-              "NAME to bootstrap one)", file=sys.stderr)
+        print(
+            f"aloefuse: {args.db}: no such file (pass --create with -v "
+            "NAME to bootstrap one)",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if args.volume is None:
         if args.create:
-            print("aloefuse: --create requires an explicit -v NAME",
-                  file=sys.stderr)
+            print("aloefuse: --create requires an explicit -v NAME", file=sys.stderr)
             sys.exit(1)
         from aloelite.aloelite import Aloelite as _Aloe
 
@@ -812,13 +815,17 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         if len(_vols) == 1:
             args.volume = _vols[0].name or str(_vols[0].id)
         elif not _vols:
-            print(f"aloefuse: {args.db} contains no volumes "
-                  "(pass --create with -v NAME)", file=sys.stderr)
+            print(
+                f"aloefuse: {args.db} contains no volumes (pass --create with -v NAME)",
+                file=sys.stderr,
+            )
             sys.exit(1)
         else:
             names = ", ".join(v.name or str(v.id) for v in _vols)
-            print(f"aloefuse: multiple volumes; pick one with -v: {names}",
-                  file=sys.stderr)
+            print(
+                f"aloefuse: multiple volumes; pick one with -v: {names}",
+                file=sys.stderr,
+            )
             sys.exit(1)
     import logging
 
@@ -872,7 +879,8 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
             )
         else:
             print(
-                f"aloefuse: volume '{args.volume}' is not encrypted but a PIN was given.\n"
+                f"aloefuse: volume '{args.volume}' is not encrypted "
+                "but a PIN was given.\n"
                 "  Drop --pin / --pin-file / --pin-env to mount a plain volume.",
                 file=sys.stderr,
             )

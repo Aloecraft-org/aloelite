@@ -14,9 +14,9 @@ import tempfile
 import threading
 import time
 
+from manager import errors as merr
 from manager.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
 from manager.supervisor import MountSupervisor
-from manager import errors as merr
 
 
 class FakeBackend:

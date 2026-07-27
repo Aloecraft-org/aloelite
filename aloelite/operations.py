@@ -27,6 +27,7 @@ from typing import Any
 
 import msgpack
 
+from . import crypto
 from .db import Db, split_chunks
 from .descriptor import Descriptor
 from .errors import (
@@ -34,14 +35,13 @@ from .errors import (
     Corrupt,
     EncryptionRequired,
     LockHeld,
+    MountInvalid,
     NotAContainer,
     NotAnEntry,
     NotEmpty,
     NotFound,
-    MountInvalid,
     WouldCycle,
 )
-from . import crypto
 from .models import (
     Anomaly,
     ContentPruneReport,
@@ -59,9 +59,7 @@ from .types import (
     MountId,
     NodeId,
     NodeType,
-    Timestamp,
     VolumeId,
-    Whence,
     WriteMode,
 )
 
@@ -85,9 +83,9 @@ class _Mount:
 def _require_mount(db: Db, mount: MountId) -> _Mount:
     """Resolve a mount to its anchor + volume, or raise MountInvalid.
 
-    A mount is untrusted-until-validated (or revalidated-per-access): it may have been unmounted or expired
-    (possibly from another connection), so this runs as the first step of every
-    operation. (ACC-1/4/5.)
+    A mount is untrusted-until-validated (or revalidated-per-access): it may
+    have been unmounted or expired (possibly from another connection), so this
+    runs as the first step of every operation. (ACC-1/4/5.)
     """
     row = db.one("resolution.get_valid_mount", {"mount": mount})
     if row is None:
@@ -347,7 +345,7 @@ def unmount(db: Db, mount: MountId) -> None:
 
 def renew_mount(db: Db, mount: MountId, ttl_ms: int | None = None) -> MountInfo:
     with db.txn():
-        m = _require_mount(db, mount)
+        _require_mount(db, mount)  # existence guard; raises NotFound
         expires = _now_ms() + ttl_ms if ttl_ms is not None else None
         db.rowcount("mutation.renew_mount", {"mount": mount, "expires_at": expires})
     return mount_info(db, mount)
