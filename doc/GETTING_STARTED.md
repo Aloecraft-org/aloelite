@@ -137,11 +137,17 @@ aloelite -f notebook.fs ls /
 aloelite -f notebook.fs mkdir -p /docs/2026
 aloelite -f notebook.fs put report.pdf /docs/report.pdf
 aloelite -f notebook.fs get /docs/report.pdf ./copy.pdf
+aloelite -f notebook.fs put -r ./project /code    # -r: a whole tree
+aloelite -f notebook.fs get -r /code ./restored
 aloelite -f notebook.fs mv /docs/report.pdf /archive/report.pdf
 aloelite -f notebook.fs cat /docs/report.pdf
 aloelite -f notebook.fs tree /
 aloelite -f notebook.fs rm -r /archive
 ```
+
+`-r` on `put`/`get` follows `cp -r`: if the destination already exists
+as a container (or a local directory), the source lands *inside* it as
+`DST/<name>`; otherwise the destination becomes the tree itself.
 
 Pipes work — `-` means stdin or stdout:
 

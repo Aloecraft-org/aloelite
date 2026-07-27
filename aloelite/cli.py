@@ -7,6 +7,8 @@ aloelite — command-line front-end over the Aloelite wrapper.
     aloelite -f notebook.fs -v vault put local.txt /docs/remote.txt
     cat data | aloelite -f notebook.fs put - /stdin.bin
     aloelite -f notebook.fs get /docs/remote.txt -            # to stdout
+    aloelite -f notebook.fs put -r ./project /code            # whole tree in
+    aloelite -f notebook.fs get -r /code ./restored           # whole tree out
     aloelite -f notebook.fs mkdir -p /a/b/c
     aloelite -f notebook.fs volumes
     aloelite -f notebook.fs mounts
@@ -18,6 +20,12 @@ With no -v: a file containing exactly one volume uses it; several volumes
 is a refusal-to-guess, listing the candidates. PIN comes from the standard
 --pin/--pin-file/--pin-env flags; interactively, an encrypted volume with
 no flag prompts via getpass.
+
+put -r / get -r walk a whole tree, one file at a time (bounded memory, no
+staging). Destination follows cp -r: when DST already exists as a container
+(put) or a directory (get), SRC lands INSIDE it as DST/<basename>; otherwise
+DST becomes the tree's new root. Both are pure CLI conveniences — the loop
+lives here, the Mount API is untouched.
 """
 
 from __future__ import annotations
@@ -50,6 +58,11 @@ _HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
 def _fail(msg: str, code: int = 1) -> "int":
     print(f"aloelite: {msg}", file=sys.stderr)
     return code
+
+
+def _note(msg: str) -> None:
+    """A non-fatal remark (a skipped node) — stderr, so stdout stays clean."""
+    print(f"aloelite: {msg}", file=sys.stderr)
 
 
 def _normalize_volume_ref(ref: str) -> str:
@@ -112,6 +125,168 @@ def _mount(fs: Aloelite, args) -> Mount:
     return fs.mount(vol, pin=pin)
 
 
+# -- recursive transfer (CLI-level: a walk over single-node operations) -------
+def _join(base: str, *parts: str) -> str:
+    """Join mount-relative path segments, collapsing empties. Always absolute."""
+    segs = [s for s in base.split("/") if s]
+    for p in parts:
+        segs += [s for s in p.split("/") if s]
+    return "/" + "/".join(segs)
+
+
+def _put_file(m: Mount, local: str, dst: str) -> None:
+    """One local file -> one entry, streamed (bounded memory)."""
+    with open(local, "rb") as f, m.open_write(dst) as w:
+        while chunk := f.read(_CHUNK):
+            w.write(chunk)
+
+
+def _get_file(m: Mount, src: str, local: str) -> None:
+    """One entry -> one local file, streamed (bounded memory)."""
+    with m.open_read(src) as r, open(local, "wb") as out:
+        while chunk := r.read(_CHUNK):
+            out.write(chunk)
+
+
+def _local_walk(root: str):
+    """(relpath, localpath, is_dir) for everything under a local directory,
+    parents before children. Directory symlinks are listed but NOT descended
+    into (os.walk's default), so a cycle can never hang the transfer."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        filenames.sort()
+        base = os.path.relpath(dirpath, root)
+        base = "" if base == "." else base
+        for name in dirnames:
+            yield os.path.join(base, name), os.path.join(dirpath, name), True
+        for name in filenames:
+            yield os.path.join(base, name), os.path.join(dirpath, name), False
+
+
+def _remote_walk(m: Mount, root: str):
+    """(relpath, path, is_dir) for everything under a container, parents
+    before children (breadth-first, so a container is always created before
+    anything it holds)."""
+    queue = [("", root)]
+    while queue:
+        rel, cur = queue.pop(0)
+        for e in m.list(cur):
+            if not e.visible:
+                continue
+            is_dir = e.type.value == "container"
+            child = f"{rel}/{e.name}" if rel else e.name
+            yield child, e.path, is_dir
+            if is_dir:
+                queue.append((child, e.path))
+
+
+def _tree_root_remote(m: Mount, dst: str, name: str) -> str:
+    """cp -r's destination rule, remote side: an existing container receives
+    the tree as a child; a missing path becomes the tree's root itself."""
+    if not name:
+        return dst
+    try:
+        st = m.stat(dst)
+    except errors.NotFound:
+        return dst
+    except errors.NotAContainer:
+        raise SystemExit(_fail(f"{dst}: path descends through an entry"))
+    if st.type.value != "container":
+        raise SystemExit(_fail(f"{dst}: exists and is not a container"))
+    return _join(dst, name)
+
+
+def _tree_root_local(dst: str, name: str) -> str:
+    """cp -r's destination rule, local side."""
+    if not name:
+        return dst
+    if os.path.isdir(dst):
+        return os.path.join(dst, name)
+    if os.path.exists(dst):
+        raise SystemExit(_fail(f"{dst}: exists and is not a directory"))
+    return dst
+
+
+def _n(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun if count == 1 else (plural or noun + 's')}"
+
+
+def _summary(
+    verb: str, files: int, dirs: int, skipped: int, unit: str, units: str | None = None
+) -> int:
+    tail = f", {skipped} skipped" if skipped else ""
+    print(f"{verb}: {_n(files, 'file')}, {_n(dirs, unit, units)}{tail}")
+    return 0
+
+
+def _put_tree(m: Mount, args) -> int:
+    if args.src == "-":
+        return _fail("put -r: stdin is not a directory")
+    if args.append:
+        return _fail("put -r: --append does not apply to a tree")
+    if not os.path.isdir(args.src):
+        return _fail(f"{args.src}: not a directory (drop -r)")
+    src = args.src
+    root = _tree_root_remote(m, args.dst, os.path.basename(os.path.abspath(src)))
+    m.mkdir(root, parents=True, exist_ok=True)
+    files = dirs = skipped = 0
+    for rel, local, is_dir in _local_walk(src):
+        dst = _join(root, rel.replace(os.sep, "/"))
+        if is_dir:
+            if os.path.islink(local):
+                _note(f"{local}: symlinked directory, skipped")
+                skipped += 1
+                continue
+            m.mkdir(dst, parents=True, exist_ok=True)
+            dirs += 1
+        elif os.path.isfile(local):  # follows symlinks: copy what they point at
+            _put_file(m, local, dst)
+            files += 1
+        else:
+            _note(f"{local}: not a regular file, skipped")
+            skipped += 1
+    return _summary("put", files, dirs, skipped, "container")
+
+
+def _get_tree(m: Mount, args) -> int:
+    if args.dst in (None, "-"):
+        return _fail("get -r: needs a local directory destination, not stdout")
+    try:
+        st = m.stat(args.src)
+    except errors.NotFound:
+        return _fail(f"{args.src}: no such path")
+    if st.type.value != "container":
+        return _fail(f"{args.src}: not a container (drop -r)")
+    segs = [s for s in args.src.split("/") if s]
+    root = _tree_root_local(args.dst, segs[-1] if segs else "")
+    os.makedirs(root, exist_ok=True)
+    files = dirs = skipped = 0
+    pruned: set[str] = set()  # containers refused; their subtrees go with them
+    for rel, path, is_dir in _remote_walk(m, args.src):
+        head, _, name = rel.rpartition("/")
+        if head in pruned:
+            skipped += 1
+            if is_dir:
+                pruned.add(rel)
+            continue
+        # Names are opaque segments in the store — '..' and separators are legal
+        # there and would escape `root` here, so they never reach the local fs.
+        if name in (".", "..") or os.sep in name or (os.altsep and os.altsep in name):
+            _note(f"{path}: unsafe local name {name!r}, skipped")
+            skipped += 1
+            if is_dir:
+                pruned.add(rel)
+            continue
+        local = os.path.join(root, *rel.split("/"))
+        if is_dir:
+            os.makedirs(local, exist_ok=True)
+            dirs += 1
+        else:
+            _get_file(m, path, local)
+            files += 1
+    return _summary("get", files, dirs, skipped, "directory", "directories")
+
+
 # -- verbs -------------------------------------------------------------------
 def _cmd_ls(m: Mount, args) -> int:
     for e in m.list(args.path):
@@ -126,24 +301,32 @@ def _cmd_ls(m: Mount, args) -> int:
 
 
 def _cmd_put(m: Mount, args) -> int:
+    if args.recursive:
+        return _put_tree(m, args)
     if args.src == "-":
         m.put(args.dst, sys.stdin.buffer.read(), append=args.append)
         return 0
+    if os.path.isdir(args.src):
+        return _fail(f"{args.src}: is a directory (use -r)")
     # file source: stream through a descriptor (bounded memory)
     if args.append:
         with open(args.src, "rb") as f:
             m.put(args.dst, f.read(), append=True)  # atomic append per call
         return 0
-    with open(args.src, "rb") as f, m.open_write(args.dst) as w:
-        while chunk := f.read(_CHUNK):
-            w.write(chunk)
+    _put_file(m, args.src, args.dst)
     return 0
 
 
 def _cmd_get(m: Mount, args) -> int:
+    if args.recursive:
+        return _get_tree(m, args)
+    try:
+        r = m.open_read(args.src)
+    except errors.NotAnEntry:
+        return _fail(f"{args.src}: is a container (use -r)")
     out = sys.stdout.buffer if args.dst in (None, "-") else open(args.dst, "wb")
     try:
-        with m.open_read(args.src) as r:
+        with r:
             while chunk := r.read(_CHUNK):
                 out.write(chunk)
     finally:
@@ -390,10 +573,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("src")
     p.add_argument("dst")
     p.add_argument("--append", action="store_true")
+    p.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="copy a local directory tree; an existing DST container "
+        "receives it as DST/<name> (cp -r)",
+    )
 
     p = sub.add_parser("get", help="read a path to a local file (or '-' = stdout)")
     p.add_argument("src")
     p.add_argument("dst", nargs="?")
+    p.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="copy a container tree out; an existing DST directory "
+        "receives it as DST/<name> (cp -r)",
+    )
 
     p = sub.add_parser("mkdir", help="create a container")
     p.add_argument("path")

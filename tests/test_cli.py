@@ -98,6 +98,87 @@ def test_new_verbs(fsfile, tmp_path, capsys):
     assert "├── " in out or "└── " in out
 
 
+def _tree(root):
+    """A local sample tree: nesting, an empty dir, a big file, an empty file."""
+    (root / "sub" / "deep").mkdir(parents=True)
+    (root / "empty").mkdir()
+    (root / "a.txt").write_bytes(b"alpha")
+    (root / "sub" / "big.bin").write_bytes(b"x" * (3 << 20))  # > _CHUNK: streams
+    (root / "sub" / "deep" / "zero").write_bytes(b"")
+    return root
+
+
+def test_put_get_recursive_roundtrip(fsfile, tmp_path, capsys):
+    src = _tree(tmp_path / "proj")
+    # dst does not exist -> dst IS the tree root
+    assert run("-f", fsfile, "put", "-r", str(src), "/code") == 0
+    assert "3 files, 3 containers" in capsys.readouterr().out
+    assert run("-f", fsfile, "ls", "/code/sub") == 0
+    assert "/code/sub/big.bin" in capsys.readouterr().out
+    out = tmp_path / "out"
+    assert run("-f", fsfile, "get", "-r", "/code", str(out)) == 0
+    assert (out / "a.txt").read_bytes() == b"alpha"
+    assert (out / "sub" / "big.bin").read_bytes() == b"x" * (3 << 20)
+    assert (out / "sub" / "deep" / "zero").read_bytes() == b""
+    assert (out / "empty").is_dir()  # empty containers survive the round trip
+
+
+def test_recursive_nests_into_existing_destination(fsfile, tmp_path, capsys):
+    src = _tree(tmp_path / "proj")
+    run("-f", fsfile, "mkdir", "/backup")
+    # dst exists -> src lands INSIDE it, cp -r style
+    assert run("-f", fsfile, "put", "-r", str(src), "/backup") == 0
+    assert run("-f", fsfile, "ls", "/backup") == 0
+    assert "/backup/proj" in capsys.readouterr().out
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    assert run("-f", fsfile, "get", "-r", "/backup/proj", str(dest)) == 0
+    assert (dest / "proj" / "a.txt").read_bytes() == b"alpha"
+
+
+def test_put_recursive_skips_what_it_cannot_carry(fsfile, tmp_path, capsys):
+    src = _tree(tmp_path / "proj")
+    (src / "link.txt").symlink_to("a.txt")  # file symlink: content is copied
+    (src / "loop").symlink_to(src)  # dir symlink: skipped, never descended
+    assert run("-f", fsfile, "put", "-r", str(src), "/code") == 0
+    out = capsys.readouterr()
+    assert "4 files, 3 containers, 1 skipped" in out.out
+    assert "symlinked directory, skipped" in out.err
+
+
+def test_recursive_rejects_the_wrong_shape(fsfile, tmp_path, capsys):
+    src = _tree(tmp_path / "proj")
+    run("-f", fsfile, "put", "-r", str(src), "/code")
+    assert run("-f", fsfile, "put", str(src), "/x") == 1  # dir without -r
+    assert "use -r" in capsys.readouterr().err
+    assert run("-f", fsfile, "get", "/code", str(tmp_path / "z")) == 1  # container
+    assert "use -r" in capsys.readouterr().err
+    assert run("-f", fsfile, "put", "-r", str(src / "a.txt"), "/x") == 1  # a file
+    assert run("-f", fsfile, "put", "-r", "-", "/x") == 1  # stdin has no tree
+    assert run("-f", fsfile, "put", "-r", str(src), "/x", "--append") == 1
+    assert run("-f", fsfile, "get", "-r", "/code/a.txt", str(tmp_path / "z")) == 1
+    assert run("-f", fsfile, "get", "-r", "/code", "-") == 1  # no tree to stdout
+    assert run("-f", fsfile, "get", "-r", "/nope", str(tmp_path / "z")) == 1
+    assert run("-f", fsfile, "put", "-r", str(src), "/code/a.txt") == 1  # dst entry
+
+
+def test_get_recursive_never_escapes_the_destination(fsfile, tmp_path, capsys):
+    """'..' is an ordinary name in the store; it must not become one locally."""
+    with Aloelite(fsfile) as fs:
+        with fs.mount("vol") as m:
+            m.mkdir("/evil")
+            m.mkdir("/evil/..")  # a container literally named '..'
+            m.create_entry("/evil/../child", b"escaped")  # ...with a child in it
+            m.create_entry("/evil/ok.txt", b"fine")
+    out = tmp_path / "safe"
+    assert run("-f", fsfile, "get", "-r", "/evil", str(out)) == 0
+    cap = capsys.readouterr()
+    assert "unsafe local name" in cap.err
+    assert "2 skipped" in cap.out  # the '..' container AND its subtree
+    assert [p.name for p in out.iterdir()] == ["ok.txt"]
+    assert not (tmp_path / "child").exists()
+
+
 def test_file_from_env(fsfile, monkeypatch, capsys):
     monkeypatch.setenv("ALOELITE_FILE", fsfile)
     assert run("volumes") == 0

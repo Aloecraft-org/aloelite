@@ -306,6 +306,8 @@ aloelite -f notebook.fs ls -l /
 aloelite -f notebook.fs put report.pdf /docs/report.pdf
 cat log | aloelite -f notebook.fs put - /logs/today --append
 aloelite -f notebook.fs get /docs/report.pdf -   # to stdout
+aloelite -f notebook.fs put -r ./project /code   # a whole tree in
+aloelite -f notebook.fs get -r /code ./restored  # a whole tree out
 aloelite -f notebook.fs mkdir -p /a/b/c
 aloelite -f notebook.fs mv /a.txt /docs/a.txt
 aloelite -f notebook.fs rm -r /old
@@ -331,6 +333,25 @@ Quick one-liners write stdin without a subcommand:
 echo "hello" | aloelite -f notebook.fs --in /file.txt       # create/overwrite
 echo "more"  | aloelite -f notebook.fs --append /file.txt   # append (creates)
 ```
+
+`put -r` and `get -r` move whole trees, one file at a time (bounded
+memory — nothing is staged). The destination follows `cp -r`: an
+existing container (`put`) or directory (`get`) receives the source
+*inside* it as `DST/<name>`; anything else becomes the tree's new root.
+
+```bash
+aloelite -f notebook.fs put -r ./project /code    # /code is the tree
+aloelite -f notebook.fs mkdir /backup
+aloelite -f notebook.fs put -r ./project /backup  # /backup/project
+aloelite -f notebook.fs get -r /code ./restored
+```
+
+Empty directories survive the round trip. Symlinked files are copied by
+content; symlinked directories are skipped (never descended, so a cycle
+cannot hang the transfer), as is anything that is not a regular file —
+each skip is named on stderr and counted in the one-line summary. These
+are CLI conveniences: the loop lives in the CLI, and every step is an
+ordinary single-node Mount API call.
 
 `aloelite fuse ...` and `aloelite web ...` delegate to `aloelite-fuse`
 and `aloelite-web`, so one command covers every interface (a helpful
