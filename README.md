@@ -294,6 +294,24 @@ Every operation you see in the Python examples below (`put`, `list`,
 same verbs; FUSE translates kernel calls into them. Learn the API once
 and every interface is familiar.
 
+`config/mount-api.yaml` is not documentation that can drift: the error
+set, enums, records, and operation list are asserted against the Python
+projection by `tests/test_spec_projection.py`, so adding an operation
+without declaring it fails the build.
+
+The contract a *second* implementation needs lives in `conformance/`:
+
+- `conformance/scenarios/` — operation sequences and the state they must
+  produce, as data. Every implementation runs the same scenarios from
+  its own runner instead of hand-translating another language's tests.
+- `conformance/vectors/` — fixed inputs to exact bytes, pinning content
+  addressing, chunking, and the ENC-2 key ladder. This is what lets a
+  port be written independently and still be known to interoperate.
+
+Python's runners are `tests/test_conformance_suite.py` and
+`tests/test_format_vectors.py`. See `conformance/README.md` for the
+scenario format.
+
 ## Command line
 
 Mount API usage from the command line

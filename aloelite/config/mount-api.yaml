@@ -10,8 +10,8 @@
 # added per-binding as wrappers.
 #
 # Type notation: a trailing "?" in a quoted type means optional/nullable
-# (e.g. "string?"). Lists are written [Type]. Operation annotations are the
-# behaviors the conformance suite asserts:
+# (e.g. "string?"). Lists are written [Type], maps as "{key:value}".
+# Operation annotations are the behaviors the conformance suite asserts:
 #   mutates  - writes to the database
 #   atomic   - the whole operation is one transaction (all-or-nothing)
 #   locks    - acquires/holds a lock row scoped to the mount
@@ -67,8 +67,9 @@ records:
     { id: VolumeId, name: "string?", root: "NodeId?", api_version: int, created_at: Timestamp }
   NodeInfo:
     { id: NodeId, type: NodeType, name: string, created_at: Timestamp,
-      modified_at: Timestamp, volume: "VolumeId?",
-      note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it)" }
+      modified_at: Timestamp, volume: "VolumeId?", size: "int?",
+      metadata: "{string:string}",
+      note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it). size is the materialized content total, null for a container. metadata is the NODE-6 shallow annotation map, empty when unset (never null)." }
   DirEntry:
     { node: NodeId, name: string, type: NodeType, visible: bool, edge: EdgeId,
       current_directory: Path,
@@ -83,8 +84,15 @@ records:
     { kind: string, id: string, note: "rows from health_check; empty = healthy" }
   PruneReport:
     { nodes_pruned: int, locks_pruned: int }
+  ContentPruneReport:
+    { versions_pruned: int, chunks_pruned: int,
+      note: "CV-7: superseded/aborted manifest versions dropped, and pool chunks reclaimed because no retained version referenced them" }
+  VerifyReport:
+    { entries_checked: int, chunks_checked: int, problems: [string],
+      note: "empty problems = clean; the returns type of maintenance.verify" }
   Descriptor:
-    { fd: FdId, node: NodeId, writable: bool }
+    { fd: FdId, node: NodeId, writable: bool,
+      note: "the streaming handle's cross-boundary projection; bindings wrap it in a native stream type (see the streaming section)" }
 
 # ----------------------------------------------------------------------------
 # Errors — closed set. Every operation's `raises` draws only from these.
@@ -104,6 +112,8 @@ errors:
   corrupt:              "an invariant the schema cannot enforce was found violated"
   unsupported:          "operation not available in this build/target"
   container_exists:     "container already exists while attempting to create a new one"
+  bad_key:              "the supplied PIN/token did not unlock the volume (AEAD tag mismatch, ENC-2)"
+  encryption_required:  "an encrypted volume was mounted without a PIN, or vice versa (ENC-3)"
 
 # ----------------------------------------------------------------------------
 # Operations
@@ -154,6 +164,10 @@ operations:
       params:  { mount: MountId }
       returns: MountInfo
       raises:  [not_found]
+    list_mounts:
+      params:  { fs: FsHandle, volume: "VolumeId?", include_unmounted: "bool = false" }
+      returns: [MountInfo]
+      note:    "durable mount ROWS, not live handles (ACC-1a); re-attach to one by id"
 
   # --- structural (path-first, all atomic + mutating) ----------------------
   structural:
@@ -173,6 +187,56 @@ operations:
       flags:   { mutates: true, atomic: true, locks: true, addr: path }
       raises:  [not_found, not_an_entry, lock_held, mount_invalid]
       note:    "atomic full-content replace (IO-2)"
+    append:
+      params:  { mount: MountId, path: Path, data: Bytes }
+      returns: int
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
+      note: >
+        atomically append and return the new size. One new version per call;
+        the prior version's full leading chunks are carried BY REFERENCE and
+        only the partial tail is rebuilt (CV-1/CV-4).
+    truncate:
+      params:  { mount: MountId, path: Path, size: int }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
+      note: >
+        set an entry's size. Shrink trims the boundary chunk; grow zero-fills.
+        No-op when the size is unchanged; a negative size is a caller error,
+        not a Mount API fault.
+    write_range:
+      params:  { mount: MountId, path: Path, offset: int, data: Bytes }
+      returns: int
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
+      note: >
+        in-place overwrite of [offset, offset+len), zero-filling any gap past
+        EOF; returns the new size. Chunk alignment is preserved (an overwrite
+        never shifts bytes), so untouched chunks either side carry by reference.
+    set_metadata:
+      params:  { mount: MountId, path: Path, metadata: "{string:string}" }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: >
+        replace the NODE-6 map wholesale on a container or an entry; empty
+        clears it. Does NOT bump modified_at — annotation is not content.
+    set_mtime:
+      params:  { mount: MountId, node: NodeId, ts_ms: Timestamp }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: id }
+      raises:  [mount_invalid]
+      note: >
+        stamp a node's modified_at directly (the FUSE utimens path). Applies
+        to a node that exists; an unknown id is tolerated as a no-op rather
+        than raising, so callers may stamp optimistically.
+    set_retention:
+      params:  { mount: MountId, path: Path, keep: "int?" }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_an_entry, mount_invalid]
+      note:    "CV-6 keep-last-N policy for superseded versions; null keeps all"
     move:
       params:  { mount: MountId, from: Path, to: Path }
       returns: void
@@ -308,6 +372,14 @@ operations:
       returns: PruneReport
       flags:   { mutates: true, atomic: true }
       note:    "lazy sweep: volatile nodes (PI-3) + invalid locks (ACC-10)"
+    prune_content:
+      params:  { fs: FsHandle, volume: "VolumeId?" }
+      returns: ContentPruneReport
+      flags:   { mutates: true, atomic: true }
+      note: >
+        CV-7 companion to prune: drop superseded/aborted manifest versions
+        beyond each entry's retention policy, then reclaim pool chunks no
+        retained version still references.
     verify:
       params:  { fs: FsHandle, mount: MountId, deep: "bool = false" }
       returns: VerifyReport
@@ -328,4 +400,7 @@ id_variants:
     hold a resolved id. Same returns, same raises minus not_found-by-path.
   applies_to:
     [stat, list, read_all, move, copy, rename, remove, remove_recursive,
-     pack, unpack, open_read, open_write, path_of]
+     pack, unpack, open_read, open_write]
+  # path_of is deliberately absent: it is already id-addressed (flags.addr: id),
+  # taking a NodeId and returning the Path. There is no path-first form of it to
+  # parallel, so a path_of_by_id would be the same function under two names.

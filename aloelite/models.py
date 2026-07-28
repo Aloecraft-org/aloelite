@@ -213,6 +213,7 @@ __all__ = [
     "MountInfo",
     "LockInfo",
     "Anomaly",
+    "VerifyReport",
     "PruneReport",
     "ContentPruneReport",
 ]

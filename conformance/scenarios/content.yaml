@@ -1,0 +1,164 @@
+# Content is chunked and versioned (CV-1..CV-5). These scenarios use a tiny
+# chunk_size so boundary behaviour is exercised with bytes you can read in the
+# fixture rather than megabytes you cannot.
+scenarios:
+  - scenario: write-all-replaces-the-whole-payload
+    requirements: [IO-2, CV-3]
+    description: >
+      A full write commits a new version atomically; the old bytes are gone
+      from the committed view, not appended to.
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "original"}}
+      - op: write_all
+        args: {path: /f.bin, data: {utf8: "replaced"}}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "replaced"}
+      - op: stat
+        args: {path: /f.bin}
+        expect: {size: 8}
+
+  - scenario: write-all-shrinking-leaves-no-tail
+    requirements: [IO-2, CV-3]
+    description: >
+      Replacing a long payload with a short one must not leave trailing chunks
+      of the previous version visible.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {repeat: {utf8: "x"}, count: 30}}
+      - op: write_all
+        args: {path: /f.bin, data: {utf8: "tiny"}}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "tiny"}
+      - op: stat
+        args: {path: /f.bin}
+        expect: {size: 4}
+
+  - scenario: append-extends-and-reports-the-new-size
+    requirements: [IO-2]
+    steps:
+      - op: create_entry
+        args: {path: /log.txt, data: {utf8: "one\n"}}
+      - op: append
+        args: {path: /log.txt, data: {utf8: "two\n"}}
+        expect: 8
+      - op: read_all
+        args: {path: /log.txt}
+        expect: {utf8: "one\ntwo\n"}
+
+  - scenario: append-across-a-chunk-boundary-rebuilds-the-partial-tail
+    requirements: [CV-1, CV-2]
+    description: >
+      With chunk_size 8, a 12-byte payload is one full chunk plus a partial.
+      Appending must carry the full chunk by reference and rebuild only the
+      tail — and the bytes must come back identical either way.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "0123456789ab"}}
+      - op: append
+        args: {path: /f.bin, data: {utf8: "cdef"}}
+        expect: 16
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "0123456789abcdef"}
+
+  - scenario: truncate-shortens-within-and-across-chunks
+    requirements: [IO-2, CV-1]
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "0123456789abcdefghij"}}
+      - op: truncate
+        args: {path: /f.bin, size: 10}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "0123456789"}
+      - op: truncate
+        args: {path: /f.bin, size: 3}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "012"}
+      - op: stat
+        args: {path: /f.bin}
+        expect: {size: 3}
+
+  - scenario: truncate-past-eof-zero-fills
+    requirements: [IO-2]
+    description: >
+      Growing by truncate is defined: the gap reads as zero bytes, not as
+      whatever the previous version had there.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "abc"}}
+      - op: truncate
+        args: {path: /f.bin, size: 6}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {hex: "616263000000"}
+
+  - scenario: write-range-overwrites-in-place-and-carries-untouched-chunks
+    requirements: [IO-2, CV-1]
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "0123456789abcdefghij"}}
+      - op: write_range
+        args: {path: /f.bin, offset: 9, data: {utf8: "XYZ"}}
+        expect: 20
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "012345678XYZcdefghij"}
+
+  - scenario: write-range-past-eof-extends-with-a-zero-gap
+    requirements: [IO-2]
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "ab"}}
+      - op: write_range
+        args: {path: /f.bin, offset: 5, data: {utf8: "z"}}
+        expect: 6
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {hex: "6162000000 7a"}
+
+  - scenario: payload-spanning-many-chunks-round-trips-exactly
+    requirements: [CV-1, CV-2, CV-4]
+    description: >
+      Reassembly order is pinned by the manifest, so a payload several chunks
+      long must come back byte-identical, including a non-aligned final chunk.
+    setup: {chunk_size: 4}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {repeat: {utf8: "abcde"}, count: 7}}
+      - op: stat
+        args: {path: /f.bin}
+        expect: {size: 35}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {repeat: {utf8: "abcde"}, count: 7}
+
+  - scenario: identical-payloads-in-two-entries-both-read-back
+    requirements: [CV-2]
+    description: >
+      Content addressing means two entries with equal bytes share pool rows.
+      Sharing must be invisible: writing one must not disturb the other.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /a.bin, data: {utf8: "shared payload"}}
+      - op: create_entry
+        args: {path: /b.bin, data: {utf8: "shared payload"}}
+      - op: write_all
+        args: {path: /a.bin, data: {utf8: "diverged"}}
+      - op: read_all
+        args: {path: /a.bin}
+        expect: {utf8: "diverged"}
+      - op: read_all
+        args: {path: /b.bin}
+        expect: {utf8: "shared payload"}

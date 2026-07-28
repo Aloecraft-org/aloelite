@@ -1,0 +1,144 @@
+# Placement is edge activity: move archives and re-creates, it never mutates an
+# edge (EDGE-2), and removal detaches rather than destroys (OP-5).
+scenarios:
+  - scenario: move-relocates-a-node-under-a-new-parent
+    requirements: [EDGE-2, OP-3, PI-1]
+    description: >
+      The moved node keeps its identity; only its placement changes. `to` is
+      the full destination path, including the name it will have there.
+    steps:
+      - op: create_container
+        args: {path: /src}
+      - op: create_container
+        args: {path: /dst}
+      - op: create_entry
+        args: {path: /src/a.txt, data: {utf8: "payload"}}
+        bind: a
+      - op: move
+        args: {from: /src/a.txt, to: /dst/a.txt}
+      - op: exists
+        args: {path: /src/a.txt}
+        expect: false
+      - op: stat
+        args: {path: /dst/a.txt}
+        expect: {id: {ref: a}, name: a.txt}
+      - op: read_all
+        args: {path: /dst/a.txt}
+        expect: {utf8: "payload"}
+
+  - scenario: move-can-rename-in-flight
+    requirements: [NODE-3, OP-3]
+    steps:
+      - op: create_container
+        args: {path: /dst}
+      - op: create_entry
+        args: {path: /a.txt, data: {utf8: "x"}}
+        bind: a
+      - op: move
+        args: {from: /a.txt, to: /dst/renamed.txt}
+      - op: stat
+        args: {path: /dst/renamed.txt}
+        expect: {id: {ref: a}, name: renamed.txt}
+
+  - scenario: rename-changes-the-name-not-the-placement
+    requirements: [NODE-3]
+    steps:
+      - op: create_container
+        args: {path: /dir}
+      - op: create_entry
+        args: {path: /dir/before.txt, data: {utf8: "x"}}
+        bind: a
+      - op: rename
+        args: {path: /dir/before.txt, name: after.txt}
+      - op: stat
+        args: {path: /dir/after.txt}
+        expect: {id: {ref: a}, name: after.txt}
+      - op: list
+        args: {path: /dir}
+        expect:
+          - {name: after.txt, type: entry, visible: true}
+
+  - scenario: moving-a-container-under-its-own-descendant-is-refused
+    requirements: [PI-5]
+    description: >
+      The uniqueness constraint of PI-1 cannot catch this one, so it is an
+      explicit ancestor check at reparent time.
+    steps:
+      - op: create_container
+        args: {path: /a}
+      - op: create_container
+        args: {path: /a/b}
+      - op: create_container
+        args: {path: /a/b/c}
+      - op: move
+        args: {from: /a, to: /a/b/c/a}
+        raises: would_cycle
+
+  - scenario: remove-detaches-a-leaf
+    requirements: [OP-5, PI-3]
+    description: >
+      Removing archives the active edge. The node becomes volatile — gone from
+      the tree, still addressable by id until a prune sweeps it.
+    steps:
+      - op: create_entry
+        args: {path: /gone.txt, data: {utf8: "bye"}}
+        bind: gone
+      - op: remove
+        args: {path: /gone.txt}
+      - op: exists
+        args: {path: /gone.txt}
+        expect: false
+      - op: list
+        args: {path: /}
+        expect: []
+      - op: stat_by_id
+        args: {node: {ref: gone}}
+        expect: {name: gone.txt, type: entry}
+
+  - scenario: remove-refuses-a-non-empty-container
+    requirements: [OP-5]
+    steps:
+      - op: create_container
+        args: {path: /full}
+      - op: create_entry
+        args: {path: /full/child.txt, data: {utf8: "x"}}
+      - op: remove
+        args: {path: /full}
+        raises: not_empty
+      - op: exists
+        args: {path: /full/child.txt}
+        expect: true
+
+  - scenario: remove-accepts-an-empty-container
+    requirements: [OP-5]
+    steps:
+      - op: create_container
+        args: {path: /empty}
+      - op: remove
+        args: {path: /empty}
+      - op: exists
+        args: {path: /empty}
+        expect: false
+
+  - scenario: remove-recursive-detaches-a-whole-subtree
+    requirements: [OP-5]
+    steps:
+      - op: create_container
+        args: {path: /tree}
+      - op: create_container
+        args: {path: /tree/mid}
+      - op: create_entry
+        args: {path: /tree/mid/leaf.txt, data: {utf8: "x"}}
+      - op: create_entry
+        args: {path: /tree/top.txt, data: {utf8: "y"}}
+      - op: remove_recursive
+        args: {path: /tree}
+      - op: exists
+        args: {path: /tree}
+        expect: false
+      - op: exists
+        args: {path: /tree/mid/leaf.txt}
+        expect: false
+      - op: list
+        args: {path: /}
+        expect: []

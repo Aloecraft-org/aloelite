@@ -1,0 +1,74 @@
+# NODE-5: sibling name collisions are legal. The greatest uuid7 wins path
+# resolution; the losers stay addressable by id. This is the rule most likely
+# to be implemented differently by accident, so it is pinned hard.
+scenarios:
+  - scenario: newest-sibling-of-a-name-wins-resolution
+    requirements: [NODE-1, NODE-5]
+    description: >
+      Two entries share a name in one container. Path resolution sees the one
+      with the greatest uuid7 — which, because uuid7 is time-ordered and never
+      backdated, is the one created last.
+    steps:
+      - op: create_entry
+        args: {path: /dup.txt, data: {utf8: "first"}}
+        bind: older
+      - op: create_entry
+        args: {path: /dup.txt, data: {utf8: "second"}}
+        bind: newer
+      - op: read_all
+        args: {path: /dup.txt}
+        expect: {utf8: "second"}
+      - op: stat
+        args: {path: /dup.txt}
+        expect: {id: {ref: newer}}
+
+  - scenario: hidden-siblings-are-listed-but-marked
+    requirements: [NODE-5]
+    description: >
+      list() reports every placed child, including the ones path resolution
+      cannot reach, distinguished by the visible flag. A caller enumerating a
+      container must be able to see that a shadowed node exists.
+    steps:
+      - op: create_entry
+        args: {path: /dup.txt, data: {utf8: "first"}}
+      - op: create_entry
+        args: {path: /dup.txt, data: {utf8: "second"}}
+      - op: list
+        args: {path: /}
+        expect:
+          - {name: dup.txt, type: entry, visible: true}
+          - {name: dup.txt, type: entry, visible: false}
+
+  - scenario: a-hidden-sibling-is-still-addressable-by-id
+    requirements: [NODE-5]
+    description: >
+      The shadowed node is not deleted and not corrupt — it is merely
+      unreachable by path. stat_by_id reaches it and reports its own identity.
+    steps:
+      - op: create_entry
+        args: {path: /dup.txt, data: {utf8: "first"}}
+        bind: older
+      - op: create_entry
+        args: {path: /dup.txt, data: {utf8: "second"}}
+      - op: stat_by_id
+        args: {node: {ref: older}}
+        expect: {type: entry, name: dup.txt, id: {ref: older}, size: 5}
+
+  - scenario: containers-and-entries-may-share-a-name
+    requirements: [NODE-2, NODE-5]
+    description: >
+      Collision resolution is by uuid7 alone; it does not consider type. A
+      container created after an entry of the same name shadows it, and the
+      path then resolves to a container.
+    steps:
+      - op: create_entry
+        args: {path: /thing, data: {utf8: "entry"}}
+      - op: create_container
+        args: {path: /thing}
+        bind: dir
+      - op: stat
+        args: {path: /thing}
+        expect: {type: container, id: {ref: dir}}
+      - op: read_all
+        args: {path: /thing}
+        raises: not_an_entry

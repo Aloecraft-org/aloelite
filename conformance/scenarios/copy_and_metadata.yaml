@@ -1,0 +1,151 @@
+# Copy mints new identity but preserves provenance (OP-4, NODE-4), and metadata
+# is a first-class annotation that survives it (NODE-6).
+scenarios:
+  - scenario: copy-mints-a-new-identity
+    requirements: [NODE-1, OP-4]
+    description: >
+      The copy is a distinct node with its own uuid7 — not a second placement
+      of the same node, which PI-1 would forbid anyway.
+    steps:
+      - op: create_entry
+        args: {path: /a.txt, data: {utf8: "content"}}
+        bind: src
+      - op: copy
+        args: {from: /a.txt, to: /b.txt}
+        bind: dst
+      - op: stat
+        args: {path: /b.txt}
+        expect: {id: {ref: dst}, name: b.txt, type: entry, size: 7}
+      - op: read_all
+        args: {path: /b.txt}
+        expect: {utf8: "content"}
+      - op: exists
+        args: {path: /a.txt}
+        expect: true
+
+  - scenario: copy-preserves-the-source-created-at
+    requirements: [NODE-4, OP-4]
+    description: >
+      created_at travels with the content, unlike the uuid7. This is the whole
+      reason NODE-4 keeps them as separate values.
+    steps:
+      - op: create_entry
+        args: {path: /a.txt, data: {utf8: "x"}}
+      - op: stat
+        args: {path: /a.txt}
+        bind: before
+      - op: copy
+        args: {from: /a.txt, to: /b.txt}
+      - op: stat
+        args: {path: /b.txt}
+        expect: {created_at: {ref: before.created_at}}
+
+  - scenario: copy-carries-a-whole-subtree
+    requirements: [OP-4]
+    description: >
+      Copying a container reproduces its active subtree, top-down, with fresh
+      ids throughout and content intact at the leaves.
+    steps:
+      - op: create_container
+        args: {path: /src}
+      - op: create_container
+        args: {path: /src/inner}
+      - op: create_entry
+        args: {path: /src/inner/leaf.txt, data: {utf8: "deep"}}
+      - op: create_entry
+        args: {path: /src/top.txt, data: {utf8: "shallow"}}
+      - op: copy
+        args: {from: /src, to: /dst}
+      - op: read_all
+        args: {path: /dst/inner/leaf.txt}
+        expect: {utf8: "deep"}
+      - op: read_all
+        args: {path: /dst/top.txt}
+        expect: {utf8: "shallow"}
+      - op: list
+        args: {path: /dst}
+        expect:
+          - {name: inner, type: container, visible: true}
+          - {name: top.txt, type: entry, visible: true}
+
+  - scenario: metadata-round-trips-and-replaces-wholesale
+    requirements: [NODE-6]
+    description: >
+      The map is shallow string-to-string, and set_metadata replaces it rather
+      than merging into it.
+    steps:
+      - op: create_entry
+        args: {path: /a.txt, data: {utf8: "x"}}
+      - op: stat
+        args: {path: /a.txt}
+        expect: {metadata: {}}
+      - op: set_metadata
+        args: {path: /a.txt, metadata: {author: mg, status: draft}}
+      - op: stat
+        args: {path: /a.txt}
+        expect: {metadata: {author: mg, status: draft}}
+      - op: set_metadata
+        args: {path: /a.txt, metadata: {status: final}}
+      - op: stat
+        args: {path: /a.txt}
+        expect: {metadata: {status: final}}
+
+  - scenario: metadata-applies-to-containers-too
+    requirements: [NODE-6]
+    steps:
+      - op: create_container
+        args: {path: /dir}
+      - op: set_metadata
+        args: {path: /dir, metadata: {kind: project}}
+      - op: stat
+        args: {path: /dir}
+        expect: {type: container, metadata: {kind: project}}
+
+  - scenario: metadata-survives-a-copy
+    requirements: [NODE-6, OP-4]
+    steps:
+      - op: create_entry
+        args: {path: /a.txt, data: {utf8: "x"}}
+      - op: set_metadata
+        args: {path: /a.txt, metadata: {author: mg}}
+      - op: copy
+        args: {from: /a.txt, to: /b.txt}
+      - op: stat
+        args: {path: /b.txt}
+        expect: {metadata: {author: mg}}
+
+  - scenario: setting-metadata-does-not-touch-modified-at
+    requirements: [NODE-6]
+    description: >
+      modified_at tracks content change. Annotating a node is not a content
+      change, so the timestamp must not move.
+    steps:
+      - op: create_entry
+        args: {path: /a.txt, data: {utf8: "x"}}
+      - op: stat
+        args: {path: /a.txt}
+        bind: before
+      - op: set_metadata
+        args: {path: /a.txt, metadata: {note: annotated}}
+      - op: stat
+        args: {path: /a.txt}
+        expect: {modified_at: {ref: before.modified_at}}
+
+  - scenario: moving-a-node-does-not-touch-modified-at
+    requirements: [NODE-6, OP-3]
+    description: >
+      Placement is edge activity, not node content. A move changes where the
+      node is, never when it was last written.
+    steps:
+      - op: create_container
+        args: {path: /dst}
+      - op: create_entry
+        args: {path: /a.txt, data: {utf8: "x"}}
+      - op: stat
+        args: {path: /a.txt}
+        bind: before
+      - op: move
+        args: {from: /a.txt, to: /dst/a.txt}
+      - op: stat
+        args: {path: /dst/a.txt}
+        expect: {modified_at: {ref: before.modified_at}}

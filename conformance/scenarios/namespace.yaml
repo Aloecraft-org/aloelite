@@ -1,0 +1,119 @@
+# Namespace basics: containers hold entries, paths resolve, listings report.
+scenarios:
+  - scenario: entry-round-trips-through-a-container
+    requirements: [NODE-2, IO-1, IO-2]
+    description: >
+      The simplest content path: a container holds an entry, and the bytes
+      written are the bytes read back.
+    steps:
+      - op: create_container
+        args: {path: /docs}
+      - op: create_entry
+        args: {path: /docs/a.txt, data: {utf8: "hello"}}
+        bind: a
+      - op: read_all
+        args: {path: /docs/a.txt}
+        expect: {utf8: "hello"}
+      - op: stat
+        args: {path: /docs/a.txt}
+        expect: {type: entry, name: a.txt, size: 5, id: {ref: a}}
+
+  - scenario: entry-created-without-data-is-empty-not-absent
+    requirements: [NODE-2, IO-1]
+    description: >
+      A dataless create is a real, zero-length entry — distinct from the path
+      not existing at all.
+    steps:
+      - op: create_entry
+        args: {path: /empty.bin}
+      - op: exists
+        args: {path: /empty.bin}
+        expect: true
+      - op: read_all
+        args: {path: /empty.bin}
+        expect: {utf8: ""}
+      - op: stat
+        args: {path: /empty.bin}
+        expect: {type: entry, size: 0}
+
+  - scenario: containers-nest-and-list-their-children
+    requirements: [EDGE-1, EDGE-4]
+    description: >
+      Listing reports the children placed directly in a container, with their
+      types, and does not report grandchildren.
+    steps:
+      - op: create_container
+        args: {path: /a}
+      - op: create_container
+        args: {path: /a/b}
+      - op: create_entry
+        args: {path: /a/one.txt, data: {utf8: "1"}}
+      - op: create_entry
+        args: {path: /a/b/deep.txt, data: {utf8: "2"}}
+      - op: list
+        args: {path: /a}
+        expect:
+          - {name: b, type: container, visible: true}
+          - {name: one.txt, type: entry, visible: true}
+      - op: list
+        args: {path: /a/b}
+        expect:
+          - {name: deep.txt, type: entry, visible: true}
+
+  - scenario: root-is-the-mount-point-itself
+    requirements: [ACC-2, VOL-2]
+    description: >
+      '' and '/' both denote the mount point; it is a container and it lists.
+    steps:
+      - op: create_entry
+        args: {path: /top.txt, data: {utf8: "x"}}
+      - op: stat
+        args: {path: /}
+        expect: {type: container}
+      - op: list
+        args: {path: /}
+        expect:
+          - {name: top.txt, type: entry, visible: true}
+
+  - scenario: a-missing-path-is-not-found
+    requirements: [NODE-5]
+    steps:
+      - op: exists
+        args: {path: /nope}
+        expect: false
+      - op: stat
+        args: {path: /nope}
+        raises: not_found
+      - op: read_all
+        args: {path: /a/b/c}
+        raises: not_found
+
+  - scenario: descending-through-an-entry-is-refused
+    requirements: [NODE-2]
+    description: >
+      A non-final path segment that resolves to an entry is not_a_container —
+      you cannot walk through a file.
+    steps:
+      - op: create_entry
+        args: {path: /file.txt, data: {utf8: "x"}}
+      - op: read_all
+        args: {path: /file.txt/inner}
+        raises: not_a_container
+
+  - scenario: reading-a-container-as-bytes-is-refused
+    requirements: [NODE-2, IO-1]
+    steps:
+      - op: create_container
+        args: {path: /dir}
+      - op: read_all
+        args: {path: /dir}
+        raises: not_an_entry
+
+  - scenario: listing-an-entry-is-refused
+    requirements: [NODE-2]
+    steps:
+      - op: create_entry
+        args: {path: /file.txt, data: {utf8: "x"}}
+      - op: list
+        args: {path: /file.txt}
+        raises: not_a_container
