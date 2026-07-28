@@ -53,11 +53,30 @@ steps:
 | `requirements` | requirement ids from `doc/REQUIREMENTS.md` this pins |
 | `description` | prose, for humans |
 | `setup` | optional volume construction (below) |
+| `harness` | named starting state; default `default` |
 | `steps` | ordered list of step objects |
 
-`setup` accepts `chunk_size` (bytes, default 1048576) and `encrypted`
-(bool, default false). Small chunk sizes let a scenario cross chunk boundaries
-without a megabyte of fixture.
+`setup` accepts `chunk_size` (bytes, default 1048576). Small chunk sizes let a
+scenario cross chunk boundaries without a megabyte of fixture.
+
+## Harnesses
+
+Some properties need a starting state no operation sequence can build — a
+second volume, a second mount, a connection deliberately holding the wrong
+cipher. `harness` names one; the runner constructs it and exposes one or more
+**named mounts** that steps select with `via`.
+
+| harness | provides |
+|---|---|
+| `default` | one plain volume, one mount named `default` |
+| `two_mounts_one_volume` | one plain volume, two connections, mounts `first` and `second` |
+| `attach_without_key` | an encrypted volume with content, then a connection bound to its mount with no PIN |
+| `keyed_cipher_plain_volume` | a connection holding a volume key, pointed at a mount on a plain volume |
+| `two_entries_same_bytes_convergent` | encrypted volume, two entries with identical bytes |
+| `two_entries_same_bytes_random` | the same under `enc_mode: random` |
+
+A runner that has not implemented a harness must **skip** the scenario. Silently
+passing it reports conformance nobody checked.
 
 ## Step fields
 
@@ -65,9 +84,35 @@ without a megabyte of fixture.
 |---|---|
 | `op` | operation name, exactly as declared in `aloelite/config/mount-api.yaml` |
 | `args` | named arguments, using the **spec's** parameter names |
+| `via` | which named mount to act through; default `default`, else `first` |
 | `bind` | capture this step's return value under a name |
 | `expect` | assertion about the return value |
 | `raises` | expected error code from the closed set; mutually exclusive with `expect` |
+
+## Inspections
+
+A few properties are deliberately invisible through the Mount API and can only
+be asserted by looking at storage. Dedup is the case that matters: `content.yaml`
+requires that sharing be *unobservable*, which is exactly why convergent and
+random `enc_mode` cannot be told apart through any operation.
+
+Those steps use an **inspection** in place of an `op`. Inspections are not Mount
+API operations and every runner must implement them by reaching past the API:
+
+| inspection | asserts |
+|---|---|
+| `assert_pool_rows` | `count` rows in the chunk pool |
+
+## A YAML trap worth knowing
+
+Never use a bare `on`, `off`, `yes`, `no`, `true`, or `false` as a key. YAML 1.1
+(PyYAML) reads them as booleans; YAML 1.2 (Rust `serde_yaml`, Go `yaml.v3`)
+reads them as strings. The same fixture would then mean two different things in
+two implementations — the exact failure this directory exists to prevent. This
+bit us during authoring: a step keyed `on: second` parsed as the key `True`,
+both steps ran on the same mount, and a lock-contention scenario passed by
+never contending. The runner's `test_no_scenario_key_is_a_yaml_boolean` guards
+the whole class; keep the equivalent in every runner.
 
 Argument names come from `mount-api.yaml`, not from any implementation. The
 spec says `move` takes `from`/`to`; a binding whose function signature says

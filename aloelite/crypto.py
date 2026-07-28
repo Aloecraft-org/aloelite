@@ -81,6 +81,12 @@ class Cipher(Protocol):
     # stores distinctly (no dedup, no equality leakage).
     dedup: bool
 
+    # Whether this cipher actually protects chunks. The mount precondition
+    # compares it against the volume's enc_mode so an unkeyed connection can
+    # never read an encrypted volume as garbage, nor write plaintext into one
+    # (ENC-3). Every port needs this predicate, hence the protocol slot.
+    encrypts: bool
+
     def encrypt_chunk(self, plaintext: bytes) -> tuple[bytes, bytes, bytes]:
         """Return (ciphertext, nonce, tag). Length-preserving ciphertext so the
         stored `length` (plaintext length) still governs offset math."""
@@ -94,6 +100,7 @@ class IdentityCipher:
     blobs (the columns are NOT NULL but an empty BLOB satisfies that)."""
 
     dedup = True
+    encrypts = False
 
     def encrypt_chunk(self, plaintext: bytes) -> tuple[bytes, bytes, bytes]:
         return plaintext, b"", b""
@@ -106,6 +113,8 @@ class ChunkCipher:
     """ChaCha20-Poly1305 over a domain-separated per-volume subkey, with a
     convergent nonce (enc_mode='convergent') or a random nonce
     (enc_mode='random', dedup sacrificed for zero equality leakage)."""
+
+    encrypts = True
 
     def __init__(self, volume_key: bytes, volume_id: str, *, convergent: bool = True):
         self._k = _hkdf(volume_key, info=b"aloelite-chunk:" + volume_id.encode())

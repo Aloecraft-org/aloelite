@@ -1,0 +1,82 @@
+# ENC-3: the cipher lives on the connection, volumes live in the file, so the
+# two can disagree. Every disagreement must be refused rather than silently
+# producing garbage (read) or plaintext-in-an-encrypted-volume (write).
+#
+# These scenarios need setup a plain operation sequence cannot express — a
+# second volume, a re-attach without a key — so they carry a `harness` key
+# naming the fixture the runner must build. A runner that does not implement a
+# named harness must SKIP the scenario, never silently pass it.
+scenarios:
+  - scenario: unkeyed-connection-cannot-read-an-encrypted-volume
+    requirements: [ENC-3, ACC-1a]
+    harness: attach_without_key
+    description: >
+      Binding to an existing mount does not install a cipher. Reading through
+      it must refuse, not hand back the stored ciphertext as though it were
+      content.
+    steps:
+      - op: read_all
+        args: {path: /secret.txt}
+        raises: encryption_required
+
+  - scenario: unkeyed-connection-cannot-write-to-an-encrypted-volume
+    requirements: [ENC-3]
+    harness: attach_without_key
+    description: >
+      The dangerous direction. An unkeyed write would store plaintext inside a
+      volume whose whole purpose is that it does not contain plaintext.
+    steps:
+      - op: write_all
+        args: {path: /secret.txt, data: {utf8: "would be plaintext on disk"}}
+        raises: encryption_required
+      - op: create_entry
+        args: {path: /new.txt, data: {utf8: "also plaintext"}}
+        raises: encryption_required
+
+  - scenario: a-keyed-connection-cannot-operate-on-a-plain-volume
+    requirements: [ENC-3]
+    harness: keyed_cipher_plain_volume
+    description: >
+      The mirror case, refused for symmetry: a connection holding a volume key
+      must not encrypt into a volume declared 'none', which would leave content
+      no unkeyed reader could ever open.
+    steps:
+      - op: read_all
+        args: {path: /plain.txt}
+        raises: encryption_required
+
+  - scenario: convergent-mode-addresses-identical-plaintext-identically
+    requirements: [CV-2, ENC-2]
+    harness: two_entries_same_bytes_convergent
+    description: >
+      The dedup property, stated as behaviour rather than as an implementation
+      detail: equal plaintext in one volume occupies ONE pool row. A port that
+      derives N_c differently still passes every content scenario and fails
+      here.
+    steps:
+      - op: read_all
+        args: {path: /a.bin}
+        expect: {utf8: "identical payload"}
+      - op: read_all
+        args: {path: /b.bin}
+        expect: {utf8: "identical payload"}
+      - op: assert_pool_rows
+        args: {count: 1}
+
+  - scenario: random-mode-addresses-identical-plaintext-distinctly
+    requirements: [ENC-3, CV-2]
+    harness: two_entries_same_bytes_random
+    description: >
+      enc_mode='random' trades dedup for zero equality leakage. Identical
+      plaintext must land at TWO addresses — if a port ignores enc_mode and
+      always derives a convergent nonce, this is the scenario that catches it,
+      and the leak it prevents is invisible from every other test.
+    steps:
+      - op: read_all
+        args: {path: /a.bin}
+        expect: {utf8: "identical payload"}
+      - op: read_all
+        args: {path: /b.bin}
+        expect: {utf8: "identical payload"}
+      - op: assert_pool_rows
+        args: {count: 2}

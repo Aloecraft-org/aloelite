@@ -72,12 +72,19 @@ def _now_ms() -> int:
 # Mount precondition — every operation starts here
 # ---------------------------------------------------------------------------
 class _Mount:
-    __slots__ = ("id", "mount_point", "volume")
+    __slots__ = ("id", "mount_point", "volume", "enc_mode")
 
-    def __init__(self, id: MountId, mount_point: NodeId, volume: VolumeId) -> None:
+    def __init__(
+        self,
+        id: MountId,
+        mount_point: NodeId,
+        volume: VolumeId,
+        enc_mode: str = "none",
+    ) -> None:
         self.id = id
         self.mount_point = mount_point
         self.volume = volume
+        self.enc_mode = enc_mode
 
 
 def _require_mount(db: Db, mount: MountId) -> _Mount:
@@ -86,11 +93,33 @@ def _require_mount(db: Db, mount: MountId) -> _Mount:
     A mount is untrusted-until-validated (or revalidated-per-access): it may
     have been unmounted or expired (possibly from another connection), so this
     runs as the first step of every operation. (ACC-1/4/5.)
+
+    It is also where the cipher is checked against the volume (ENC-3). The
+    cipher lives on the CONNECTION while volumes live in the FILE, so the two
+    can disagree: attaching to a mount installs no cipher, and mounting a
+    second volume replaces the one already installed. Either way the mismatch
+    used to pass silently — reads returned ciphertext as plaintext, and writes
+    put plaintext into an encrypted volume. Refusing here makes that a closed
+    error instead of a quiet loss of confidentiality, in both directions.
     """
     row = db.one("resolution.get_valid_mount", {"mount": mount})
     if row is None:
         raise MountInvalid(mount=mount)
-    return _Mount(mount, NodeId(row["mount_point"]), VolumeId(row["volume_id"]))
+    enc_mode = row["enc_mode"]
+    encrypted = enc_mode != "none"
+    if encrypted != db.cipher.encrypts:
+        raise EncryptionRequired(
+            f"volume is {enc_mode!r} but this connection has "
+            f"{'no' if encrypted else 'an'} encryption key installed; "
+            "mount the volume (with a PIN if it is encrypted) before operating "
+            "on it",
+            mount=mount,
+            volume=row["volume_id"],
+            enc_mode=enc_mode,
+        )
+    return _Mount(
+        mount, NodeId(row["mount_point"]), VolumeId(row["volume_id"]), enc_mode
+    )
 
 
 def _meta_to_json(metadata: dict[str, str] | None) -> str | None:

@@ -35,6 +35,7 @@ import yaml
 from aloelite import errors
 from aloelite import operations as ops
 from aloelite.db import Db
+from aloelite.types import WriteMode
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCENARIOS = _ROOT / "conformance" / "scenarios"
@@ -150,9 +151,121 @@ def _match(expected: Any, actual: Any, binds: dict[str, Any], where: str) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Harnesses — named starting states a plain operation sequence cannot express
+# (a second volume, a second mount, a connection deliberately holding the wrong
+# cipher). A runner that has not implemented a harness must SKIP the scenario;
+# silently passing it would report conformance nobody checked.
+# ---------------------------------------------------------------------------
+def _open(path: Path) -> Db:
+    return Db.open(
+        str(path),
+        _ROOT / "aloelite/config/sql-templates.yaml",
+        schema_path=_ROOT / "aloelite/sql/schema.sql",
+    )
+
+
+def _h_default(path: Path, setup: dict) -> tuple[Db, dict[str, str], list[Db]]:
+    db = _open(path)
+    volume = ops.create_volume(db, "conformance", setup.get("chunk_size", 1048576))
+    return db, {"default": ops.mount(db, volume.id)}, []
+
+
+def _h_attach_without_key(
+    path: Path, setup: dict
+) -> tuple[Db, dict[str, str], list[Db]]:
+    """An encrypted volume holding content, then a FRESH connection bound to
+    the same durable mount without ever supplying a PIN — no cipher installed."""
+    keyed = _open(path)
+    volume = ops.create_volume(keyed, "vault", setup.get("chunk_size", 1048576), b"pw")
+    mid = ops.mount(keyed, volume.id, pin=b"pw")
+    ops.create_entry(keyed, mid, "/secret.txt", b"TOP SECRET")
+    keyed.close()
+    return _open(path), {"default": mid}, []
+
+
+def _h_keyed_cipher_plain_volume(
+    path: Path, setup: dict
+) -> tuple[Db, dict[str, str], list[Db]]:
+    """The mirror: a connection holding a volume key, pointed at a mount on an
+    UNENCRYPTED volume. Mounting the encrypted volume second is what leaves the
+    plain volume's mount handle stale."""
+    db = _open(path)
+    plain = ops.create_volume(db, "open", setup.get("chunk_size", 1048576))
+    plain_mount = ops.mount(db, plain.id)
+    ops.create_entry(db, plain_mount, "/plain.txt", b"readable by anyone")
+    vault = ops.create_volume(db, "vault", setup.get("chunk_size", 1048576), b"pw")
+    ops.mount(db, vault.id, pin=b"pw")  # installs a ChunkCipher connection-wide
+    return db, {"default": plain_mount}, []
+
+
+def _same_bytes(enc_mode: str):
+    def build(path: Path, setup: dict) -> tuple[Db, dict[str, str], list[Db]]:
+        db = _open(path)
+        volume = ops.create_volume(
+            db, "vault", setup.get("chunk_size", 1048576), b"pw", enc_mode=enc_mode
+        )
+        mid = ops.mount(db, volume.id, pin=b"pw")
+        ops.create_entry(db, mid, "/a.bin", b"identical payload")
+        ops.create_entry(db, mid, "/b.bin", b"identical payload")
+        return db, {"default": mid}, []
+
+    return build
+
+
+def _h_two_mounts_one_volume(
+    path: Path, setup: dict
+) -> tuple[Db, dict[str, str], list[Db]]:
+    """Two mounts on one volume. They are separate CONNECTIONS because a lock
+    is mount-scoped (ACC-6) and contention is only meaningful between them."""
+    first = _open(path)
+    volume = ops.create_volume(first, "conformance", setup.get("chunk_size", 1048576))
+    second = _open(path)
+    return (
+        first,
+        {"first": ops.mount(first, volume.id), "second": ops.mount(second, volume.id)},
+        [second],
+    )
+
+
+_HARNESSES = {
+    "default": _h_default,
+    "attach_without_key": _h_attach_without_key,
+    "keyed_cipher_plain_volume": _h_keyed_cipher_plain_volume,
+    "two_entries_same_bytes_convergent": _same_bytes("convergent"),
+    "two_entries_same_bytes_random": _same_bytes("random"),
+    "two_mounts_one_volume": _h_two_mounts_one_volume,
+}
+
+# Storage inspections — NOT Mount API operations. Dedup is deliberately
+# invisible through the API (see content.yaml), so the one property that
+# distinguishes convergent from random mode cannot be asserted any other way.
+# Declared here and in conformance/README.md so a runner knows it must reach
+# past the API to answer them, rather than assuming an operation it lacks.
+_INSPECTIONS = {"assert_pool_rows"}
+
+# Scenario args are spec-level strings; a few name closed enums.
+_ENUMS = {"mode": WriteMode}
+
+
+# ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
-def _call(op: str, args: dict[str, Any], db: Db, mount: str) -> Any:
+def _inspect(op: str, args: dict[str, Any], dbs: list[Db]) -> None:
+    if op == "assert_pool_rows":
+        got = dbs[0].connection.execute("SELECT count(*) FROM content_chunk").fetchone()
+        assert got[0] == args["count"], (
+            f"expected {args['count']} pool row(s), found {got[0]}"
+        )
+        return
+    raise AssertionError(f"unimplemented inspection {op!r}")
+
+
+def _call(op: str, args: dict[str, Any], db: Db, mount: str, binds: dict) -> Any:
+    # Streaming ops act on a bound descriptor, not on (db, mount) — the same
+    # projection mount-api.yaml's `streaming` note describes for every binding.
+    if "fd" in args:
+        target = args.pop("fd")
+        return getattr(target, op)(**args)
     fn = getattr(ops, op, None)
     assert fn is not None, f"no operations.{op}"
     accepted = set(inspect.signature(fn).parameters)
@@ -163,32 +276,43 @@ def _call(op: str, args: dict[str, Any], db: Db, mount: str) -> Any:
 
 def _run(scenario: dict[str, Any], tmp_path: Path) -> None:
     setup = scenario.get("setup") or {}
-    db = Db.open(
-        str(tmp_path / "conformance.fs"),
-        _ROOT / "aloelite/config/sql-templates.yaml",
-        schema_path=_ROOT / "aloelite/sql/schema.sql",
-    )
+    harness = scenario.get("harness", "default")
+    builder = _HARNESSES.get(harness)
+    if builder is None:
+        pytest.skip(f"harness {harness!r} not implemented by this runner")
+    db, mounts, extra = builder(tmp_path / "conformance.fs", setup)
+    connections = dict.fromkeys(mounts, db)
+    for name, other in zip(list(mounts)[1:], extra):
+        connections[name] = other
     try:
-        volume = ops.create_volume(db, "conformance", setup.get("chunk_size", 1048576))
-        mount = ops.mount(db, volume.id)
         binds: dict[str, Any] = {}
         for i, step in enumerate(scenario["steps"]):
-            where = f"step {i} ({step['op']})"
+            op = step["op"]
+            where = f"step {i} ({op})"
             args = _resolve_args(step.get("args") or {}, binds)
+            for key, enum in _ENUMS.items():
+                if key in args and isinstance(args[key], str):
+                    args[key] = enum(args[key])
+            if op in _INSPECTIONS:
+                _inspect(op, args, [db, *extra])
+                continue
+            which = step.get("via", "default" if "default" in mounts else "first")
+            conn, mount = connections[which], mounts[which]
             if "raises" in step:
                 with pytest.raises(errors.FsError) as caught:
-                    _call(step["op"], args, db, mount)
+                    _call(op, args, conn, mount, binds)
                 assert caught.value.code == step["raises"], (
                     f"{where}: expected {step['raises']}, raised {caught.value.code}"
                 )
                 continue
-            result = _call(step["op"], args, db, mount)
+            result = _call(op, args, conn, mount, binds)
             if "bind" in step:
                 binds[step["bind"]] = result
             if "expect" in step:
                 _match(step["expect"], result, binds, where)
     finally:
-        db.close()
+        for handle in [db, *extra]:
+            handle.close()
 
 
 @pytest.mark.parametrize("name,scenario", _ALL, ids=[n for n, _ in _ALL])
@@ -210,12 +334,45 @@ def _declared_ops() -> set[str]:
 
 
 def test_scenarios_only_use_declared_operations():
-    declared = _declared_ops()
+    declared = _declared_ops() | _INSPECTIONS
     for name, scenario in _ALL:
         for step in scenario["steps"]:
             assert step["op"] in declared, (
                 f"{name}: {step['op']} is not in mount-api.yaml"
             )
+
+
+def test_scenarios_only_name_implemented_harnesses():
+    """A typo in a harness name would otherwise skip the scenario forever,
+    which reads exactly like passing."""
+    for name, scenario in _ALL:
+        harness = scenario.get("harness", "default")
+        assert harness in _HARNESSES, f"{name}: unknown harness {harness!r}"
+
+
+def test_no_scenario_key_is_a_yaml_boolean():
+    """YAML 1.1 reads bare on/off/yes/no as booleans, YAML 1.2 reads them as
+    strings. A key like `on:` therefore parses DIFFERENTLY in Python (1.1) and
+    in Rust or Go (1.2) — the fixtures would silently mean two things. Caught
+    this the hard way: `on: second` became the key True, both steps ran on the
+    same mount, and a lock-contention scenario passed by not contending.
+    """
+
+    def walk(node, where):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                assert isinstance(key, str), (
+                    f"{where}: key {key!r} parsed as {type(key).__name__} — "
+                    "quote it or rename it; bare on/off/yes/no/true/false are "
+                    "not portable across YAML versions"
+                )
+                walk(value, f"{where}.{key}")
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                walk(item, f"{where}[{i}]")
+
+    for path in sorted(_SCENARIOS.glob("*.yaml")):
+        walk(yaml.safe_load(path.read_text()), path.name)
 
 
 def test_scenarios_only_expect_declared_errors():

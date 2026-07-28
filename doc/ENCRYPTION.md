@@ -11,23 +11,29 @@
 [Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | **Encryption Spec (This Document)**
 </div>
 
-> **WARNING — spec drift (code is authoritative until this is revised):**
-> two statements below do not match the reference implementation
-> (`aloelite/crypto.py`), and ports MUST follow the code, not this text:
+> **OPEN DECISION — `mount_secret` seals K_u or K_v?**
 >
-> 1. **Sections 3–4 say `mount_secret` seals K_u.** The implementation
->    seals **K_v** (`seal_mount_secret(token, N_m, volume_key)`), so
->    per-operation recovery is one unwrap (`open_mount_secret -> K_v`),
->    not the two-step `mount_secret -> K_u -> S_vk -> K_v` shown in §4.
-> 2. **Section 5 says `N_c = SHA256(len || plaintext)[:16]` (16 bytes).**
->    The implementation uses a **12-byte** nonce (ChaCha20-Poly1305 IETF)
->    with a domain-separation prefix:
->    `N_c = SHA256("aloelite-nc" || len_8be || plaintext)[:12]`.
->    (The schema note "16 bytes" for `content_chunk.N_c` is likewise 12
->    in practice.)
+> This is the one place where the document and the implementation still
+> disagree, and it is a design question rather than a typo:
 >
-> Volumes on disk follow the code's construction. A port implementing
-> this document as written will fail to open real volumes.
+> - **§3, §4, and the Lexicon (`U(T, N_m, S_vk) = S_v`) say K_u.**
+>   Unlock consumes `S_vk`, so a PIN rotation — which re-wraps `S_vk`
+>   under a new K_u — would invalidate every live mount.
+> - **The implementation seals K_v.** Recovery is one unwrap
+>   (`open_mount_secret -> K_v`), reads nothing from disk, and a PIN
+>   rotation leaves live mounts working.
+>
+> Until this is settled, **ports MUST follow the code (K_v)**; volumes on
+> disk were written that way. The two positions cannot both hold, because
+> "mounts survive a PIN change" and "unlock reads `S_vk`" are the same
+> question asked from two directions. Note that revoking a token does not
+> require choosing K_u: `session_kek = HKDF(T, salt=N_m)` and `N_m` is a
+> mutable column on the mount row, so rotating it invalidates every token
+> for that mount alone, without touching K_v, S_vk, or the PIN.
+>
+> Everything else in this document has been corrected against
+> `aloelite/crypto.py`, and `conformance/vectors/format-v1.json` pins the
+> corrected constructions with exact bytes.
 >
 > **Update:** PIN rotation (previously reserved) is implemented as the
 > `change_pin` operation: unwrap K_v with the old K_u, re-wrap under the
@@ -64,13 +70,37 @@ Chunk:
 - xC
 - N_c
 
+Mount:
+- N_m — stored on the mount row, not memory-only. Readable by anyone with the
+  file (an SQLite browser will show it), so it is a salt rather than a secret.
+  Being persisted and mutable is what makes it the revocation lever: rotate it
+  and every token issued for that mount stops working.
+
 **Runtime Data**
 
-User
-- T
+Held by whoever the deployment chooses — these are independently placeable, not
+a fixed split (see §3):
+- T — the mount token
+- mount_secret + N_session — the seal T opens
 
-Client
-- N_m
+## Lexicon ↔ implementation
+
+The whiteboard notation writes `S_*` for *secret*; the code writes `K_*` for
+*key*. They are the same objects.
+
+| Lexicon | `crypto.py` | Is |
+|---|---|---|
+| `K` (in `P(K, H_v, S_v)`) | `K_u` | PIN-derived unlock key, `Argon2id(PIN, salt=H_v)` |
+| `S_v` | `K_v` | volume content key; immutable for the volume's life |
+| `S_vk` | `wrapped_key` + `wrap_nonce` | `S_v` sealed under `K` |
+| `S_c` | `K_chunk` | per-volume chunk subkey |
+| `xC` | `content_chunk.data` | chunk ciphertext |
+| `N_c` | `content_chunk.N_c` | convergent chunk nonce (12 bytes) |
+| `T` | `token` | mount token |
+| `N_m` | `mount.N_m` | mount nonce (16 bytes) |
+
+The Lexicon's `U(T, N_m, S_vk) = S_v` takes `S_vk` as an input, which is the
+whiteboard stating the K_u position — see the open decision at the top.
 
 ## At-Rest Format
 
@@ -106,14 +136,30 @@ S_vk = ChaCha20Poly1305.encrypt(
 ### 3. Session Mount (Per Mount, At Open)
 ```
 T = random(16)  # token, user-held, runtime-only
-N_m = random(16)  # mount nonce, host-held, stored on mount row, dies with mount
-session_kek = HKDF(T, "session" || N_m)  # HKDF not Argon2 (T is already random)
+N_m = random(16)  # mount nonce, STORED on the mount row; not secret, but rotatable
+session_kek = HKDF(T, salt=N_m, info="aloelite-session")  # HKDF not Argon2 (T is already random)
 mount_secret = ChaCha20Poly1305.encrypt(
   key=session_kek,
-  nonce=N_session (random, stored with mount_secret),
-  plaintext=K_u
-)  # memory-only, not persisted; losing it requires a fresh mount
+  nonce=N_session (random, held with mount_secret),
+  plaintext=K_u        # SEE THE OPEN DECISION AT THE TOP: the code seals K_v
+)  # memory-only by default; a host MAY persist it, at the cost noted below
 ```
+
+`N_m` is a salt, not a second key input — an implementation that concatenates
+it into the HKDF input instead derives a different `session_kek` and cannot
+open a `mount_secret` sealed by another implementation.
+
+The three pieces are deliberately **independently placeable**. The simplest
+deployment holds all three in one process; split custody gives a client `T`
+while a host keeps `mount_secret` + `N_session`, and either side can read `N_m`
+from the file. Nothing in the format couples them.
+
+Because `mount_secret` is memory-only by default, a token already dies with the
+process that minted it. A host that chooses to persist `mount_secret` gives that
+property up, and should fold a per-process nonce into the derivation
+(`session_kek = HKDF(T, salt=N_m || N_p, ...)`) to get it back. `N_p` is
+runtime policy and **must not** become a stored field — the at-rest bytes are
+identical whether or not a deployment uses one.
 
 ### 4. Per-Operation Key Recovery
 ```
@@ -124,11 +170,22 @@ K_v = ChaCha20Poly1305.decrypt(K_u, S_vk)
 
 ### 5. Chunk Encryption
 ```
-K_chunk = HKDF(K_v, "aloelite-chunk" || volume_id)
-N_c = SHA256(len || plaintext)[:16]  # convergent: same plaintext -> same N_c
+K_chunk = HKDF(K_v, info="aloelite-chunk:" || volume_id)   # note the trailing colon
+N_c = SHA256("aloelite-nc" || len_8be || plaintext)[:12]   # 12 bytes: ChaCha20-Poly1305 IETF
 (xC, tag) = ChaCha20Poly1305.encrypt(K_chunk, N_c, plaintext_chunk)
 # Store: chunk_hash, N_c, enc_tag, data (xC || enc_tag or separate columns)
 ```
+
+`len_8be` is the plaintext length as 8 bytes big-endian. Both the `"aloelite-nc"`
+prefix and the colon in `"aloelite-chunk:"` are load-bearing: drop either and a
+port derives different nonces or a different subkey, produces different chunk
+addresses, and silently stops sharing pool rows with every other implementation.
+
+**Three string literals are frozen into the derived bytes** — `"aloelite-nc"`,
+`"aloelite-chunk:"`, and `"aloelite-session"`. The *concepts* may be renamed
+freely in prose and in code; changing these literals is a format break that
+invalidates every existing volume. (Note that "session" is baked in this way
+even though the term is otherwise being retired from the vocabulary.)
 
 **Convergent salt choice:** identical plaintext encrypts identically, so dedup survives. Trade-off: an attacker with a dump can see repeated blocks and confirm known files. Reserve `enc_mode` for a future `random` nonce option if a workload needs zero equality leakage.
 

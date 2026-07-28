@@ -1,0 +1,71 @@
+# ACC-6..9. The point of pinning these now is ACC-8: the lock row carries
+# read_count and write_count, and they are RECORDED BUT NOT ENFORCED. Read on
+# its own, that schema looks like an invitation to implement shared reads. It
+# is not — it forward-provisions a future policy without committing to one.
+# These scenarios pin the policy that actually holds today, so a port cannot
+# mistake the reservation for a specification.
+scenarios:
+  - scenario: a-write-descriptor-excludes-another-mounts-writer
+    requirements: [ACC-6, ACC-7]
+    harness: two_mounts_one_volume
+    description: >
+      Locks are exclusive in this iteration. A second mount opening the same
+      entry for writing is refused while the first holds it.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: second
+        raises: lock_held
+
+  - scenario: an-exclusive-write-lock-also-excludes-atomic-writes
+    requirements: [ACC-6, ACC-7, IO-2]
+    harness: two_mounts_one_volume
+    description: >
+      Exclusion is a property of the entry, not of the API shape used to reach
+      it: a held descriptor blocks the whole-content operations too, or the
+      lock would be trivially bypassable.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: write_all
+        args: {path: /contended.txt, data: {utf8: "bypass"}}
+        via: second
+        raises: lock_held
+      - op: truncate
+        args: {path: /contended.txt, size: 0}
+        via: second
+        raises: lock_held
+
+  - scenario: releasing-a-write-lock-readmits-the-other-mount
+    requirements: [ACC-7, ACC-9]
+    harness: two_mounts_one_volume
+    description: >
+      Exclusion lasts exactly as long as the lock. Closing the descriptor is
+      what releases it — not the end of the operation that took it.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: close
+        args: {fd: {ref: writer}}
+        via: first
+      - op: write_all
+        args: {path: /contended.txt, data: {utf8: "now permitted"}}
+        via: second
+      - op: read_all
+        args: {path: /contended.txt}
+        via: second
+        expect: {utf8: "now permitted"}

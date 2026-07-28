@@ -222,12 +222,19 @@ resolution:
 
   get_valid_mount:
     sql: |
-      SELECT mount_id, volume_id, mount_point, state, expires_at
-      FROM valid_mount WHERE mount_id = :mount
+      SELECT vm.mount_id, vm.volume_id, vm.mount_point, vm.state, vm.expires_at,
+             v.enc_mode
+      FROM valid_mount vm JOIN volume v ON v.volume_id = vm.volume_id
+      WHERE vm.mount_id = :mount
     params: { mount: "MountId" }
-    returns: "row or empty"
+    returns: "row (incl. the volume's enc_mode) or empty"
     consumed_by: ["every mount-scoped op (precondition)"]
-    notes: "Empty => mount_invalid. Run as the first step of any operation taking a mount."
+    notes: >
+      Empty => mount_invalid. Run as the first step of any operation taking a
+      mount. enc_mode rides along on this read (no extra round trip) so the
+      precondition can also refuse a connection whose installed cipher does not
+      match the volume: an unkeyed connection must never read an encrypted
+      volume as garbage, nor write plaintext into one (ENC-3).
 
   list_mounts:
     sql: |
