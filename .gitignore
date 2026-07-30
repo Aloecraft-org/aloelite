@@ -10,3 +10,4 @@ dist
 **/.nogit
 *.egg-info
 *.sqlite*
+build
