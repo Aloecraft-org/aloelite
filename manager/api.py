@@ -836,9 +836,41 @@ def create_app(
 
     @app.get("/health")
     def health():
+        """Liveness + minimal readiness.
+
+        This used to return 200 unconditionally, which meant a wheel missing
+        manager/templates/ reported healthy while every page 500'd. Anything
+        checked here must be something whose absence makes the app useless:
+        the admin template (packaging), and any fatal preflight result.
+        Jinja caches templates, so the get_template call is cheap after the
+        first request.
+        """
         results = app.config.get("PREFLIGHT_RESULTS", [])
         warnings = [r for r in results if not r["ok"] and not r["fatal"]]
-        return jsonify(ok=True, preflight=results, warnings=warnings), 200
+        fatal = [r for r in results if not r["ok"] and r["fatal"]]
+
+        checks = {}
+        try:
+            app.jinja_env.get_template("admin.html")
+            checks["templates"] = True
+        except Exception as e:  # TemplateNotFound, or a broken loader
+            checks["templates"] = False
+            app.logger.error("health: admin template unavailable: %r", e)
+
+        try:
+            store.list()
+            checks["store"] = True
+        except Exception as e:
+            checks["store"] = False
+            app.logger.error("health: store unreadable: %r", e)
+
+        ok = all(checks.values()) and not fatal
+        return jsonify(
+            ok=ok,
+            checks=checks,
+            preflight=results,
+            warnings=warnings,
+        ), (200 if ok else 503)
 
     @app.get("/")
     def index():
