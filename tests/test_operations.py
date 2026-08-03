@@ -855,6 +855,73 @@ def test_orphan_collected_after_lock_gone(db, streamvol):
     assert ops.read_all(db, streamvol, "/f") == b"good"
 
 
+# --------------------------------------------------------------------------
+# Read-descriptor coherence
+#
+# open_read snapshots (version, size) once and Descriptor.read clamps every
+# read to that frozen size, so a read handle is a point-in-time view for its
+# whole life: a commit made by anyone after the handle opened is invisible to
+# it, forever. POSIX read(2) has no such property, and the FUSE layer maps
+# O_RDONLY fds straight onto these descriptors -- which is half of the
+# short-read-with-correct-st_size bug that breaks `git push` onto a mount
+# (index-pack reads a pack back through a second fd while still writing it).
+#
+# The other half lives in fuse.py (dirty extents keyed by file handle) and
+# cannot be reached from here. These three cover the engine half.
+#
+# NOTE: a streaming writer's UNCOMMITTED bytes are deliberately invisible
+# until close (CV-5) -- that is the design, not a bug, and nothing below
+# asserts otherwise. Every assertion here is about data already committed.
+#
+# These are xfail(strict=True): they document a live bug, so the suite stays
+# green until it is fixed, and strict= turns them into failures the moment the
+# fix lands so nobody can forget to unmark them. Delete the marker (not the
+# test) in the commit that makes reads re-read content meta.
+# --------------------------------------------------------------------------
+_INCOHERENT_READS = pytest.mark.xfail(
+    strict=True,
+    reason="open_read freezes (version, size) at open; reads never refresh",
+)
+
+
+@_INCOHERENT_READS
+def test_read_handle_sees_write_range_committed_after_open(db, mount):
+    """An atomic, fully committed write is invisible to an already-open reader."""
+    ops.create_entry(db, mount, "/f", b"A" * 100)
+    with ops.open_read(db, mount, "/f") as r:
+        ops.write_range(db, mount, "/f", 100, b"B" * 50)  # commits; size -> 150
+        r.seek(0, Whence.SET)
+        assert len(r.read(-1)) == 150
+
+
+@_INCOHERENT_READS
+def test_read_handle_sees_streaming_writer_commit(db, mount):
+    """The reported repro, minus FUSE: reader opens mid-write, writer commits,
+    reader must see the committed bytes. Today it keeps the size-0 snapshot it
+    took at open and returns b'' forever."""
+    ops.create_entry(db, mount, "/t.bin", b"")
+    w = ops.open_write(db, mount, "/t.bin", WriteMode.TRUNCATE)
+    w.write(b"A" * 60000)
+    r = ops.open_read(db, mount, "/t.bin")  # opens while committed size is 0
+    w.close()  # commit: bytes are durable and stat agrees
+    assert ops.stat(db, mount, "/t.bin").size == 60000
+    r.seek(0, Whence.SET)
+    assert len(r.read(-1)) == 60000
+    r.close()
+
+
+@_INCOHERENT_READS
+def test_read_handle_does_not_serve_a_superseded_version(db, mount):
+    """Worse than short: the frozen snapshot pins a version, and superseded
+    versions are retained (CV-6), so the handle serves stale bytes rather than
+    failing. A reader open across a rewrite reads the pre-write content."""
+    ops.create_entry(db, mount, "/f", b"A" * 100)
+    with ops.open_read(db, mount, "/f") as r:
+        ops.write_all(db, mount, "/f", b"B" * 100)  # new version, same size
+        r.seek(0, Whence.SET)
+        assert r.read(-1) == b"B" * 100
+
+
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
