@@ -18,6 +18,9 @@ build:
 
 	python3 -m build
 
+build_wheel:
+	python3 -m build --wheel
+
 build_container:
 	docker build -t aloelite .
 

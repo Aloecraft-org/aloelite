@@ -8,40 +8,6 @@
 
 A portable encrypted filesystem stored inside one file
 
-
-
-    aloelite
-        ls
-        put
-        get
-        mkdir
-        rm
-        mv
-        cat
-        cp
-        stat
-        tree
-        prune
-        pin
-        volume
-        volumes
-        mounts
-    
-    aloelite fuse
-
-    aloelite web
-
-    aloelite admin
-        pin
-        snapshot
-        export
-        import
-        verify
-        health
-        info
-
-
-
 **Overview (current)** | [Getting Started](https://github.com/Aloecraft-org/aloelite/blob/main/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](https://github.com/Aloecraft-org/aloelite/blob/main/doc/FAQ.md) 
 
 [Troubleshooting](https://github.com/Aloecraft-org/aloelite/blob/main/doc/TROUBLESHOOTING.md) | [Requirements Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/REQUIREMENTS.md) | [Encryption Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ENCRYPTION.md)

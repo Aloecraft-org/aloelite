@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aloelite"
-version = "0.3.1rc2"
+version = "0.3.1rc4"
 description = "Aloelite SQLite Filesystem"
 readme = "README.md"
 authors = [
