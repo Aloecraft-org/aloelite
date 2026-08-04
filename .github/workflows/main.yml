@@ -57,3 +57,95 @@ jobs:
     - name: Run tests
       run: |
         pytest
+
+  # Full suite against sqlite at EXACTLY the capability floor (3.45.0, first
+  # jsonb release). setup-python's CPython links libsqlite3 dynamically, so
+  # LD_LIBRARY_PATH swaps the library without rebuilding Python. Guards the
+  # floor from silently rising: a template/schema change needing newer sqlite
+  # fails here, not in the field.
+  sqlite-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Cache sqlite 3.45.0 build
+      id: cache-sqlite
+      uses: actions/cache@v4
+      with:
+        path: ~/sqlite-floor
+        key: sqlite-floor-3450000-${{ runner.os }}
+
+    - name: Build sqlite 3.45.0
+      if: steps.cache-sqlite.outputs.cache-hit != 'true'
+      run: |
+        curl -sSO https://www.sqlite.org/2024/sqlite-autoconf-3450000.tar.gz
+        tar xzf sqlite-autoconf-3450000.tar.gz
+        cd sqlite-autoconf-3450000
+        ./configure --prefix="$HOME/sqlite-floor" > /dev/null
+        make -j"$(nproc)" > /dev/null
+        make install > /dev/null
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[test]
+
+    - name: Verify the floor is loaded
+      run: |
+        export LD_LIBRARY_PATH="$HOME/sqlite-floor/lib"
+        python -c "import sqlite3; v = sqlite3.sqlite_version_info; assert v == (3, 45, 0), v; print('sqlite', sqlite3.sqlite_version)"
+
+    - name: Run tests at the floor
+      run: |
+        export LD_LIBRARY_PATH="$HOME/sqlite-floor/lib"
+        pytest
+
+  # Replay of the 2026-08-03 incident environment: Debian 12 (sqlite 3.40).
+  # Asserts the capability probe refuses with the actionable message instead
+  # of the failures that shipped (IntegrityError at mount, EIO through FUSE),
+  # and that the bundled-sqlite extra then makes the same host work.
+  sqlite-too-old:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: python:3.12-slim-bookworm
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install aloelite
+      run: pip install -e .
+
+    - name: Probe must refuse host sqlite 3.40 with a clear error
+      run: |
+        python - <<'EOF'
+        import sqlite3
+        assert sqlite3.sqlite_version_info < (3, 45), sqlite3.sqlite_version
+        from aloelite import Aloelite, errors
+        try:
+            Aloelite(":memory:")
+        except errors.Unsupported as e:
+            msg = str(e)
+            assert "bundled-sqlite" in msg and "3.45" in msg, msg
+            print("refused correctly:", msg)
+        else:
+            raise SystemExit("opened on sqlite 3.40 -- probe did not fire")
+        EOF
+
+    - name: bundled-sqlite extra must rescue the same host
+      run: |
+        pip install -e .[bundled-sqlite]
+        python - <<'EOF'
+        from aloelite import Aloelite
+        with Aloelite(":memory:") as fs:
+            v = fs.create_volume("probe")
+            with fs.mount(v.id) as m:
+                m.put("/ok.txt", b"works")
+                assert m.read_all("/ok.txt") == b"works"
+        from aloelite._sqlite import sqlite3 as s
+        print("bundled sqlite", s.sqlite_version, "on Debian 12: OK")
+        EOF

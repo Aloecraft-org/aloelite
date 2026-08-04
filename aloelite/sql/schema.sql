@@ -32,7 +32,14 @@ PRAGMA foreign_keys = ON;
 -- a healthy filesystem, surfaced by health_anomaly below.
 CREATE TABLE IF NOT EXISTS node (
   node_id    TEXT    PRIMARY KEY,
-  type       TEXT    NOT NULL CHECK (type IN ('container', 'entry')),   -- NODE-2
+  -- NODE-2 vocabulary is enforced by node_guard_type below, NOT by a CHECK:
+  -- a CHECK fossilizes into every file's table DDL (tables are never
+  -- rebuilt), so widening the type set later -- symlink, fifo, socket,
+  -- device for the POSIX era -- would need a 12-step table rebuild per
+  -- file. A guard trigger is a derived object: the era-refresh rewrite on
+  -- open updates it in place, so new types are a trigger change, never a
+  -- table migration.
+  type       TEXT    NOT NULL,                                          -- NODE-2
   name       TEXT    NOT NULL,                                          -- NODE-3
   created_at INTEGER NOT NULL,                                          -- NODE-4
   modified_at INTEGER,                                                  -- own content/metadata change, NOT placement; null => never tracked (read as created_at)
@@ -127,6 +134,21 @@ CREATE TABLE IF NOT EXISTS edge (
 -- of the four implementations is writing. Active (work-performing) logic stays
 -- in the Mount API. Fire on every base-table insert, including those issued by
 -- the edge_new insert-view.
+-- NODE-2: the node-type vocabulary lives here (not in a table CHECK) so the
+-- era refresh can widen it without a table rebuild. Refuse-only, like every
+-- guard: it rejects, it never does work.
+CREATE TRIGGER IF NOT EXISTS node_guard_type BEFORE INSERT ON node
+WHEN NEW.type NOT IN ('container', 'entry')
+BEGIN
+  SELECT RAISE(ABORT, 'NODE-2: unknown node type');
+END;
+
+CREATE TRIGGER IF NOT EXISTS node_guard_type_upd BEFORE UPDATE OF type ON node
+WHEN NEW.type NOT IN ('container', 'entry')
+BEGIN
+  SELECT RAISE(ABORT, 'NODE-2: unknown node type');
+END;
+
 CREATE TRIGGER IF NOT EXISTS edge_guard_from_type BEFORE INSERT ON edge
 WHEN (SELECT type FROM node WHERE node_id = NEW.from_id) <> 'container'   -- EDGE-4
 BEGIN

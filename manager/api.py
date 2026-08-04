@@ -7,7 +7,7 @@ manager.api — the nine-endpoint HTTP API.
 metadata store and the mount supervisor through their interfaces only; volume
 creation uses Aloelite (imported lazily so this module imports without the
 aloelite package, e.g. for unit tests with fakes). Checkpoint/export open the
-backing SQLite file *directly* (stdlib sqlite3), independent of any live FUSE
+backing SQLite file *directly* (via aloelite._sqlite), independent of any live FUSE
 mount — that is what lets a backup run while the volume is mounted.
 
 Endpoints:
@@ -28,7 +28,6 @@ from __future__ import annotations
 import mimetypes
 import os
 import shutil
-import sqlite3
 import time
 import uuid
 
@@ -41,6 +40,8 @@ from flask import (
     request,
     send_file,
 )
+
+from aloelite._sqlite import sqlite3
 
 from . import errors as merr
 from .direct import FRONTEND_DIRECT, DirectSessionRegistry

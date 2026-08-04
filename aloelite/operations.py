@@ -146,7 +146,9 @@ def _new_node(
         {
             "type": type.value,
             "name": name,
-            "created_at": created_at,
+            # host-supplied, never SQL-side now (see create_mount template
+            # note); None only arrives from callers preserving a source value
+            "created_at": created_at if created_at is not None else _now_ms(),
             "modified_at": modified_at,
             "volume": m.volume,
             "metadata": _meta_to_json(metadata),
@@ -214,7 +216,13 @@ def create_volume(
         vid = db.gen_id()
         db.run(
             "mutation.create_volume",
-            {"id": vid, "name": name, "chunk_size": chunk_size, "enc_mode": mode},
+            {
+                "id": vid,
+                "name": name,
+                "created_at": _now_ms(),
+                "chunk_size": chunk_size,
+                "enc_mode": mode,
+            },
         )
         # the root container is created with the volume so monotonic ids work
         root = db.create_monotonic(
@@ -223,7 +231,7 @@ def create_volume(
             {
                 "type": "container",
                 "name": "/",
-                "created_at": None,
+                "created_at": _now_ms(),
                 "modified_at": None,
                 "volume": vid,
                 "metadata": None,
@@ -322,6 +330,7 @@ def mount(
                 "volume": volume,
                 "mount_point": anchor,
                 "expires_at": expires,
+                "created_at": _now_ms(),
                 "n_m": n_m,
             },
         )
@@ -1099,7 +1108,13 @@ def open_write(
         lock = db.gen_id()
         db.run(
             "mutation.create_lock",
-            {"id": lock, "mount": mount, "node": node_id, "expires_at": None},
+            {
+                "id": lock,
+                "mount": mount,
+                "node": node_id,
+                "expires_at": None,
+                "created_at": _now_ms(),
+            },
         )
         cs = db.chunk_size_of(m.volume)
         # Append carries the prior version's FULL leading chunks forward

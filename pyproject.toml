@@ -19,8 +19,13 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "cryptography",
-    "pydantic",
+    # >=44: cryptography.hazmat.primitives.kdf.argon2 (Argon2id) lives there.
+    # Unfloored, pip accepted Debian 12's apt cryptography 38.x and aloelite
+    # ImportError'd at startup.
+    "cryptography>=44",
+    # >=2: ConfigDict / computed_field in models.py. Debian 12 apt ships 1.10,
+    # which satisfies an unfloored pip the same way.
+    "pydantic>=2",
     "pyyaml",
     "msgpack",
     "flask",         # or fastapi + uvicorn
@@ -30,6 +35,13 @@ dependencies = [
 fuse = [
     "pyfuse3",
     "trio",
+]
+# A statically linked modern sqlite, removing the host-libsqlite3 dependency
+# (the capability probe at open needs >= 3.45 for jsonb). manylinux wheels
+# only -- musl (Alpine) deployments already link a modern sqlite and rely on
+# the probe. aloelite._sqlite prefers this import when present.
+bundled-sqlite = [
+    "pysqlite3-binary; platform_system == 'Linux'",
 ]
 test = [
     "pytest",

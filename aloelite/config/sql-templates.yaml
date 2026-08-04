@@ -38,7 +38,7 @@
 
 meta:
   templates_for: mount_api
-  version: 1
+  version: 2             # 2: hosts supply created_at to every create_* (no SQL-side now)
   bind_style: named            # ":name"
 
 # ----------------------------------------------------------------------------
@@ -300,7 +300,7 @@ mutation:
     params:
       type:        "'container' | 'entry'"
       name:        "node name"
-      created_at:  "ms epoch, or NULL to let the trigger set now (NODE-4: copy passes the source value)"
+      created_at:  "ms epoch, supplied by the host (NODE-4: copy passes the source value; see create_mount note)"
       modified_at: "ms epoch, or NULL to default to created_at"
       volume:      "VolumeId, or NULL for import/recovery (non-monotonic id)"
       metadata:    "JSON string of a shallow {string:string} map, or NULL for empty (NODE-6)"
@@ -542,8 +542,8 @@ mutation:
 
   create_volume:
     sql: |
-      INSERT INTO volume_new (volume_id, name, chunk_size, enc_mode) VALUES (:id, :name, :chunk_size, :enc_mode)
-    params: { id: "VolumeId from new_uuid7", name: "volume name, or NULL", chunk_size: "per-volume chunk size in bytes (default 1048576)" }
+      INSERT INTO volume_new (volume_id, name, created_at, chunk_size, enc_mode) VALUES (:id, :name, :created_at, :chunk_size, :enc_mode)
+    params: { id: "VolumeId from new_uuid7", name: "volume name, or NULL", created_at: "ms epoch, supplied by the host (see create_mount note)", chunk_size: "per-volume chunk size in bytes (default 1048576)" }
     returns: none
     consumed_by: [create_volume]
     notes: "api_version defaults to the schema's current era. id supplied by the host via new_uuid7. chunk_size is fixed here and immutable thereafter (CV-1)."
@@ -567,15 +567,22 @@ mutation:
 
   create_mount:
     sql: |
-      INSERT INTO mount_new (mount_id, volume_id, mount_point, expires_at, N_m)
-      VALUES (:id, :volume, :mount_point, :expires_at, :n_m)
+      INSERT INTO mount_new (mount_id, volume_id, mount_point, expires_at, created_at, N_m)
+      VALUES (:id, :volume, :mount_point, :expires_at, :created_at, :n_m)
     params:
       id:          "MountId from new_uuid7"
       volume:      "VolumeId the session binds to"
       mount_point: "NodeId anchoring the session (defaults to volume root)"
       expires_at:  "ms epoch ttl, or NULL"
+      created_at:  "ms epoch of mount creation, supplied by the host"
     returns: none
     consumed_by: [mount]
+    notes: >
+      created_at comes from the host, never from SQL: SQL-side now() is a
+      silent dependency on the host sqlite version (unixepoch('subsec')
+      returns NULL below 3.42), and the templates are the cross-language
+      conformance surface, so every implementation must supply it. The
+      trigger's coalesce fallback remains but nothing may rely on it.
 
   set_mount_state:
     sql: |
@@ -594,16 +601,19 @@ mutation:
 
   create_lock:
     sql: |
-      INSERT INTO lock_new (lock_id, mount_id, node_id, expires_at)
-      VALUES (:id, :mount, :node, :expires_at)
+      INSERT INTO lock_new (lock_id, mount_id, node_id, expires_at, created_at)
+      VALUES (:id, :mount, :node, :expires_at, :created_at)
     params:
       id:         "LockId from new_uuid7"
       mount:      "MountId holding the lock"
       node:       "NodeId being locked"
       expires_at: "ms epoch ttl, or NULL"
+      created_at: "ms epoch of lock creation, supplied by the host"
     returns: none
     consumed_by: [write_all, open_write]
-    notes: "Exclusive in this iteration (ACC-7). Pre-check with check_lock_held."
+    notes: >
+      Exclusive in this iteration (ACC-7). Pre-check with check_lock_held.
+      created_at supplied by the host (see create_mount note).
 
   release_lock:
     sql: |

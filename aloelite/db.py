@@ -25,17 +25,55 @@ Templates are loaded once and addressed as "group.name" (e.g.
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 from contextlib import contextmanager
 from pathlib import Path as _FsPath
 from typing import Any, Iterator, Mapping
 
 import yaml
 
+from ._sqlite import sqlite3
 from .crypto import Cipher, IdentityCipher
+from .errors import Unsupported
 
 # Template groups that contain executable `sql` entries (host_only / meta are not).
 _SQL_GROUPS = ("resolution", "mutation", "validation", "recursive", "maintenance")
+
+# The newest sqlite feature the schema/templates rely on is jsonb() (3.45);
+# unixepoch('subsec') (3.42) has the nastier failure mode -- an unknown
+# modifier returns NULL instead of raising, which flows through printf as
+# zeros and through coalesce into NOT NULL violations. Probe BOTH capabilities
+# at open, not the version string: version parsing lies (vendor backports),
+# capabilities don't.
+MIN_SQLITE = (3, 45)
+
+# Schema era stamped into PRAGMA user_version. Files stamped with an OLDER era
+# (or 0, the pre-era default) get their derived objects -- views and triggers,
+# which hold no data -- dropped and re-created from the current schema on open,
+# so their definitions belong to the installed aloelite, not to whatever
+# version happened to create the file (the `IF NOT EXISTS` fossilization that
+# shipped 'subsec' triggers to hosts that couldn't run them). Files stamped
+# with a NEWER era are refused with a clear error instead of being half-read.
+# Bump this whenever schema.sql changes any view, trigger, or table.
+SCHEMA_ERA = 1
+
+
+def _check_sqlite_capabilities(conn: sqlite3.Connection) -> None:
+    """Refuse a too-old sqlite AT OPEN with an actionable message, instead of
+    letting it surface later as a NOT NULL IntegrityError, a wrong-answer NULL
+    timestamp, or -- through FUSE -- a bare EIO with the traceback invisible."""
+    try:
+        conn.execute("SELECT jsonb(1)")
+        subsec_ok = conn.execute("SELECT unixepoch('subsec') IS NOT NULL").fetchone()[0]
+    except sqlite3.OperationalError:
+        subsec_ok = False
+    if not subsec_ok:
+        raise Unsupported(
+            f"host sqlite {sqlite3.sqlite_version} is too old for aloelite "
+            f"(needs jsonb + unixepoch subsec, sqlite >= "
+            f"{'.'.join(map(str, MIN_SQLITE))}). Fixes: pip install "
+            f"'aloelite[bundled-sqlite]', or provide libsqlite3 >= "
+            f"{'.'.join(map(str, MIN_SQLITE))}."
+        )
 
 
 class Templates:
@@ -112,9 +150,40 @@ class Db:
         # through their own lock (manager direct sessions); the engine itself
         # adds no thread safety.
         conn = sqlite3.connect(str(db_ref), check_same_thread=check_same_thread)
+        try:
+            _check_sqlite_capabilities(conn)
+        except Unsupported:
+            conn.close()
+            raise
         db = cls(conn, Templates.load(templates_path))
         if schema_path is not None:
+            era = conn.execute("PRAGMA user_version").fetchone()[0]
+            if era > SCHEMA_ERA:
+                conn.close()
+                raise Unsupported(
+                    f"file was written by a newer aloelite (schema era {era}; "
+                    f"this build understands {SCHEMA_ERA}). Upgrade aloelite "
+                    f"to open it."
+                )
+            if era < SCHEMA_ERA:
+                # Derived objects belong to the installed version, not to the
+                # file's creation era: drop every view and trigger so the
+                # executescript below re-creates them from the CURRENT schema.
+                # They hold no data, so this is always safe; tables keep
+                # IF NOT EXISTS and are never dropped here.
+                derived = conn.execute(
+                    "SELECT type, name FROM sqlite_master "
+                    "WHERE type IN ('trigger', 'view')"
+                ).fetchall()
+                for typ, name in derived:
+                    if typ == "trigger":
+                        conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+                for typ, name in derived:
+                    if typ == "view":
+                        conn.execute(f'DROP VIEW IF EXISTS "{name}"')
             conn.executescript(_FsPath(schema_path).read_text())
+            conn.execute(f"PRAGMA user_version = {SCHEMA_ERA}")
+            conn.commit()
         return db
 
     def close(self) -> None:

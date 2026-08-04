@@ -124,7 +124,7 @@ class MountSupervisor:
         Mirrors api._wal_checkpoint_truncate; kept inline to avoid a cross-import
         with the Flask layer."""
         try:
-            import sqlite3
+            from aloelite._sqlite import sqlite3
 
             con = sqlite3.connect(sqlite_path, timeout=5.0)
             try:
