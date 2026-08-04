@@ -98,6 +98,12 @@ class Descriptor:
             self._flushed = carry_full * chunk_size  # bytes already in committed chunks
             self._pending = bytearray(pending)  # bytes from self._flushed onward
         else:
+            # Advisory initial snapshot only: read() re-reads the committed
+            # (version, size) pointer on every call, so a reader tracks
+            # commits made after it opened (CV-3: the committed pointer is
+            # the sole definition of current bytes). A frozen handle would
+            # serve superseded bytes forever -- the engine half of the
+            # short-read-despite-correct-st_size FUSE failure.
             self._version = version
             self._size = size
 
@@ -111,10 +117,20 @@ class Descriptor:
             raise ValueError("descriptor is read-only")
 
     # -- ranged reads over the committed version -----------------------------
+    def _refresh(self) -> None:
+        """Re-read the committed (version, size) pointer. Called per read (and
+        per END-relative seek) so the handle is coherent with commits that
+        landed after open. Within one call the pair is read atomically, so a
+        single read() never mixes versions; across calls a racing writer may
+        interleave -- the same contract POSIX read(2) gives."""
+        meta = self._db.read_content_meta(self.node)
+        self._version, self._size = meta if meta is not None else (0, 0)
+
     def read(self, n: int = -1) -> bytes:
         self._check_open()
         if self.writable:
             raise Unsupported("streaming write descriptor is write-forward only")
+        self._refresh()
         start = self._pos
         end = self._size if (n is None or n < 0) else min(self._size, start + n)
         if end <= start:
@@ -191,6 +207,8 @@ class Descriptor:
     # -- cursor --------------------------------------------------------------
     def seek(self, offset: int, whence: Whence = Whence.SET) -> int:
         self._check_open()
+        if not self.writable and whence is Whence.END:
+            self._refresh()  # END must be the current committed end, not open-time
         total = self._size if not self.writable else self._flushed + len(self._pending)
         if whence is Whence.SET:
             new = offset
