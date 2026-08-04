@@ -69,18 +69,24 @@ _APPEND_BATCH = 1 << 20  # commit a buffered append once it reaches this many by
 _DIRTY_FLUSH = 32 << 20  # flush a rw handle once dirty bytes reach this
 
 
-class _RwHandle:
-    """Random-access handle backed by write_range: buffers only DIRTY byte
+class _OpenFile:
+    """Random-access state backed by write_range: buffers only DIRTY byte
     extents (sorted, non-overlapping), overlays them on ranged reads of the
     committed content, and flushes each coalesced extent as one atomic
-    write_range. Memory is bounded by dirty bytes, never file size."""
+    write_range. Memory is bounded by dirty bytes, never file size.
 
-    def __init__(self, mount, path: str, *, truncate: bool) -> None:
+    Keyed BY INODE and shared by every rw file handle open on that inode
+    (refcounted; AloeFuse._files owns the registry). Per-fh instances lost
+    writes between concurrent handles and hid unflushed data from readers on
+    a second fd -- the short-read-despite-correct-st_size failure that broke
+    `git push` (index-pack reads the pack back mid-write). One shared overlay
+    per inode makes every handle see one truth."""
+
+    def __init__(self, mount, path: str) -> None:
         self.m = mount
         self.path = path
-        if truncate:
-            mount.truncate(path, 0)
-        self.size = mount.stat(path).size  # committed + pending view
+        self.refs = 0  # open fh count; registry entry dies at zero
+        self.size = self.m.stat(path).size  # committed size + pending extents
         self.extents: list[tuple[int, bytearray]] = []  # sorted by offset
         self.dirty = 0
 
@@ -142,6 +148,7 @@ class _RwHandle:
         self.dirty = 0
         # an extension past committed EOF is realized by write_range; a pure
         # ftruncate-style grow with no bytes is handled in truncate()
+        # Idempotent: a second flush (another fh's RELEASE) is a no-op.
 
 
 def _perm_bits(info, default: int) -> int:
@@ -218,16 +225,20 @@ class AloeFuse(pyfuse3.Operations):
         self.m = mount
         root = self.m.stat("/")
         self._n = {ROOT: root.id}  # inode -> NodeId
+        self._nlookup: dict[int, int] = {}  # kernel lookup-count per inode
         # fh -> handle state, keyed by "mode":
         #   "w"   sequential stream write
         #         {"mode":"w",  "path", "w": Descriptor, "pos", "inode"}
         #   "r"   ranged stream read
-        #         {"mode":"r",  "path", "r": Descriptor}
+        #         {"mode":"r",  "path", "r": Descriptor, "inode"}
         #   "a"   append batcher
         #         {"mode":"a",  "path", "buf": bytearray, "inode"}
-        #   "rw"  dirty-extent random access
-        #         {"mode":"rw", "path", "h": _RwHandle, "inode"}
+        #   "rw"  dirty-extent random access (shared per-inode state)
+        #         {"mode":"rw", "path", "of": _OpenFile, "inode"}
         self._open = {}
+        # inode -> _OpenFile: ONE dirty-extent overlay per inode, shared by
+        # every rw fh on it and consulted/flushed by cross-handle reads.
+        self._files: dict[int, _OpenFile] = {}
         self._fh = 0
 
     # -- inode bookkeeping --------------------------------------------------
@@ -235,6 +246,56 @@ class AloeFuse(pyfuse3.Operations):
         ino = _ino(node_id.value if hasattr(node_id, "value") else str(node_id))
         self._n[ino] = node_id
         return ino
+
+    def _remember(self, node_id) -> int:
+        """_register plus a kernel lookup-count bump. Use for every reply that
+        the kernel counts (lookup, create, mkdir, symlink); forget() undoes
+        these and finally drops the inode->NodeId mapping, so the map no
+        longer grows without bound over a long-lived mount."""
+        ino = self._register(node_id)
+        self._nlookup[ino] = self._nlookup.get(ino, 0) + 1
+        return ino
+
+    async def forget(self, inode_list):
+        for ino, n in inode_list:
+            if ino == ROOT:
+                continue
+            left = self._nlookup.get(ino, 0) - n
+            if left > 0:
+                self._nlookup[ino] = left
+            else:
+                self._nlookup.pop(ino, None)
+                self._n.pop(ino, None)
+
+    # -- shared dirty state -------------------------------------------------
+    def _openfile(self, inode: int, path: str) -> _OpenFile:
+        """The inode's shared _OpenFile, created on first rw open. Caller owns
+        one reference (drop it in release)."""
+        of = self._files.get(inode)
+        if of is None:
+            of = self._files[inode] = _OpenFile(self.m, path)
+        of.refs += 1
+        return of
+
+    def _drop_openfile(self, inode: int) -> None:
+        of = self._files.get(inode)
+        if of is None:
+            return
+        of.refs -= 1
+        if of.refs <= 0:
+            del self._files[inode]
+
+    def _settle(self, inode: int) -> None:
+        """Make everything pending on this inode durable so a coherent read
+        can be served from committed content: commit append batches, then
+        flush dirty extents. The read path calls this for handles that read
+        the store directly (mode 'r'); rw reads overlay in memory instead."""
+        for h in self._open.values():
+            if h.get("inode") == inode and h.get("mode") == "a" and h["buf"]:
+                self._append_commit(h)
+        of = self._files.get(inode)
+        if of is not None and of.dirty:
+            of.flush()
 
     def _path(self, inode: int) -> str:
         if inode == ROOT:
@@ -283,12 +344,11 @@ class AloeFuse(pyfuse3.Operations):
                 a.st_size += extra
                 a.st_blocks = (a.st_size + 511) // 512
             for h in self._open.values():
-                if h.get("inode") != inode:
-                    continue
-                if h.get("mode") == "w":
+                if h.get("inode") == inode and h.get("mode") == "w":
                     a.st_size = max(a.st_size, h["pos"])
-                elif h.get("mode") == "rw":
-                    a.st_size = max(a.st_size, h["h"].size)
+            of = self._files.get(inode)
+            if of is not None:
+                a.st_size = max(a.st_size, of.size)
             a.st_blocks = (a.st_size + 511) // 512
             return a
         except KeyError:
@@ -305,7 +365,7 @@ class AloeFuse(pyfuse3.Operations):
             info = self.m.stat(f"{base}/{nm}")
         except Exception as e:
             raise _wrap(e)
-        return self._attr(self._register(info.id), info)
+        return self._attr(self._remember(info.id), info)
 
     async def access(self, inode, mode, ctx):
         # Single-user mount, world-rw modes in getattr: everything present is
@@ -340,7 +400,7 @@ class AloeFuse(pyfuse3.Operations):
             perms = mode & 0o7777
             if perms and perms != 0o777:
                 self.m.set_metadata(path, {"mode": format(perms, "o")})
-            return self._attr(self._register(node), self.m.stat_by_id(node))
+            return self._attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
 
@@ -352,7 +412,7 @@ class AloeFuse(pyfuse3.Operations):
             perms = mode & 0o7777
             if perms and perms != 0o666:
                 self.m.set_metadata(path, {"mode": format(perms, "o")})
-            ino = self._register(node)
+            ino = self._remember(node)
             fh = self._next_fh()
             acc = flags & os.O_ACCMODE
             if flags & os.O_APPEND:
@@ -368,7 +428,7 @@ class AloeFuse(pyfuse3.Operations):
                     "mode": "rw",
                     "path": path,
                     "inode": ino,
-                    "h": _RwHandle(self.m, path, truncate=False),
+                    "of": self._openfile(ino, path),
                 }
             else:
                 writer = self.m.open_write(path, WriteMode.TRUNCATE)
@@ -393,7 +453,7 @@ class AloeFuse(pyfuse3.Operations):
             # copy/pack/unpack for free.
             node = self.m.create_entry(path, os.fsencode(os.fsdecode(target)))
             self.m.set_metadata(path, {"symlink": "1"})
-            return self._attr(self._register(node), self.m.stat_by_id(node))
+            return self._attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
 
@@ -461,7 +521,12 @@ class AloeFuse(pyfuse3.Operations):
                 # ranged streaming reader (only fetches the chunks each read needs)
                 reader = self.m.open_read(path)
                 fh = self._next_fh()
-                self._open[fh] = {"mode": "r", "path": path, "r": reader}
+                self._open[fh] = {
+                    "mode": "r",
+                    "path": path,
+                    "r": reader,
+                    "inode": inode,
+                }
             elif acc == os.O_WRONLY and (flags & os.O_TRUNC):
                 writer = self.m.open_write(path, WriteMode.TRUNCATE)
                 fh = self._next_fh()
@@ -482,13 +547,17 @@ class AloeFuse(pyfuse3.Operations):
                 }
             else:
                 # O_RDWR, or plain O_WRONLY (partial overwrite): dirty-extent
-                # handle over write_range (bounded memory; no whole-file buffer)
+                # state over write_range (bounded memory; no whole-file
+                # buffer), shared per-inode so every handle sees one truth
                 fh = self._next_fh()
+                of = self._openfile(inode, path)
+                if flags & os.O_TRUNC:
+                    of.truncate(0)
                 self._open[fh] = {
                     "mode": "rw",
                     "path": path,
                     "inode": inode,
-                    "h": _RwHandle(self.m, path, truncate=bool(flags & os.O_TRUNC)),
+                    "of": of,
                 }
         except Exception as e:
             raise _wrap(e)
@@ -498,10 +567,14 @@ class AloeFuse(pyfuse3.Operations):
         h = self._open[fh]
         try:
             if h["mode"] == "r":
+                # settle pending state from OTHER handles on this inode first
+                # (append batches, rw dirty extents); the descriptor re-reads
+                # the committed pointer per call, so it then serves them.
+                self._settle(h["inode"])
                 h["r"].seek(off, Whence.SET)
                 return h["r"].read(size)
             if h["mode"] == "rw":
-                return h["h"].read(off, size)
+                return h["of"].read(off, size)
             # write-only streaming handle
             raise pyfuse3.FUSEError(errno.ENOTSUP)
         except pyfuse3.FUSEError:
@@ -529,7 +602,7 @@ class AloeFuse(pyfuse3.Operations):
                 # already-flushed, immutable bytes can't be rewritten cheaply.
                 raise pyfuse3.FUSEError(errno.ENOTSUP)
             if h["mode"] == "rw":
-                return h["h"].write(off, data)
+                return h["of"].write(off, data)
             raise pyfuse3.FUSEError(errno.ENOTSUP)  # read handle
         except pyfuse3.FUSEError:
             raise
@@ -561,7 +634,7 @@ class AloeFuse(pyfuse3.Operations):
                     raise pyfuse3.FUSEError(errno.ENOTSUP)
                 # new >= pos: no-op hint; the sequential writes define real size
             elif h is not None and h["mode"] == "rw":
-                h["h"].truncate(new)
+                h["of"].truncate(new)
             elif h is not None and h["mode"] == "r":
                 raise pyfuse3.FUSEError(errno.ENOTSUP)
             else:
@@ -587,7 +660,7 @@ class AloeFuse(pyfuse3.Operations):
         h = self._open.get(fh)
         try:
             if h and h["mode"] == "rw":
-                h["h"].flush()
+                h["of"].flush()
             elif h and h["mode"] == "a":
                 self._append_commit(h)
             elif h and h["mode"] == "w":
@@ -599,7 +672,7 @@ class AloeFuse(pyfuse3.Operations):
                 # rw handle over the just-committed state; later writes
                 # land as atomic write_ranges, later flushes flush extents.
                 h["w"].close()
-                h["h"] = _RwHandle(self.m, h["path"], truncate=False)
+                h["of"] = self._openfile(h["inode"], h["path"])
                 h["mode"] = "rw"
                 del h["w"], h["pos"]
         except Exception as e:
@@ -618,7 +691,8 @@ class AloeFuse(pyfuse3.Operations):
             elif h["mode"] == "r":
                 h["r"].close()
             elif h["mode"] == "rw":
-                h["h"].flush()
+                h["of"].flush()  # idempotent if a sibling fh already flushed
+                self._drop_openfile(h["inode"])
             elif h["mode"] == "a":
                 self._append_commit(h)
         except Exception as e:

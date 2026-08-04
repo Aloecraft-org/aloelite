@@ -57,6 +57,9 @@ pythonpath = ["."]
 # `manager` carries its own test module alongside the code it covers; naming both
 # roots keeps a bare `pytest` equivalent to what CI runs.
 testpaths = ["tests", "manager"]
+markers = [
+    "fuse: needs /dev/fuse, fusermount3, and the [fuse] extra (real kernel mount)",
+]
 
 [tool.ruff]
 target-version = "py311"
