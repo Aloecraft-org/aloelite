@@ -640,7 +640,20 @@ function app() {
 
     // -- Open / Lock (the simple path) -------------------------------------
     async openVol(v) {
-      if (v.mounted) { this.openExplorer(v); return; }
+      if (v.mounted) {
+        if (v.encrypted) {
+          // this browser may not hold a session (cookie is HttpOnly, so
+          // probe): 401 -> straight to the PIN modal, no explorer flash
+          const probe = await this.api('GET',
+            `/volumes/${v.id}/files?path=${encodeURIComponent('/')}`);
+          if (probe.status === 401) {
+            this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
+            this._modal('unlockModal').show();
+            return;
+          }
+        }
+        this.openExplorer(v); return;
+      }
       if (v.encrypted) {
         this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
         this._modal('unlockModal').show();
@@ -809,19 +822,20 @@ function app() {
       this.loadFiles();
     },
 
-    // Cookie mode: the volume is unlocked but THIS browser has no session.
-    // Plain volume: attach silently (mount endpoint mints our cookie).
-    // Encrypted: route to the PIN modal -- attaching IS proving the key.
-    async attachVol(v) {
-      if (v.encrypted) {
-        this._modal('expModal').hide();
-        this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
-        this._modal('unlockModal').show();
-        return;
-      }
-      const r = await this.api('POST', `/volumes/${v.id}/mount`, { mode: 'direct' });
-      if (r.ok) await this.loadFiles();
-      else this.expErr = r.data?.error || 'Could not attach to this volume.';
+    // Cookie mode, encrypted volume: unlocked server-side, but THIS browser
+    // has no session -- attaching means proving the PIN. Close the explorer
+    // FULLY before raising the PIN modal (bootstrap hide is async; showing
+    // during the transition stacks an empty explorer over the PIN field).
+    // Plain volumes never 401, so no silent-attach path is needed.
+    attachVol(v) {
+      this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
+      const el = document.getElementById('expModal');
+      el.addEventListener(
+        'hidden.bs.modal',
+        () => this._modal('unlockModal').show(),
+        { once: true },
+      );
+      this._modal('expModal').hide();
     },
 
     expJoin(name) {
@@ -846,14 +860,14 @@ function app() {
           `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expPath)}`);
         if (r.ok) this.expEntries = r.data;
         else if (r.status === 401) {
-          // Unlocked volume, but this browser holds no session: attach ONCE
-          // (silent for plain volumes, PIN modal for encrypted). The guard
-          // flag stops a failed attach from looping through here forever.
+          // Unlocked (encrypted) volume, but this browser holds no session:
+          // route to the PIN modal once. The guard flag stops a failed
+          // attach from looping through here forever.
           this.expEntries = [];
           if (!this._autoAttached) {
             this._autoAttached = true;
             this.expBusy = false;
-            await this.attachVol(this.expVol);
+            this.attachVol(this.expVol);
             return;
           }
           this.expErr = 'This browser has no session for this volume — unlock it.';

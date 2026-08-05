@@ -132,22 +132,39 @@ def _unlock(app, vid, pin=None, headers=_H):
     return c, r
 
 
-def test_cookie_required_for_files(capp):
+def test_plain_volume_open_to_all(capp):
+    """The gate IS encryption: a plain volume in cookie mode behaves exactly
+    like auth off -- no cookie, no CSRF header, any client, scripts work."""
     vid = _mk_volume(capp)
-    c1, r = _unlock(capp, vid)
+    _c1, r = _unlock(capp, vid)
     assert r.status_code == 200
-    # the unlocking client has the cookie; a stranger does not
+    stranger = capp.test_client()
+    assert stranger.get(f"/volumes/{vid}/files?path=/").status_code == 200
+    body = {"file": (BytesIO(b"x"), "f.txt")}
+    r = stranger.post(  # no cookie, no X-Aloelite header: still fine
+        f"/volumes/{vid}/files/upload?path=/",
+        data=body,
+        content_type="multipart/form-data",
+    )
+    assert r.status_code == 201
+    assert stranger.get(f"/volumes/{vid}/export").status_code == 200
+
+
+def test_encrypted_volume_requires_session(capp):
+    vid = _mk_volume(capp, name="vault", pin="s3cret")
+    c1, r = _unlock(capp, vid, pin="s3cret")
+    assert r.status_code == 200
     assert c1.get(f"/volumes/{vid}/files?path=/").status_code == 200
     stranger = capp.test_client()
     assert stranger.get(f"/volumes/{vid}/files?path=/").status_code == 401
-    # export is a whole-file surface: same rule
+    # export/checkpoint are whole-file surfaces: same rule
     assert stranger.get(f"/volumes/{vid}/export").status_code == 401
     assert c1.get(f"/volumes/{vid}/export").status_code == 200
 
 
-def test_mutations_require_csrf_header(capp):
-    vid = _mk_volume(capp)
-    c1, _ = _unlock(capp, vid)
+def test_encrypted_mutations_require_csrf_header(capp):
+    vid = _mk_volume(capp, name="vault", pin="s3cret")
+    c1, _ = _unlock(capp, vid, pin="s3cret")
     up = f"/volumes/{vid}/files/upload?path=/"
     body = {"file": (BytesIO(b"x"), "f.txt")}
     r = c1.post(up, data=body, content_type="multipart/form-data")
@@ -155,29 +172,25 @@ def test_mutations_require_csrf_header(capp):
     body = {"file": (BytesIO(b"x"), "f.txt")}
     r = c1.post(up, data=body, content_type="multipart/form-data", headers=_H)
     assert r.status_code == 201
-    # mount itself is mutating too
-    assert _unlock(capp, vid, headers={})[1].status_code == 403
 
 
-def test_each_client_gets_its_own_mount(capp):
-    """The audit property: two browsers -> two engine mount rows; detaching
-    one leaves the other working; the last detach locks the volume."""
-    vid = _mk_volume(capp)
-    c1, r1 = _unlock(capp, vid)
-    c2, r2 = _unlock(capp, vid)  # attach path (already unlocked)
+def test_each_encrypted_client_gets_its_own_mount(capp):
+    """The audit property: two browsers, each proving the PIN -> two engine
+    mount rows; detaching one leaves the other working; the last detach
+    locks the volume."""
+    vid = _mk_volume(capp, name="vault", pin="s3cret")
+    c1, r1 = _unlock(capp, vid, pin="s3cret")
+    c2, r2 = _unlock(capp, vid, pin="s3cret")  # attach path
     assert r1.status_code == r2.status_code == 200
-    mounts = c1.get(f"/volumes/{vid}/mounts").json
-    assert len(mounts) == 2
-    # both clients work, each on its own mount
+    assert len(c1.get(f"/volumes/{vid}/mounts").json) == 2
     for c in (c1, c2):
         assert c.get(f"/volumes/{vid}/files?path=/").status_code == 200
-    # c1 detaches: c1 dead, c2 alive, volume still mounted
     r = c1.delete(f"/volumes/{vid}/mount", headers=_H)
     assert r.status_code == 200 and r.json == {"locked": False}
     assert c1.get(f"/volumes/{vid}/files?path=/").status_code == 401
     assert c2.get(f"/volumes/{vid}/files?path=/").status_code == 200
-    # c2 detaches: last one out locks the volume (409 = not unlocked at all,
-    # the pre-existing semantic; the UI routes 401 and 409 the same way)
+    # last one out locks the volume (409 = not unlocked at all, the
+    # pre-existing semantic; the UI routes 401 and 409 the same way)
     assert c2.delete(f"/volumes/{vid}/mount", headers=_H).status_code == 204
     assert c2.get(f"/volumes/{vid}/files?path=/").status_code == 409
 
@@ -196,15 +209,15 @@ def test_encrypted_attach_reproves_pin(capp):
 
 
 def test_off_mode_still_available(client):
-    """ALOELITE_AUTH=off: no cookie, no CSRF header, everything works --
-    the legacy escape hatch for trusted networks and cookie-less scripts."""
+    """ALOELITE_AUTH=off: the legacy escape hatch -- even encrypted volumes,
+    once unlocked, are open to any client that can reach the manager."""
     assert _upload(client, "/", "f.txt", b"x").status_code == 201
     assert client.get("/volumes/v1/files?path=/").status_code == 200
 
 
 def test_default_is_cookie_mode(tmp_path, monkeypatch):
-    """With no auth_mode argument and no env override, create_app comes up in
-    cookie mode: anyone may mount, but content needs the minted session."""
+    """No auth_mode argument, no env override: encrypted volumes are gated
+    by default, and a device that proves the PIN gets in."""
     monkeypatch.delenv("ALOELITE_AUTH", raising=False)
     store = JsonVolumeStore(str(tmp_path / "s.json"))
     registry = DirectSessionRegistry()
@@ -213,14 +226,18 @@ def test_default_is_cookie_mode(tmp_path, monkeypatch):
     )
     app.testing = True
     try:
-        vid = _mk_volume(app)
-        c, r = _unlock(app, vid)  # any client may mount/unlock
+        vid = _mk_volume(app, name="vault", pin="s3cret")
+        c, r = _unlock(app, vid, pin="s3cret")
         assert r.status_code == 200
         assert c.get(f"/volumes/{vid}/files?path=/").status_code == 200
         stranger = app.test_client()
         assert stranger.get(f"/volumes/{vid}/files?path=/").status_code == 401
-        # ...and the stranger can self-serve an attach (plain volume)
-        r2 = stranger.post(f"/volumes/{vid}/mount", json={"mode": "direct"}, headers=_H)
+        # the stranger's way in is the PIN, not reachability
+        r2 = stranger.post(
+            f"/volumes/{vid}/mount",
+            json={"mode": "direct", "pin": "s3cret"},
+            headers=_H,
+        )
         assert r2.status_code == 200
         assert stranger.get(f"/volumes/{vid}/files?path=/").status_code == 200
     finally:

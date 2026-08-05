@@ -89,23 +89,26 @@ def create_app(
     app = Flask(__name__)
     registry = registry or DirectSessionRegistry()
     app.config["DIRECT_REGISTRY"] = registry  # reachable for shutdown/tests
-    # "cookie" (default): every client holds its own session cookie, backed
-    # by ITS OWN engine mount row (per-client tokens, lock attribution, and a
-    # mounts listing that reads as an audit of who is attached). Mounting and
-    # unlocking stay open to everyone -- the mount endpoint needs no cookie,
-    # so any client may attach; a plain volume attaches silently, an
-    # encrypted one proves the PIN per device. The cookie gates USING the
-    # volume (files, export, checkpoint), which is what makes a manager on an
-    # exposed network not be a free filesystem. Applies to the direct
+    # "cookie" (default): the auth gate IS encryption. An unencrypted volume
+    # is open to every client exactly as before -- no cookie, no CSRF header,
+    # existing scripts and workflows unchanged. An ENCRYPTED volume is
+    # per-client: each browser/device proves the PIN once, gets an HttpOnly
+    # session cookie backed by ITS OWN engine mount row (per-client token,
+    # lock attribution; the mounts listing reads as an audit of who is
+    # attached), and content routes (files, export, checkpoint) answer 401
+    # without one. Mounting/unlocking itself stays open to everyone -- the
+    # PIN, not reachability, is what admits a device. Applies to the direct
     # frontend; a FUSE-frontend mountpoint is served by the kernel to local
     # processes and has no per-HTTP-client identity to check.
-    # "off": legacy behavior -- an unlocked volume is usable by any client
-    # that can reach the manager. For trusted single-user networks and
-    # cookie-less scripting.
+    # "off": legacy behavior -- even encrypted volumes, once unlocked by
+    # anyone, are usable by any client that can reach the manager.
     auth_mode = auth_mode or os.environ.get("ALOELITE_AUTH", "cookie")
     if auth_mode not in ("off", "cookie"):
         raise ValueError(f"ALOELITE_AUTH must be 'off' or 'cookie', not {auth_mode!r}")
     cookie_auth = auth_mode == "cookie"
+
+    def _gated(rec: VolumeRecord) -> bool:
+        return cookie_auth and rec.encrypted
 
     def _cookie_name(vid: str) -> str:
         return f"aloe_m_{vid}"
@@ -132,17 +135,6 @@ def create_app(
             if request.headers.get("X-Aloelite") != "1":
                 raise merr.CsrfRejected("missing X-Aloelite header")
 
-    def _csrf_or_403():
-        """Inline CSRF gate for mutating endpoints outside _direct_call.
-        Returns an error response to hand back, or None to proceed."""
-        if not cookie_auth:
-            return None
-        try:
-            _csrf_check()
-        except merr.CsrfRejected:
-            return jsonify(error="missing X-Aloelite header"), 403
-        return None
-
     def _host_path(volume_id: str) -> str:
         return f"{host_mnt_prefix.rstrip('/')}/{volume_id}"
 
@@ -152,14 +144,14 @@ def create_app(
     def _require(volume_id: str) -> VolumeRecord | None:
         return store.get(volume_id)
 
-    def _client_guard(vid: str):
-        """Cookie mode: the request must hold a valid client session for this
-        volume. Guards whole-file surfaces (export, checkpoint) that bypass
-        the per-mount path. Returns an error response, or None to proceed."""
-        if not cookie_auth:
+    def _client_guard(rec: VolumeRecord):
+        """Gated volumes only: the request must hold a valid client session.
+        Guards whole-file surfaces (export, checkpoint) that bypass the
+        per-mount path. Returns an error response, or None to proceed."""
+        if not _gated(rec):
             return None
         try:
-            with registry.session(vid, token=_client_token(vid)):
+            with registry.session(rec.id, token=_client_token(rec.id)):
                 return None
         except (merr.NotMounted, merr.NotAuthorized):
             return jsonify(error="unlock required (no session for this client)"), 401
@@ -221,8 +213,6 @@ def create_app(
     # -- DELETE /volumes/<id> ----------------------------------------------
     @app.delete("/volumes/<vid>")
     def delete_volume(vid):
-        if (err := _csrf_or_403()) is not None:
-            return err
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
@@ -269,8 +259,6 @@ def create_app(
     # -- POST /volumes/<id>/mount ------------------------------------------
     @app.post("/volumes/<vid>/mount")
     def mount_volume(vid):
-        if (err := _csrf_or_403()) is not None:
-            return err
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
@@ -285,9 +273,9 @@ def create_app(
                     "(they end with the manager process)"
                 ), 400
             try:
-                if cookie_auth and registry.is_unlocked(rec.id):
-                    # additional client on an unlocked volume: its own engine
-                    # mount row (encrypted volumes re-prove the PIN here)
+                if _gated(rec) and registry.is_unlocked(rec.id):
+                    # additional client on an unlocked encrypted volume: its
+                    # own engine mount row, and the PIN is re-proven here
                     token = registry.attach(rec, pin_bytes)
                 else:
                     token = registry.unlock(rec, pin_bytes, store.sqlite_path_of(rec))
@@ -304,7 +292,7 @@ def create_app(
             rec.frontend = FRONTEND_DIRECT
             store.put(rec)
             resp = jsonify(id=vid, frontend=FRONTEND_DIRECT)
-            if cookie_auth:
+            if _gated(rec):
                 _set_session_cookie(resp, vid, token)
             return resp, 200
 
@@ -342,17 +330,18 @@ def create_app(
     # -- DELETE /volumes/<id>/mount ----------------------------------------
     @app.delete("/volumes/<vid>/mount")
     def unmount_volume(vid):
-        if (err := _csrf_or_403()) is not None:
-            return err
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
         try:
             if rec.frontend == FRONTEND_DIRECT:
-                token = _client_token(vid) if cookie_auth else None
+                token = _client_token(vid) if _gated(rec) else None
                 if token is not None and request.args.get("all") not in ("1", "true"):
                     # detach THIS client only; the volume stays unlocked for
-                    # the others (?all=1 forces the full teardown)
+                    # the others (?all=1 forces the full teardown). The cookie
+                    # is the credential here, so the CSRF header applies.
+                    if request.headers.get("X-Aloelite") != "1":
+                        return jsonify(error="missing X-Aloelite header"), 403
                     try:
                         last = registry.detach(rec, token)
                     except merr.NotAuthorized:
@@ -413,12 +402,10 @@ def create_app(
     # -- POST /volumes/<id>/checkpoint -------------------------------------
     @app.post("/volumes/<vid>/checkpoint")
     def checkpoint_volume(vid):
-        if (err := _csrf_or_403()) is not None:
-            return err
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
-        if (err := _client_guard(vid)) is not None:
+        if (err := _client_guard(rec)) is not None:
             return err
         checkpointed, remaining = _wal_checkpoint_truncate(store.sqlite_path_of(rec))
         if remaining:
@@ -478,7 +465,7 @@ def create_app(
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
-        if (err := _client_guard(vid)) is not None:
+        if (err := _client_guard(rec)) is not None:
             return err
         fsr = store.get_fs(rec.fs_id)
         return _export_response(
@@ -546,9 +533,10 @@ def create_app(
     # an ordinary (missing) name, so traversal safety is inherent. Engine
     # mtimes are ms epoch; the UI expects seconds.
     def _session(rec: VolumeRecord):
-        """The engine Mount this request may use: the client's own mount
-        (cookie mode; CSRF-checked) or the shared primary (auth off)."""
-        if not cookie_auth:
+        """The engine Mount this request may use: for a gated (encrypted,
+        cookie-mode) volume the client's own mount, CSRF-checked; otherwise
+        the shared primary -- plain volumes never need a cookie."""
+        if not _gated(rec):
             return registry.session(rec.id)
         _csrf_check()
         return registry.session(rec.id, token=_client_token(rec.id))
