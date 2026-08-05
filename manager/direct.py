@@ -172,11 +172,22 @@ class DirectSessionRegistry:
             if match is None:
                 raise NotAuthorized("no session for this client")
             mount = entry.clients.pop(match)
+            # ops.unmount tears down the CONNECTION-wide cipher iff the mount
+            # being closed is the connection's most recent (active_session)
+            # one -- correct for the engine's single-session model, wrong for
+            # ours: the surviving clients share this connection. Snapshot and
+            # restore, so which client detaches first stops mattering.
+            db = getattr(entry.fs, "db", None)
+            cipher = getattr(db, "cipher", None)
+            active = getattr(db, "active_session", None)
             try:
                 mount.unmount()
             except Exception:
                 pass  # already invalid/expired; the row is reapable by prune
             if entry.clients:
+                if db is not None:
+                    db.cipher = cipher
+                    db.active_session = active
                 return False
             with self._lock:
                 if self._sessions.get(record.id) is entry:

@@ -120,7 +120,9 @@ def create_app(
         resp.set_cookie(
             _cookie_name(vid),
             token,
-            path=f"/volumes/{vid}",
+            # /volumes (not /volumes/<vid>): the listing endpoint must see the
+            # cookie so it can answer "attached" truthfully per client
+            path="/volumes",
             httponly=True,
             samesite="Lax",
             secure=request.is_secure,
@@ -238,6 +240,21 @@ def create_app(
         return "", 204
 
     # -- GET /volumes -------------------------------------------------------
+    def _attached(rec: VolumeRecord) -> bool:
+        """Whether THIS request's client may use the volume as-is. Ungated
+        (plain, or auth off): attached == mounted. Gated: the cookie is
+        HttpOnly so the browser can't tell -- the server answers, and the UI
+        renders 'open' vs 'open elsewhere' truthfully."""
+        if not rec.mounted:
+            return False
+        if not _gated(rec):
+            return True
+        try:
+            with registry.session(rec.id, token=_client_token(rec.id)):
+                return True
+        except (merr.NotMounted, merr.NotAuthorized):
+            return False
+
     def _volume_item(rec: VolumeRecord) -> dict:
         item = {
             "id": rec.id,
@@ -246,6 +263,7 @@ def create_app(
             "encrypted": rec.encrypted,
             "mounted": rec.mounted,
             "frontend": rec.frontend,
+            "attached": _attached(rec),
         }
         if rec.mounted:
             item["mountpoint"] = rec.mountpoint
@@ -348,7 +366,7 @@ def create_app(
                         return jsonify(error="no session for this client"), 401
                     if not last:
                         resp = jsonify(locked=False)
-                        resp.delete_cookie(_cookie_name(vid), path=f"/volumes/{vid}")
+                        resp.delete_cookie(_cookie_name(vid), path="/volumes")
                         return resp, 200
                 else:
                     registry.lock(rec)

@@ -111,15 +111,17 @@
                   <span x-text="v.encrypted ? '\uD83D\uDD12' : '\uD83D\uDCC1'"></span>
                   <span class="fw-semibold" x-text="v.name"></span>
                   <span x-show="v.mounted" class="badge"
-                        :class="v.frontend === 'fuse' ? 'bg-info text-dark' : 'bg-success'"
-                        x-text="v.frontend === 'fuse' ? 'FUSE' : 'open'"></span>
+                        :class="v.frontend === 'fuse' ? 'bg-info text-dark'
+                               : (v.attached === false ? 'bg-secondary' : 'bg-success')"
+                        x-text="v.frontend === 'fuse' ? 'FUSE'
+                               : (v.attached === false ? 'open elsewhere' : 'open')"></span>
                   <span x-show="v.auto_mount" class="badge bg-info text-dark">auto</span>
                 </div>
                 <div class="d-flex gap-2 align-items-center">
                   <button class="btn btn-sm btn-primary" @click="openVol(v)" :disabled="v._busy">
                     <span x-text="v._busy ? '…' : 'Open'"></span>
                   </button>
-                  <button x-show="v.mounted && v.frontend === 'direct'"
+                  <button x-show="v.mounted && v.frontend === 'direct' && v.attached !== false"
                           class="btn btn-sm btn-outline-warning" @click="lockVol(v)"
                           :disabled="v._busy">Lock</button>
                   <div class="dropdown">
@@ -641,16 +643,12 @@ function app() {
     // -- Open / Lock (the simple path) -------------------------------------
     async openVol(v) {
       if (v.mounted) {
-        if (v.encrypted) {
-          // this browser may not hold a session (cookie is HttpOnly, so
-          // probe): 401 -> straight to the PIN modal, no explorer flash
-          const probe = await this.api('GET',
-            `/volumes/${v.id}/files?path=${encodeURIComponent('/')}`);
-          if (probe.status === 401) {
-            this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
-            this._modal('unlockModal').show();
-            return;
-          }
+        if (v.attached === false) {
+          // "open elsewhere": this browser has no session -- the way in is
+          // the PIN, straight to the modal, no explorer flash
+          this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
+          this._modal('unlockModal').show();
+          return;
         }
         this.openExplorer(v); return;
       }

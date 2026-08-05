@@ -195,6 +195,59 @@ def test_each_encrypted_client_gets_its_own_mount(capp):
     assert c2.get(f"/volumes/{vid}/files?path=/").status_code == 409
 
 
+def test_detach_preserves_surviving_clients_cipher(capp):
+    """Regression: ops.unmount clears the CONNECTION-wide cipher iff the
+    closing mount is the connection's most recent one, so B (attached after
+    A) detaching used to strip A's encryption key mid-session --
+    'encryption_required: ... no encryption key installed' -- while the
+    reverse order worked. Detach order must not matter."""
+    vid = _mk_volume(capp, name="vault", pin="s3cret")
+    c1, _ = _unlock(capp, vid, pin="s3cret")
+    c2, _ = _unlock(capp, vid, pin="s3cret")  # most recent = c2's mount
+    body = {"file": (BytesIO(b"before"), "a.txt")}
+    r = c1.post(
+        f"/volumes/{vid}/files/upload?path=/",
+        data=body,
+        content_type="multipart/form-data",
+        headers=_H,
+    )
+    assert r.status_code == 201
+    # the failing order: the most-recently-attached client detaches first
+    r = c2.delete(f"/volumes/{vid}/mount", headers=_H)
+    assert r.status_code == 200 and r.json == {"locked": False}
+    # c1 must still hold a working cipher: write AND read back
+    body = {"file": (BytesIO(b"after"), "b.txt")}
+    r = c1.post(
+        f"/volumes/{vid}/files/upload?path=/",
+        data=body,
+        content_type="multipart/form-data",
+        headers=_H,
+    )
+    assert r.status_code == 201, r.json
+    r = c1.get(f"/volumes/{vid}/files/download?path=/b.txt&inline=1")
+    assert r.status_code == 200 and r.data == b"after"
+
+
+def test_listing_reports_per_client_attachment(capp):
+    """The badge's source of truth: gated volumes answer attached per
+    REQUESTER; plain volumes are attached whenever mounted."""
+    pv = _mk_volume(capp, name="plain")
+    ev = _mk_volume(capp, name="vault", pin="s3cret")
+    c1, _ = _unlock(capp, pv)
+    c1.post(
+        f"/volumes/{ev}/mount", json={"mode": "direct", "pin": "s3cret"}, headers=_H
+    )
+    stranger = capp.test_client()
+
+    def items(c):
+        return {v["id"]: v for v in c.get("/volumes").json}
+
+    mine, theirs = items(c1), items(stranger)
+    assert mine[pv]["attached"] is True and theirs[pv]["attached"] is True
+    assert mine[ev]["attached"] is True
+    assert theirs[ev]["attached"] is False  # mounted, but not for THIS client
+
+
 def test_encrypted_attach_reproves_pin(capp):
     vid = _mk_volume(capp, name="vault", pin="s3cret")
     c1, r1 = _unlock(capp, vid, pin="s3cret")
