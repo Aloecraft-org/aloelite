@@ -532,6 +532,9 @@ def create_app(
                 headers={
                     "Content-Length": str(size),
                     "Content-Disposition": f'{disp}; filename="{name}"',
+                    # volume content (pastes may hold secrets) must never
+                    # persist in a browser/proxy cache
+                    "Cache-Control": "no-store",
                 },
             )
 
@@ -639,7 +642,11 @@ def create_app(
             return err
         _rec, _root, p = ctx
         inline = request.args.get("inline") in ("1", "true")
-        return send_file(p, as_attachment=not inline, download_name=os.path.basename(p))
+        resp = send_file(p, as_attachment=not inline, download_name=os.path.basename(p))
+        # volume content (pastes may hold secrets) must never persist in a
+        # browser/proxy cache
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     @app.post("/volumes/<vid>/files/upload")
     def upload_file(vid):

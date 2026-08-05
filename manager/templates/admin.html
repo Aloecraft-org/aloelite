@@ -4,9 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Aloelite — volume manager</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
+  <!-- Vendored (manager/static): the manager must be fully self-contained.
+       CDN references would leak page loads off a private deployment and
+       break the UI where the VPN'd client has no other egress. -->
+  <link href="{{ url_for('static', filename='bootstrap.min.css') }}" rel="stylesheet">
+  <script defer src="{{ url_for('static', filename='alpine.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='bootstrap.bundle.min.js') }}"></script>
   <style>
     body { background: #f8f9fa; }
     .vol-card { transition: box-shadow .15s; }
@@ -336,6 +339,8 @@
             <label class="btn btn-sm btn-outline-primary mb-0">
               Upload<input type="file" hidden multiple @change="expUpload($event)">
             </label>
+            <button class="btn btn-sm btn-outline-primary" @click="openPastes()">Pastes</button>
+            <button class="btn btn-sm btn-outline-secondary" @click="edNew()">New file</button>
             <button class="btn btn-sm btn-outline-secondary" @click="expMkdir()">New folder</button>
             <button class="btn btn-sm btn-outline-secondary" @click="loadFiles()" :disabled="expBusy">
               <span :class="expBusy ? 'spin' : ''">&#8635;</span>
@@ -374,6 +379,9 @@
                 <td class="text-end" x-text="e.type === 'file' ? fmtBytes(e.size) : ''"></td>
                 <td x-text="fmtTime(e.mtime)"></td>
                 <td class="text-end text-nowrap">
+                  <button x-show="e.type === 'file' && canEdit(e.name)"
+                          class="btn btn-sm btn-outline-primary py-0"
+                          title="Edit" @click="edOpen(e)">Edit</button>
                   <button class="btn btn-sm btn-outline-secondary py-0"
                           title="Rename" @click="expRename(e)">&#9998;</button>
                   <button class="btn btn-sm btn-outline-secondary py-0"
@@ -431,6 +439,81 @@
   </div>
 </div>
 
+<!-- text editor modal -->
+<div class="modal fade" id="edModal" tabindex="-1" data-bs-backdrop="static" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title">
+          <span x-text="edName"></span>
+          <span class="text-muted" x-show="edText !== edLoaded" x-cloak>&nbsp;&#9679; unsaved</span>
+        </h6>
+        <div class="d-flex gap-2 align-items-center">
+          <button class="btn btn-sm btn-primary" @click="edSave()"
+                  :disabled="edBusy || edText === edLoaded">
+            <span x-show="!edBusy">Save</span><span x-show="edBusy" class="spin">&#8635;</span>
+          </button>
+          <button type="button" class="btn-close btn-sm" @click="edClose()"></button>
+        </div>
+      </div>
+      <div class="modal-body p-2 d-flex flex-column">
+        <div x-show="edErr" x-cloak class="alert alert-danger py-1 px-2 small mb-2" x-text="edErr"></div>
+        <textarea class="form-control font-monospace flex-grow-1" x-model="edText"
+                  spellcheck="false" autocapitalize="off" autocomplete="off"
+                  style="min-height:60vh; font-size:.85rem; resize:none;"
+                  @keydown.ctrl.s.prevent="edSave()" @keydown.meta.s.prevent="edSave()"></textarea>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- paste bin modal: phone-to-desktop (and back) text drop -->
+<div class="modal fade" id="pbModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title">Pastes — <span x-text="expVol?.name"></span></h6>
+        <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div x-show="pbErr" x-cloak class="alert alert-danger py-1 px-2 small" x-text="pbErr"></div>
+        <div class="mb-3">
+          <textarea class="form-control font-monospace" x-model="pbText" rows="4"
+                    placeholder="Paste text here…" style="font-size:.85rem;"></textarea>
+          <div class="d-flex justify-content-end mt-2">
+            <button class="btn btn-sm btn-primary" @click="pbSave()"
+                    :disabled="pbBusy || !pbText.trim()">Save paste</button>
+          </div>
+        </div>
+        <table class="table table-sm table-hover align-middle mb-0" style="font-size:.85rem;">
+          <tbody>
+            <template x-for="e in pbEntries" :key="e.name">
+              <tr>
+                <td class="text-truncate" style="max-width:0; width:60%;">
+                  <span class="text-muted" x-text="fmtTime(e.mtime) + ' — '"></span>
+                  <span x-text="e.preview || e.name"></span>
+                </td>
+                <td class="text-end text-nowrap">
+                  <button class="btn btn-sm btn-outline-primary py-0"
+                          @click="pbCopy(e)">Copy</button>
+                  <button class="btn btn-sm btn-outline-secondary py-0"
+                          @click="edOpenPath('/pastes', e.name); "
+                          title="Open in editor">Edit</button>
+                  <button class="btn btn-sm btn-outline-danger py-0"
+                          @click="pbDelete(e)">&#128465;</button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="!pbEntries.length && !pbBusy">
+              <td colspan="2" class="text-muted text-center py-3">No pastes yet</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 function app() {
   return {
@@ -457,6 +540,11 @@ function app() {
     toasts: [],
     pvName: '', pvUrl: '', pvKind: '',
     preflightWarnings: [],
+
+    // editor: path is the file's FULL path; dir is where a save uploads to
+    edName: '', edDir: '/', edText: '', edLoaded: '', edBusy: false, edErr: '',
+    // paste bin: newest-first entries of the volume's /pastes folder
+    pbText: '', pbEntries: [], pbBusy: false, pbErr: '',
 
     _modal(id) { return bootstrap.Modal.getOrCreateInstance(document.getElementById(id)); },
 
@@ -814,6 +902,162 @@ function app() {
       this.pvUrl = `${this.apiBase}/volumes/${this.expVol.id}/files/download` +
         `?path=${encodeURIComponent(this.expJoin(e.name))}&inline=1`;
       this._modal('pvModal').show();
+    },
+
+    // -- text editor --------------------------------------------------------
+    canEdit(name) {
+      // text-ish extensions, or none at all (Makefile, LICENSE, dotfiles)
+      return /\.(txt|md|log|json|csv|ya?ml|py|js|ts|html?|css|sh|toml|ini|xml|conf|cfg|rs|go|c|h|sql|env)$/i.test(name)
+        || !/\./.test(name.replace(/^\./, ''));
+    },
+
+    _fileUrl(dir, name, inline) {
+      const p = (dir === '/' ? '' : dir) + '/' + name;
+      return `${this.apiBase}/volumes/${this.expVol.id}/files/download` +
+        `?path=${encodeURIComponent(p)}${inline ? '&inline=1' : ''}`;
+    },
+
+    async _fetchText(dir, name) {
+      const r = await fetch(this._fileUrl(dir, name, true));
+      if (!r.ok) throw new Error(`load failed (${r.status})`);
+      return await r.text();
+    },
+
+    edOpen(e) {
+      if (e.size > 2 * 1024 * 1024 &&
+          !confirm(`${e.name} is ${this.fmtBytes(e.size)} — open anyway?`)) return;
+      this.edOpenPath(this.expPath, e.name);
+    },
+
+    async edOpenPath(dir, name) {
+      this.edErr = ''; this.edBusy = true;
+      this.edName = name; this.edDir = dir;
+      try {
+        this.edText = this.edLoaded = await this._fetchText(dir, name);
+        this._modal('edModal').show();
+      } catch (err) { this.toast(`Could not open ${name}: ${err.message}`, false); }
+      this.edBusy = false;
+    },
+
+    edNew() {
+      const name = prompt('File name:');
+      if (!name) return;
+      this.edErr = ''; this.edName = name; this.edDir = this.expPath;
+      this.edText = ''; this.edLoaded = null;  // null: Save enabled even when empty
+      this._modal('edModal').show();
+    },
+
+    async edSave() {
+      if (this.edBusy || this.edText === this.edLoaded) return;
+      this.edBusy = true; this.edErr = '';
+      try {
+        const fd = new FormData();
+        fd.append('file', new File([this.edText], this.edName, { type: 'text/plain' }));
+        const r = await fetch(
+          `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(this.edDir)}`,
+          { method: 'POST', body: fd });
+        if (!r.ok) {
+          const d = await r.json().catch(() => null);
+          this.edErr = d?.error || `save failed (${r.status})`;
+        } else {
+          this.edLoaded = this.edText;
+          this.toast(`Saved ${this.edName}`);
+          this.loadFiles();
+        }
+      } catch { this.edErr = 'Could not reach API.'; }
+      this.edBusy = false;
+    },
+
+    edClose() {
+      if (this.edText !== this.edLoaded &&
+          !confirm('Discard unsaved changes?')) return;
+      this._modal('edModal').hide();
+    },
+
+    // -- paste bin (phone <-> desktop text drop; lives in /pastes) ----------
+    async openPastes() {
+      this.pbErr = ''; this.pbText = '';
+      this._modal('pbModal').show();
+      await this.pbRefresh();
+    },
+
+    async pbRefresh() {
+      this.pbBusy = true; this.pbEntries = [];
+      try {
+        const r = await this.api('GET',
+          `/volumes/${this.expVol.id}/files?path=${encodeURIComponent('/pastes')}`);
+        if (r.ok) {
+          const files = r.data.filter(e => e.type === 'file')
+            .sort((a, b) => b.mtime - a.mtime).slice(0, 50);
+          // inline previews for the newest few small ones
+          for (const e of files.slice(0, 10)) {
+            if (e.size <= 16384) {
+              try {
+                const t = await this._fetchText('/pastes', e.name);
+                e.preview = t.slice(0, 120).replace(/\s+/g, ' ');
+              } catch { /* name-only row */ }
+            }
+          }
+          this.pbEntries = files;
+        }
+        // 404/409: no /pastes folder yet — an empty list is the right answer
+      } catch { this.pbErr = 'Could not reach API.'; }
+      this.pbBusy = false;
+    },
+
+    async pbSave() {
+      if (!this.pbText.trim()) return;
+      this.pbBusy = true; this.pbErr = '';
+      try {
+        // best-effort mkdir; 409/500 "exists" is fine
+        await this.api('POST',
+          `/volumes/${this.expVol.id}/files/mkdir?path=${encodeURIComponent('/pastes')}`);
+        const ts = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+        const fd = new FormData();
+        fd.append('file', new File([this.pbText], `paste-${ts}.txt`, { type: 'text/plain' }));
+        const r = await fetch(
+          `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent('/pastes')}`,
+          { method: 'POST', body: fd });
+        if (!r.ok) {
+          const d = await r.json().catch(() => null);
+          this.pbErr = d?.error || `save failed (${r.status})`;
+        } else {
+          this.pbText = '';
+          this.toast('Paste saved');
+          await this.pbRefresh();
+        }
+      } catch { this.pbErr = 'Could not reach API.'; }
+      this.pbBusy = false;
+    },
+
+    async pbCopy(e) {
+      try {
+        const t = await this._fetchText('/pastes', e.name);
+        await this.copyText(t);
+        this.toast('Copied to clipboard');
+      } catch { this.toast('Copy failed', false); }
+    },
+
+    async pbDelete(e) {
+      const r = await this.api('DELETE',
+        `/volumes/${this.expVol.id}/files?path=${encodeURIComponent('/pastes/' + e.name)}`);
+      if (!r.ok) this.toast(r.data?.error || 'delete failed', false);
+      await this.pbRefresh();
+    },
+
+    async copyText(t) {
+      // navigator.clipboard needs a secure context; a VPN'd http:// origin
+      // isn't one, so fall back to the selection-based path
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(t);
+        return;
+      }
+      const ta = document.createElement('textarea');
+      ta.value = t;
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      try { document.execCommand('copy'); } finally { ta.remove(); }
     },
 
     async expUpload(ev) {
