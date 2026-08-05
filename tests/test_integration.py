@@ -64,8 +64,14 @@ def test_full_request_cycle(tmp_path):
         join_timeout=0.3,
         poll_interval=0.02,
     )
+    # auth pinned off: this test covers the FUSE supervisor cycle, not client
+    # sessions (manager/test_web_files.py owns the cookie-mode contract)
     app = create_app(
-        store, sup, aloelite_root=tmp_path, host_mnt_prefix="/mnt/aloelite"
+        store,
+        sup,
+        aloelite_root=tmp_path,
+        host_mnt_prefix="/mnt/aloelite",
+        auth_mode="off",
     )
     c = app.test_client()
 

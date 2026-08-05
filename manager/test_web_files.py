@@ -35,7 +35,7 @@ def client(tmp_path):
     )
     registry.unlock(rec, None, str(tmp_path / "vol.sqlite"))  # creates volume
     store.put(rec)
-    app = create_app(store, supervisor=None, registry=registry)
+    app = create_app(store, supervisor=None, registry=registry, auth_mode="off")
     app.testing = True
     try:
         yield app.test_client()
@@ -195,11 +195,37 @@ def test_encrypted_attach_reproves_pin(capp):
     assert c3.get(f"/volumes/{vid}/files?path=/").status_code == 200
 
 
-def test_off_mode_unchanged(client):
-    """AUTH off (the default): no cookie, no CSRF header, everything works --
-    aloeforge and existing scripts see no behavior change."""
+def test_off_mode_still_available(client):
+    """ALOELITE_AUTH=off: no cookie, no CSRF header, everything works --
+    the legacy escape hatch for trusted networks and cookie-less scripts."""
     assert _upload(client, "/", "f.txt", b"x").status_code == 201
     assert client.get("/volumes/v1/files?path=/").status_code == 200
+
+
+def test_default_is_cookie_mode(tmp_path, monkeypatch):
+    """With no auth_mode argument and no env override, create_app comes up in
+    cookie mode: anyone may mount, but content needs the minted session."""
+    monkeypatch.delenv("ALOELITE_AUTH", raising=False)
+    store = JsonVolumeStore(str(tmp_path / "s.json"))
+    registry = DirectSessionRegistry()
+    app = create_app(
+        store, supervisor=None, registry=registry, aloelite_root=str(tmp_path)
+    )
+    app.testing = True
+    try:
+        vid = _mk_volume(app)
+        c, r = _unlock(app, vid)  # any client may mount/unlock
+        assert r.status_code == 200
+        assert c.get(f"/volumes/{vid}/files?path=/").status_code == 200
+        stranger = app.test_client()
+        assert stranger.get(f"/volumes/{vid}/files?path=/").status_code == 401
+        # ...and the stranger can self-serve an attach (plain volume)
+        r2 = stranger.post(f"/volumes/{vid}/mount", json={"mode": "direct"}, headers=_H)
+        assert r2.status_code == 200
+        assert stranger.get(f"/volumes/{vid}/files?path=/").status_code == 200
+    finally:
+        registry.shutdown()
+        store.close()
 
 
 def test_admin_page_is_self_contained(client):

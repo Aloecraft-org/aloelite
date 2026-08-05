@@ -50,6 +50,15 @@ def main() -> int:
     )
     ap.add_argument("--root", help="data directory (default ~/.aloelite)")
     ap.add_argument(
+        "--auth",
+        choices=["cookie", "off"],
+        help="client auth for volume content (default cookie: each browser "
+        "attaches its own session; anyone may mount/unlock, encrypted "
+        "volumes prove the PIN per device). 'off' restores the legacy "
+        "any-client-may-use-an-unlocked-volume behavior for trusted "
+        "networks and cookie-less scripts.",
+    )
+    ap.add_argument(
         "--fuse",
         action="store_true",
         help="enable FUSE provisioning mode (container-grade preflight)",
@@ -62,6 +71,8 @@ def main() -> int:
         os.environ["ALOELITE_API_HOST"] = args.host
     if args.root:
         os.environ["ALOELITE_ROOT"] = args.root
+    if args.auth:
+        os.environ["ALOELITE_AUTH"] = args.auth
     if args.fuse:
         os.environ["ALOELITE_DIRECT_ONLY"] = "0"
     os.environ.setdefault("ALOELITE_DIRECT_ONLY", "1")

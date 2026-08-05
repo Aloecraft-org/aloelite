@@ -89,14 +89,20 @@ def create_app(
     app = Flask(__name__)
     registry = registry or DirectSessionRegistry()
     app.config["DIRECT_REGISTRY"] = registry  # reachable for shutdown/tests
-    # "off" (default): today's behavior -- an unlocked volume is usable by any
-    # client that can reach the manager (fine behind a VPN, not on a DMZ).
-    # "cookie": every client holds its own session cookie, backed by ITS OWN
-    # engine mount row (per-client tokens, TTLs, lock attribution, and a
-    # mounts listing that reads as an audit of who is attached). Applies to
-    # the direct frontend; a FUSE-frontend mountpoint is served by the kernel
-    # to local processes and has no per-HTTP-client identity to check.
-    auth_mode = auth_mode or os.environ.get("ALOELITE_AUTH", "off")
+    # "cookie" (default): every client holds its own session cookie, backed
+    # by ITS OWN engine mount row (per-client tokens, lock attribution, and a
+    # mounts listing that reads as an audit of who is attached). Mounting and
+    # unlocking stay open to everyone -- the mount endpoint needs no cookie,
+    # so any client may attach; a plain volume attaches silently, an
+    # encrypted one proves the PIN per device. The cookie gates USING the
+    # volume (files, export, checkpoint), which is what makes a manager on an
+    # exposed network not be a free filesystem. Applies to the direct
+    # frontend; a FUSE-frontend mountpoint is served by the kernel to local
+    # processes and has no per-HTTP-client identity to check.
+    # "off": legacy behavior -- an unlocked volume is usable by any client
+    # that can reach the manager. For trusted single-user networks and
+    # cookie-less scripting.
+    auth_mode = auth_mode or os.environ.get("ALOELITE_AUTH", "cookie")
     if auth_mode not in ("off", "cookie"):
         raise ValueError(f"ALOELITE_AUTH must be 'off' or 'cookie', not {auth_mode!r}")
     cookie_auth = auth_mode == "cookie"

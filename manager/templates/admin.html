@@ -540,6 +540,7 @@ function app() {
     toasts: [],
     pvName: '', pvUrl: '', pvKind: '',
     preflightWarnings: [],
+    _autoAttached: false,
 
     // editor: path is the file's FULL path; dir is where a save uploads to
     edName: '', edDir: '/', edText: '', edLoaded: '', edBusy: false, edErr: '',
@@ -803,8 +804,24 @@ function app() {
     // -- file explorer ------------------------------------------------------
     openExplorer(v) {
       this.expVol = v; this.expPath = '/'; this.expEntries = []; this.expErr = '';
+      this._autoAttached = false;  // one auto-attach attempt per open
       this._modal('expModal').show();
       this.loadFiles();
+    },
+
+    // Cookie mode: the volume is unlocked but THIS browser has no session.
+    // Plain volume: attach silently (mount endpoint mints our cookie).
+    // Encrypted: route to the PIN modal -- attaching IS proving the key.
+    async attachVol(v) {
+      if (v.encrypted) {
+        this._modal('expModal').hide();
+        this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
+        this._modal('unlockModal').show();
+        return;
+      }
+      const r = await this.api('POST', `/volumes/${v.id}/mount`, { mode: 'direct' });
+      if (r.ok) await this.loadFiles();
+      else this.expErr = r.data?.error || 'Could not attach to this volume.';
     },
 
     expJoin(name) {
@@ -828,7 +845,20 @@ function app() {
         const r = await this.api('GET',
           `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expPath)}`);
         if (r.ok) this.expEntries = r.data;
-        else if (r.status === 409 || r.status === 401) {
+        else if (r.status === 401) {
+          // Unlocked volume, but this browser holds no session: attach ONCE
+          // (silent for plain volumes, PIN modal for encrypted). The guard
+          // flag stops a failed attach from looping through here forever.
+          this.expEntries = [];
+          if (!this._autoAttached) {
+            this._autoAttached = true;
+            this.expBusy = false;
+            await this.attachVol(this.expVol);
+            return;
+          }
+          this.expErr = 'This browser has no session for this volume — unlock it.';
+        }
+        else if (r.status === 409) {
           // Session gone (e.g. manager restarted): route back into Open.
           this.expEntries = [];
           this._modal('expModal').hide();
