@@ -84,10 +84,58 @@ def create_app(
     registry: DirectSessionRegistry | None = None,
     aloelite_root: str = ALOELITE_ROOT,
     host_mnt_prefix: str = HOST_MNT_PREFIX,
+    auth_mode: str | None = None,
 ) -> Flask:
     app = Flask(__name__)
     registry = registry or DirectSessionRegistry()
     app.config["DIRECT_REGISTRY"] = registry  # reachable for shutdown/tests
+    # "off" (default): today's behavior -- an unlocked volume is usable by any
+    # client that can reach the manager (fine behind a VPN, not on a DMZ).
+    # "cookie": every client holds its own session cookie, backed by ITS OWN
+    # engine mount row (per-client tokens, TTLs, lock attribution, and a
+    # mounts listing that reads as an audit of who is attached). Applies to
+    # the direct frontend; a FUSE-frontend mountpoint is served by the kernel
+    # to local processes and has no per-HTTP-client identity to check.
+    auth_mode = auth_mode or os.environ.get("ALOELITE_AUTH", "off")
+    if auth_mode not in ("off", "cookie"):
+        raise ValueError(f"ALOELITE_AUTH must be 'off' or 'cookie', not {auth_mode!r}")
+    cookie_auth = auth_mode == "cookie"
+
+    def _cookie_name(vid: str) -> str:
+        return f"aloe_m_{vid}"
+
+    def _client_token(vid: str) -> str | None:
+        return request.cookies.get(_cookie_name(vid))
+
+    def _set_session_cookie(resp, vid: str, token: str):
+        resp.set_cookie(
+            _cookie_name(vid),
+            token,
+            path=f"/volumes/{vid}",
+            httponly=True,
+            samesite="Lax",
+            secure=request.is_secure,
+        )
+        return resp
+
+    def _csrf_check() -> None:
+        # Cookie auth resurrects CSRF (bearer-in-JS never had it). SameSite=Lax
+        # covers modern browsers; requiring a custom header the same-origin UI
+        # always sends closes it entirely -- a cross-site form can't set one.
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            if request.headers.get("X-Aloelite") != "1":
+                raise merr.CsrfRejected("missing X-Aloelite header")
+
+    def _csrf_or_403():
+        """Inline CSRF gate for mutating endpoints outside _direct_call.
+        Returns an error response to hand back, or None to proceed."""
+        if not cookie_auth:
+            return None
+        try:
+            _csrf_check()
+        except merr.CsrfRejected:
+            return jsonify(error="missing X-Aloelite header"), 403
+        return None
 
     def _host_path(volume_id: str) -> str:
         return f"{host_mnt_prefix.rstrip('/')}/{volume_id}"
@@ -97,6 +145,18 @@ def create_app(
 
     def _require(volume_id: str) -> VolumeRecord | None:
         return store.get(volume_id)
+
+    def _client_guard(vid: str):
+        """Cookie mode: the request must hold a valid client session for this
+        volume. Guards whole-file surfaces (export, checkpoint) that bypass
+        the per-mount path. Returns an error response, or None to proceed."""
+        if not cookie_auth:
+            return None
+        try:
+            with registry.session(vid, token=_client_token(vid)):
+                return None
+        except (merr.NotMounted, merr.NotAuthorized):
+            return jsonify(error="unlock required (no session for this client)"), 401
 
     # -- POST /volumes ------------------------------------------------------
     @app.post("/volumes")
@@ -155,6 +215,8 @@ def create_app(
     # -- DELETE /volumes/<id> ----------------------------------------------
     @app.delete("/volumes/<vid>")
     def delete_volume(vid):
+        if (err := _csrf_or_403()) is not None:
+            return err
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
@@ -201,6 +263,8 @@ def create_app(
     # -- POST /volumes/<id>/mount ------------------------------------------
     @app.post("/volumes/<vid>/mount")
     def mount_volume(vid):
+        if (err := _csrf_or_403()) is not None:
+            return err
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
@@ -215,9 +279,16 @@ def create_app(
                     "(they end with the manager process)"
                 ), 400
             try:
-                registry.unlock(rec, pin_bytes, store.sqlite_path_of(rec))
+                if cookie_auth and registry.is_unlocked(rec.id):
+                    # additional client on an unlocked volume: its own engine
+                    # mount row (encrypted volumes re-prove the PIN here)
+                    token = registry.attach(rec, pin_bytes)
+                else:
+                    token = registry.unlock(rec, pin_bytes, store.sqlite_path_of(rec))
             except merr.AlreadyMounted:
                 return jsonify(error="already mounted"), 409
+            except merr.NotMounted:
+                return jsonify(error="volume is not unlocked"), 409
             except (merr.BadPin, merr.EncryptionMismatch) as e:
                 return jsonify(error=str(e) or e.__class__.__name__), 400
             except merr.MountFailed as e:
@@ -226,7 +297,10 @@ def create_app(
             rec.mountpoint = None
             rec.frontend = FRONTEND_DIRECT
             store.put(rec)
-            return jsonify(id=vid, frontend=FRONTEND_DIRECT), 200
+            resp = jsonify(id=vid, frontend=FRONTEND_DIRECT)
+            if cookie_auth:
+                _set_session_cookie(resp, vid, token)
+            return resp, 200
 
         mount_name = body.get("mount_name") or rec.id
         try:
@@ -262,12 +336,27 @@ def create_app(
     # -- DELETE /volumes/<id>/mount ----------------------------------------
     @app.delete("/volumes/<vid>/mount")
     def unmount_volume(vid):
+        if (err := _csrf_or_403()) is not None:
+            return err
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
         try:
             if rec.frontend == FRONTEND_DIRECT:
-                registry.lock(rec)
+                token = _client_token(vid) if cookie_auth else None
+                if token is not None and request.args.get("all") not in ("1", "true"):
+                    # detach THIS client only; the volume stays unlocked for
+                    # the others (?all=1 forces the full teardown)
+                    try:
+                        last = registry.detach(rec, token)
+                    except merr.NotAuthorized:
+                        return jsonify(error="no session for this client"), 401
+                    if not last:
+                        resp = jsonify(locked=False)
+                        resp.delete_cookie(_cookie_name(vid), path=f"/volumes/{vid}")
+                        return resp, 200
+                else:
+                    registry.lock(rec)
             else:
                 supervisor.unmount(rec)
         except merr.NotMounted:
@@ -318,9 +407,13 @@ def create_app(
     # -- POST /volumes/<id>/checkpoint -------------------------------------
     @app.post("/volumes/<vid>/checkpoint")
     def checkpoint_volume(vid):
+        if (err := _csrf_or_403()) is not None:
+            return err
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
+        if (err := _client_guard(vid)) is not None:
+            return err
         checkpointed, remaining = _wal_checkpoint_truncate(store.sqlite_path_of(rec))
         if remaining:
             app.logger.warning("checkpoint %s left %d WAL frames", vid, remaining)
@@ -379,6 +472,8 @@ def create_app(
         rec = _require(vid)
         if rec is None:
             return jsonify(error="no such volume"), 404
+        if (err := _client_guard(vid)) is not None:
+            return err
         fsr = store.get_fs(rec.fs_id)
         return _export_response(
             store.sqlite_path_of(rec), _export_name(fsr.display_name), vid
@@ -444,11 +539,26 @@ def create_app(
     # volume-relative strings the UI already sends; resolve() treats '..' as
     # an ordinary (missing) name, so traversal safety is inherent. Engine
     # mtimes are ms epoch; the UI expects seconds.
+    def _session(rec: VolumeRecord):
+        """The engine Mount this request may use: the client's own mount
+        (cookie mode; CSRF-checked) or the shared primary (auth off)."""
+        if not cookie_auth:
+            return registry.session(rec.id)
+        _csrf_check()
+        return registry.session(rec.id, token=_client_token(rec.id))
+
     def _direct_call(fn):
         from aloelite import errors as aerr  # lazy (mirrors other aloelite use)
 
         try:
             return fn()
+        except merr.NotAuthorized:
+            return jsonify(error="unlock required (no session for this client)"), 401
+        except merr.CsrfRejected:
+            return jsonify(error="missing X-Aloelite header"), 403
+        except aerr.MountInvalid:
+            # this client's mount expired mid-session; re-attach to continue
+            return jsonify(error="session expired; unlock again"), 401
         except merr.NotMounted:
             return jsonify(error="volume is not unlocked"), 409
         except aerr.NotFound:
@@ -469,7 +579,7 @@ def create_app(
 
     def _direct_list(rec: VolumeRecord):
         def run():
-            with registry.session(rec.id) as m:
+            with _session(rec) as m:
                 out = []
                 for e in m.list(_req_path()):
                     if not e.visible:
@@ -500,7 +610,7 @@ def create_app(
             # cost for now.) Werkzeug closes the generator on disconnect, so
             # the stack always unwinds.
             stack = ExitStack()
-            m = stack.enter_context(registry.session(rec.id))
+            m = stack.enter_context(_session(rec))
             try:
                 size = m.stat(path).size or 0
                 r = stack.enter_context(m.open_read(path))
@@ -551,7 +661,7 @@ def create_app(
         dst = f"{base}/{name}"
 
         def run():
-            with registry.session(rec.id) as m:
+            with _session(rec) as m:
                 # TRUNCATE creates a missing entry; sequential writes ride the
                 # engine's bounded-memory streaming path.
                 with m.open_write(dst) as w:
@@ -567,7 +677,7 @@ def create_app(
             return jsonify(error="path is required"), 400
 
         def run():
-            with registry.session(rec.id) as m:
+            with _session(rec) as m:
                 m.mkdir(path, parents=True)  # parents matches os.makedirs
             return jsonify(path=path), 201
 
@@ -579,7 +689,7 @@ def create_app(
             return jsonify(error="refusing to delete the volume root"), 400
 
         def run():
-            with registry.session(rec.id) as m:
+            with _session(rec) as m:
                 if m.stat(path).type.value == "container":
                     m.remove_recursive(path)
                 else:
@@ -718,7 +828,7 @@ def create_app(
         if rec.frontend == FRONTEND_DIRECT:
 
             def run():
-                with registry.session(rec.id) as m:
+                with _session(rec) as m:
                     if op == "copy":
                         m.copy(src, dst)
                     else:

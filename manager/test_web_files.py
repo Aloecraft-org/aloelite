@@ -87,6 +87,121 @@ def test_paste_flow(client):
     assert client.get("/volumes/v1/files?path=/pastes").json == []
 
 
+# --------------------------------------------------------------------------
+# Cookie-auth mode (ALOELITE_AUTH=cookie): per-client engine mounts
+# --------------------------------------------------------------------------
+_H = {"X-Aloelite": "1"}  # the CSRF header the UI sends on every mutation
+
+
+@pytest.fixture
+def capp(tmp_path):
+    store = JsonVolumeStore(str(tmp_path / "store.json"))
+    registry = DirectSessionRegistry()
+    app = create_app(
+        store,
+        supervisor=None,
+        registry=registry,
+        aloelite_root=str(tmp_path),
+        auth_mode="cookie",
+    )
+    app.testing = True
+    try:
+        yield app
+    finally:
+        registry.shutdown()
+        store.close()
+
+
+def _mk_volume(app, name="vol", pin=None):
+    c = app.test_client()
+    body = {"name": name}
+    if pin:
+        body.update(encrypted=True, pin=pin)
+    r = c.post("/volumes", json=body, headers=_H)
+    assert r.status_code == 201, r.json
+    return r.json["id"]
+
+
+def _unlock(app, vid, pin=None, headers=_H):
+    """A fresh browser: its own test client (cookie jar) + mount request."""
+    c = app.test_client()
+    body = {"mode": "direct"}
+    if pin:
+        body["pin"] = pin
+    r = c.post(f"/volumes/{vid}/mount", json=body, headers=headers)
+    return c, r
+
+
+def test_cookie_required_for_files(capp):
+    vid = _mk_volume(capp)
+    c1, r = _unlock(capp, vid)
+    assert r.status_code == 200
+    # the unlocking client has the cookie; a stranger does not
+    assert c1.get(f"/volumes/{vid}/files?path=/").status_code == 200
+    stranger = capp.test_client()
+    assert stranger.get(f"/volumes/{vid}/files?path=/").status_code == 401
+    # export is a whole-file surface: same rule
+    assert stranger.get(f"/volumes/{vid}/export").status_code == 401
+    assert c1.get(f"/volumes/{vid}/export").status_code == 200
+
+
+def test_mutations_require_csrf_header(capp):
+    vid = _mk_volume(capp)
+    c1, _ = _unlock(capp, vid)
+    up = f"/volumes/{vid}/files/upload?path=/"
+    body = {"file": (BytesIO(b"x"), "f.txt")}
+    r = c1.post(up, data=body, content_type="multipart/form-data")
+    assert r.status_code == 403  # cookie present, header missing
+    body = {"file": (BytesIO(b"x"), "f.txt")}
+    r = c1.post(up, data=body, content_type="multipart/form-data", headers=_H)
+    assert r.status_code == 201
+    # mount itself is mutating too
+    assert _unlock(capp, vid, headers={})[1].status_code == 403
+
+
+def test_each_client_gets_its_own_mount(capp):
+    """The audit property: two browsers -> two engine mount rows; detaching
+    one leaves the other working; the last detach locks the volume."""
+    vid = _mk_volume(capp)
+    c1, r1 = _unlock(capp, vid)
+    c2, r2 = _unlock(capp, vid)  # attach path (already unlocked)
+    assert r1.status_code == r2.status_code == 200
+    mounts = c1.get(f"/volumes/{vid}/mounts").json
+    assert len(mounts) == 2
+    # both clients work, each on its own mount
+    for c in (c1, c2):
+        assert c.get(f"/volumes/{vid}/files?path=/").status_code == 200
+    # c1 detaches: c1 dead, c2 alive, volume still mounted
+    r = c1.delete(f"/volumes/{vid}/mount", headers=_H)
+    assert r.status_code == 200 and r.json == {"locked": False}
+    assert c1.get(f"/volumes/{vid}/files?path=/").status_code == 401
+    assert c2.get(f"/volumes/{vid}/files?path=/").status_code == 200
+    # c2 detaches: last one out locks the volume (409 = not unlocked at all,
+    # the pre-existing semantic; the UI routes 401 and 409 the same way)
+    assert c2.delete(f"/volumes/{vid}/mount", headers=_H).status_code == 204
+    assert c2.get(f"/volumes/{vid}/files?path=/").status_code == 409
+
+
+def test_encrypted_attach_reproves_pin(capp):
+    vid = _mk_volume(capp, name="vault", pin="s3cret")
+    c1, r1 = _unlock(capp, vid, pin="s3cret")
+    assert r1.status_code == 200
+    _c2, r2 = _unlock(capp, vid, pin="wrong")
+    assert r2.status_code == 400
+    # the failed attach must not have disturbed c1's session
+    assert c1.get(f"/volumes/{vid}/files?path=/").status_code == 200
+    c3, r3 = _unlock(capp, vid, pin="s3cret")
+    assert r3.status_code == 200
+    assert c3.get(f"/volumes/{vid}/files?path=/").status_code == 200
+
+
+def test_off_mode_unchanged(client):
+    """AUTH off (the default): no cookie, no CSRF header, everything works --
+    aloeforge and existing scripts see no behavior change."""
+    assert _upload(client, "/", "f.txt", b"x").status_code == 201
+    assert client.get("/volumes/v1/files?path=/").status_code == 200
+
+
 def test_admin_page_is_self_contained(client):
     """No CDN references: a VPN'd client with no other egress must get a
     working page, and page loads must not leak to third parties."""

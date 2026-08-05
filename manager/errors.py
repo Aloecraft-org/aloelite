@@ -40,6 +40,14 @@ class EncryptionMismatch(ManagerError):
     """PIN supplied for a plain volume, or omitted for an encrypted one (-> 400)."""
 
 
+class NotAuthorized(ManagerError):
+    """Cookie-auth mode: request carries no valid session token (-> 401)."""
+
+
+class CsrfRejected(ManagerError):
+    """Cookie-auth mode: mutating request without the X-Aloelite header (-> 403)."""
+
+
 __all__ = [
     "ManagerError",
     "AlreadyMounted",
@@ -48,6 +56,8 @@ __all__ = [
     "MountFailed",
     "BadPin",
     "EncryptionMismatch",
+    "NotAuthorized",
+    "CsrfRejected",
 ]
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #

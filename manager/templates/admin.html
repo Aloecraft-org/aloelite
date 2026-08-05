@@ -571,7 +571,7 @@ function app() {
     },
 
     async api(method, path, body) {
-      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      const opts = { method, headers: { 'Content-Type': 'application/json', 'X-Aloelite': '1' } };
       if (body !== undefined) opts.body = JSON.stringify(body);
       const r = await fetch(this.apiBase + path, opts);
       const ct = r.headers.get('content-type') || '';
@@ -708,7 +708,7 @@ function app() {
       const fd = new FormData();
       fd.append('file', file);
       try {
-        const r = await fetch(`${this.apiBase}/filesystems/import`, { method: 'POST', body: fd });
+        const r = await fetch(`${this.apiBase}/filesystems/import`, { method: 'POST', body: fd, headers: { 'X-Aloelite': '1' } });
         const d = await r.json().catch(() => null);
         if (r.ok) this.addLog(`Imported "${d.display_name}" (${d.volumes.length} volume(s))`);
         else this.addLog(`Import failed: ${d?.error || r.status}`);
@@ -828,7 +828,7 @@ function app() {
         const r = await this.api('GET',
           `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expPath)}`);
         if (r.ok) this.expEntries = r.data;
-        else if (r.status === 409) {
+        else if (r.status === 409 || r.status === 401) {
           // Session gone (e.g. manager restarted): route back into Open.
           this.expEntries = [];
           this._modal('expModal').hide();
@@ -955,7 +955,7 @@ function app() {
         fd.append('file', new File([this.edText], this.edName, { type: 'text/plain' }));
         const r = await fetch(
           `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(this.edDir)}`,
-          { method: 'POST', body: fd });
+          { method: 'POST', body: fd, headers: { 'X-Aloelite': '1' } });
         if (!r.ok) {
           const d = await r.json().catch(() => null);
           this.edErr = d?.error || `save failed (${r.status})`;
@@ -1017,7 +1017,7 @@ function app() {
         fd.append('file', new File([this.pbText], `paste-${ts}.txt`, { type: 'text/plain' }));
         const r = await fetch(
           `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent('/pastes')}`,
-          { method: 'POST', body: fd });
+          { method: 'POST', body: fd, headers: { 'X-Aloelite': '1' } });
         if (!r.ok) {
           const d = await r.json().catch(() => null);
           this.pbErr = d?.error || `save failed (${r.status})`;
@@ -1096,6 +1096,7 @@ function app() {
         const xhr = new XMLHttpRequest();
         xhr.open('POST',
           `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(dirPath)}`);
+        xhr.setRequestHeader('X-Aloelite', '1');
         xhr.upload.onprogress = e => {
           if (e.lengthComputable) item.pct = Math.round(e.loaded / e.total * 100);
         };
