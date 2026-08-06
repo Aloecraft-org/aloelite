@@ -102,11 +102,7 @@ def create_app(
     # processes and has no per-HTTP-client identity to check.
     # "off": legacy behavior -- even encrypted volumes, once unlocked by
     # anyone, are usable by any client that can reach the manager.
-    #
-    # Default is OFF for 0.3.2: per-client auth is new and opt-in
-    # (ALOELITE_AUTH=cookie / --auth cookie) until it has lived in the field;
-    # the default flips once proven.
-    auth_mode = auth_mode or os.environ.get("ALOELITE_AUTH", "off")
+    auth_mode = auth_mode or os.environ.get("ALOELITE_AUTH", "cookie")
     if auth_mode not in ("off", "cookie"):
         raise ValueError(f"ALOELITE_AUTH must be 'off' or 'cookie', not {auth_mode!r}")
     cookie_auth = auth_mode == "cookie"
@@ -118,7 +114,12 @@ def create_app(
         return f"aloe_m_{vid}"
 
     def _client_token(vid: str) -> str | None:
-        return request.cookies.get(_cookie_name(vid))
+        # Bearer header first (the UI's path: explicit, immune to browser
+        # cookie policy -- ENCRYPTION.md's "client holds only T" shape), then
+        # the cookie (curl-with-jar and older clients).
+        return request.headers.get("X-Aloelite-Token") or request.cookies.get(
+            _cookie_name(vid)
+        )
 
     def _set_session_cookie(resp, vid: str, token: str):
         resp.set_cookie(
@@ -137,6 +138,8 @@ def create_app(
         # Cookie auth resurrects CSRF (bearer-in-JS never had it). SameSite=Lax
         # covers modern browsers; requiring a custom header the same-origin UI
         # always sends closes it entirely -- a cross-site form can't set one.
+        if request.headers.get("X-Aloelite-Token"):
+            return  # explicit bearer credential: nothing ambient to ride
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             if request.headers.get("X-Aloelite") != "1":
                 raise merr.CsrfRejected("missing X-Aloelite header")
@@ -313,7 +316,13 @@ def create_app(
             rec.mountpoint = None
             rec.frontend = FRONTEND_DIRECT
             store.put(rec)
-            resp = jsonify(id=vid, frontend=FRONTEND_DIRECT)
+            body = {"id": vid, "frontend": FRONTEND_DIRECT}
+            if _gated(rec):
+                # the token IS the session: returned in-body so the UI can
+                # hold it explicitly (localStorage + X-Aloelite-Token); the
+                # cookie is a compatibility duplicate for jar-based clients
+                body["token"] = token
+            resp = jsonify(**body)
             if _gated(rec):
                 _set_session_cookie(resp, vid, token)
             return resp, 200
@@ -360,10 +369,12 @@ def create_app(
                 token = _client_token(vid) if _gated(rec) else None
                 if token is not None and request.args.get("all") not in ("1", "true"):
                     # detach THIS client only; the volume stays unlocked for
-                    # the others (?all=1 forces the full teardown). The cookie
-                    # is the credential here, so the CSRF header applies.
-                    if request.headers.get("X-Aloelite") != "1":
-                        return jsonify(error="missing X-Aloelite header"), 403
+                    # the others (?all=1 forces the full teardown). When the
+                    # cookie is the credential the CSRF header applies; a
+                    # bearer header is its own proof.
+                    if not request.headers.get("X-Aloelite-Token"):
+                        if request.headers.get("X-Aloelite") != "1":
+                            return jsonify(error="missing X-Aloelite header"), 403
                     try:
                         last = registry.detach(rec, token)
                     except merr.NotAuthorized:

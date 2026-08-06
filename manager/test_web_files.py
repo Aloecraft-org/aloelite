@@ -261,6 +261,39 @@ def test_encrypted_attach_reproves_pin(capp):
     assert c3.get(f"/volumes/{vid}/files?path=/").status_code == 200
 
 
+def test_bearer_token_flow(capp):
+    """The UI's actual path now: the token arrives in the mount response
+    body, is held by the client, and is sent as X-Aloelite-Token -- no
+    browser cookie storage in the loop at all (that dependency is what
+    broke per-browser sessions in the field)."""
+    vid = _mk_volume(capp, name="vault", pin="s3cret")
+    c = capp.test_client()
+    r = c.post(
+        f"/volumes/{vid}/mount", json={"mode": "direct", "pin": "s3cret"}, headers=_H
+    )
+    assert r.status_code == 200
+    tok = r.json.get("token")
+    assert tok
+    bare = capp.test_client()  # no cookies; header only
+    hdr = {"X-Aloelite-Token": tok}
+    assert bare.get(f"/volumes/{vid}/files?path=/", headers=hdr).status_code == 200
+    # a bearer header is its own proof: no CSRF header needed on mutations
+    body = {"file": (BytesIO(b"x"), "f.txt")}
+    r = bare.post(
+        f"/volumes/{vid}/files/upload?path=/",
+        data=body,
+        content_type="multipart/form-data",
+        headers=hdr,
+    )
+    assert r.status_code == 201
+    assert bare.get(f"/volumes/{vid}/export", headers=hdr).status_code == 200
+    # a wrong token is refused
+    bad = {"X-Aloelite-Token": "0" * 32}
+    assert bare.get(f"/volumes/{vid}/files?path=/", headers=bad).status_code == 401
+    # detach by bearer: single client, so this locks the volume
+    assert bare.delete(f"/volumes/{vid}/mount", headers=hdr).status_code == 204
+
+
 def test_off_mode_still_available(client):
     """ALOELITE_AUTH=off: the legacy escape hatch -- even encrypted volumes,
     once unlocked, are open to any client that can reach the manager."""

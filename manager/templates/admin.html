@@ -112,16 +112,16 @@
                   <span class="fw-semibold" x-text="v.name"></span>
                   <span x-show="v.mounted" class="badge"
                         :class="v.frontend === 'fuse' ? 'bg-info text-dark'
-                               : (v.attached === false ? 'bg-secondary' : 'bg-success')"
+                               : (attachedFor(v) ? 'bg-success' : 'bg-secondary')"
                         x-text="v.frontend === 'fuse' ? 'FUSE'
-                               : (v.attached === false ? 'open elsewhere' : 'open')"></span>
+                               : (attachedFor(v) ? 'open' : 'open elsewhere')"></span>
                   <span x-show="v.auto_mount" class="badge bg-info text-dark">auto</span>
                 </div>
                 <div class="d-flex gap-2 align-items-center">
                   <button class="btn btn-sm btn-primary" @click="openVol(v)" :disabled="v._busy">
                     <span x-text="v._busy ? '…' : 'Open'"></span>
                   </button>
-                  <button x-show="v.mounted && v.frontend === 'direct' && v.attached !== false"
+                  <button x-show="v.mounted && v.frontend === 'direct' && attachedFor(v)"
                           class="btn btn-sm btn-outline-warning" @click="lockVol(v)"
                           :disabled="v._busy">Lock</button>
                   <div class="dropdown">
@@ -551,6 +551,22 @@ function app() {
 
     _modal(id) { return bootstrap.Modal.getOrCreateInstance(document.getElementById(id)); },
 
+    // Per-volume session token, held EXPLICITLY (localStorage + header)
+    // instead of relying on browser cookie policy, which proved
+    // unpredictable (ENCRYPTION.md: the client holds only T).
+    _tok(vid) { try { return localStorage.getItem('aloe_t_' + vid); } catch { return null; } },
+    _setTok(vid, t) { try { localStorage.setItem('aloe_t_' + vid, t); } catch {} },
+    _clearTok(vid) { try { localStorage.removeItem('aloe_t_' + vid); } catch {} },
+
+    // Is the volume usable by THIS client as-is? Plain: mounted is enough.
+    // Encrypted: we must hold its session token (server 'attached' covers
+    // cookie-jar clients; a stale local token surfaces as 401 -> PIN modal).
+    attachedFor(v) {
+      if (!v.mounted) return false;
+      if (v.frontend === 'fuse' || !v.encrypted) return true;
+      return v.attached === true || !!this._tok(v.id);
+    },
+
     async init() {
       await this.refresh();
       try {
@@ -575,6 +591,8 @@ function app() {
 
     async api(method, path, body) {
       const opts = { method, headers: { 'Content-Type': 'application/json', 'X-Aloelite': '1' } };
+      const tv = path.match(/^\/volumes\/([^\/?]+)/);
+      if (tv) { const t = this._tok(tv[1]); if (t) opts.headers['X-Aloelite-Token'] = t; }
       if (body !== undefined) opts.body = JSON.stringify(body);
       const r = await fetch(this.apiBase + path, opts);
       const ct = r.headers.get('content-type') || '';
@@ -643,7 +661,7 @@ function app() {
     // -- Open / Lock (the simple path) -------------------------------------
     async openVol(v) {
       if (v.mounted) {
-        if (v.attached === false) {
+        if (!this.attachedFor(v)) {
           // "open elsewhere": this browser has no session -- the way in is
           // the PIN, straight to the modal, no explorer flash
           this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
@@ -672,6 +690,7 @@ function app() {
         { mode: 'direct', pin: this.unlockPin });
       this.unlocking = false;
       if (r.ok) {
+        if (r.data?.token) this._setTok(v.id, r.data.token);
         this._modal('unlockModal').hide();
         this.unlockPin = '';
         await this.refresh();
@@ -686,7 +705,7 @@ function app() {
       v._busy = true;
       const r = await this.api('DELETE', `/volumes/${v.id}/mount`);
       v._busy = false;
-      if (r.ok) { this.addLog(`Locked "${v.name}"`); await this.refresh(); }
+      if (r.ok) { this._clearTok(v.id); this.addLog(`Locked "${v.name}"`); await this.refresh(); }
       else this.addLog(`Lock "${v.name}" failed: ${r.data?.error}`);
     },
 
@@ -862,6 +881,7 @@ function app() {
           // route to the PIN modal once. The guard flag stops a failed
           // attach from looping through here forever.
           this.expEntries = [];
+          this._clearTok(this.expVol.id);  // token is stale or absent
           if (!this._autoAttached) {
             this._autoAttached = true;
             this.expBusy = false;
@@ -901,9 +921,19 @@ function app() {
       this.loadFiles();
     },
 
-    expDownload(e) {
+    async expDownload(e) {
       const a = document.createElement('a');
-      a.href = `${this.apiBase}/volumes/${this.expVol.id}/files/download?path=${encodeURIComponent(this.expJoin(e.name))}`;
+      const url = `${this.apiBase}/volumes/${this.expVol.id}/files/download?path=${encodeURIComponent(this.expJoin(e.name))}`;
+      if (this._tok(this.expVol.id)) {
+        const r = await fetch(url, { headers: this._authHeaders(this.expVol.id) });
+        if (!r.ok) { this.toast('Download failed', false); return; }
+        a.href = URL.createObjectURL(await r.blob());
+        a.download = e.name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+        return;
+      }
+      a.href = url;
       a.download = e.name;
       a.click();
     },
@@ -937,12 +967,19 @@ function app() {
       return /\.(png|jpe?g|gif|webp|svg|bmp|pdf|txt|md|log|json|csv|ya?ml|py|js|html?|css|sh|toml|ini|xml)$/i.test(name);
     },
 
-    expPreview(e) {
+    async expPreview(e) {
       this.pvName = e.name;
       this.pvKind = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(e.name) ? 'img'
         : (/\.pdf$/i.test(e.name) ? 'pdf' : 'frame');
-      this.pvUrl = `${this.apiBase}/volumes/${this.expVol.id}/files/download` +
+      const url = `${this.apiBase}/volumes/${this.expVol.id}/files/download` +
         `?path=${encodeURIComponent(this.expJoin(e.name))}&inline=1`;
+      if (this._tok(this.expVol.id)) {
+        const r = await fetch(url, { headers: this._authHeaders(this.expVol.id) });
+        if (!r.ok) { this.toast('Preview failed', false); return; }
+        this.pvUrl = URL.createObjectURL(await r.blob());
+      } else {
+        this.pvUrl = url;
+      }
       this._modal('pvModal').show();
     },
 
@@ -953,6 +990,13 @@ function app() {
         || !/\./.test(name.replace(/^\./, ''));
     },
 
+    _authHeaders(vid) {
+      const t = this._tok(vid);
+      const h = { 'X-Aloelite': '1' };
+      if (t) h['X-Aloelite-Token'] = t;
+      return h;
+    },
+
     _fileUrl(dir, name, inline) {
       const p = (dir === '/' ? '' : dir) + '/' + name;
       return `${this.apiBase}/volumes/${this.expVol.id}/files/download` +
@@ -960,7 +1004,8 @@ function app() {
     },
 
     async _fetchText(dir, name) {
-      const r = await fetch(this._fileUrl(dir, name, true));
+      const r = await fetch(this._fileUrl(dir, name, true),
+        { headers: this._authHeaders(this.expVol.id) });
       if (!r.ok) throw new Error(`load failed (${r.status})`);
       return await r.text();
     },
@@ -997,7 +1042,7 @@ function app() {
         fd.append('file', new File([this.edText], this.edName, { type: 'text/plain' }));
         const r = await fetch(
           `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(this.edDir)}`,
-          { method: 'POST', body: fd, headers: { 'X-Aloelite': '1' } });
+          { method: 'POST', body: fd, headers: this._authHeaders(this.expVol.id) });
         if (!r.ok) {
           const d = await r.json().catch(() => null);
           this.edErr = d?.error || `save failed (${r.status})`;
@@ -1059,7 +1104,7 @@ function app() {
         fd.append('file', new File([this.pbText], `paste-${ts}.txt`, { type: 'text/plain' }));
         const r = await fetch(
           `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent('/pastes')}`,
-          { method: 'POST', body: fd, headers: { 'X-Aloelite': '1' } });
+          { method: 'POST', body: fd, headers: this._authHeaders(this.expVol.id) });
         if (!r.ok) {
           const d = await r.json().catch(() => null);
           this.pbErr = d?.error || `save failed (${r.status})`;
@@ -1139,6 +1184,8 @@ function app() {
         xhr.open('POST',
           `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(dirPath)}`);
         xhr.setRequestHeader('X-Aloelite', '1');
+        const xt = this._tok(this.expVol.id);
+        if (xt) xhr.setRequestHeader('X-Aloelite-Token', xt);
         xhr.upload.onprogress = e => {
           if (e.lengthComputable) item.pct = Math.round(e.loaded / e.total * 100);
         };
