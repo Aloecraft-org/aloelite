@@ -66,6 +66,69 @@ resolution:
       visibility (greatest uuid7 wins), so hidden same-name siblings are
       unreachable by path — that is the contract, and why *_by_id variants exist.
       Empty result at any segment => not_found.
+      This is the SINGLE-STEP primitive (one child lookup). Do NOT fold it over a
+      path: use resolve_path, which does the whole walk in one round trip.
+
+  resolve_path:
+    sql: |
+      WITH RECURSIVE walk(idx, seg, parent_id, node_id, node_type, rest) AS (
+        SELECT 0, NULL, NULL, :root, 'container', :path || '/'
+        UNION ALL
+        SELECT
+          w.idx + 1,
+          substr(w.rest, 1, instr(w.rest, '/') - 1),
+          w.node_id,
+          hit.node_id,
+          hit.type,
+          substr(w.rest, instr(w.rest, '/') + 1)
+        FROM walk w
+        LEFT JOIN node hit ON hit.node_id = (
+          SELECT max(n.node_id)
+          FROM active_edge ae
+          JOIN node n ON n.node_id = ae.to_id
+          WHERE ae.from_id = w.node_id
+            AND n.name = substr(w.rest, 1, instr(w.rest, '/') - 1)
+        )
+        WHERE w.rest <> '' AND w.node_id IS NOT NULL AND w.node_type = 'container'
+      )
+      SELECT idx, seg, parent_id, node_id, node_type
+      FROM walk WHERE idx > 0 ORDER BY idx
+    params:
+      root: "NodeId to start from (the mount's mount_point)"
+      path: "mount-relative path, already normalized to 'a/b/c' — no leading,
+             trailing, or repeated separators, and never empty"
+    returns: "[{ idx, seg, parent_id, node_id, node_type }] one row per segment consumed"
+    consumed_by: [resolve, resolve_parent, every path-addressed op]
+    notes: >
+      THE path resolver: a ten-deep path is ONE round trip, not ten. Folding
+      resolve_segment per segment is free on a local file and is the difference
+      between usable and unusable over a network connection to a remote backend —
+      so every implementation should walk paths with this, not with a host loop.
+
+      Same visibility rule as resolve_segment: max(node_id) is the greatest-uuid7
+      winner (NODE-5), identical to ORDER BY node_id DESC LIMIT 1 under the
+      BINARY collation both rely on.
+
+      The row list IS the error report, which is why the walk records misses
+      instead of returning nothing. Read the LAST row:
+        * node_id NULL         => not_found; `seg` is the missing name and
+                                  `parent_id` the container searched
+        * idx < segment count  => not_a_container; the walk stopped early because
+                                  `seg` (at `node_id`) is an entry — you cannot
+                                  descend through a file
+        * otherwise            => resolved; node_id / node_type are the answer
+      A path that resolves fully returns exactly one row per segment.
+
+      '.' and '..' get NO special treatment — they are ordinary names and simply
+      miss, which is what confines a subtree mount to its mount_point. That
+      containment is a security boundary for subtree/multitenant mounts; it is
+      pinned by tests/test_resolve_containment.py. Any future '..' normalization
+      must keep resolution anchored at :root.
+
+      Anchoring node_type to 'container' is deliberate: the walk never validates
+      the ROOT's type (a caller supplies a mount_point it already trusts), so a
+      missing root behaves exactly like an empty container — not_found on the
+      first segment.
 
   get_node:
     sql: |
@@ -766,7 +829,7 @@ maintenance:
 # Notes on operations that are PURE host orchestration over the above
 # ----------------------------------------------------------------------------
 host_only:
-  resolve: "fold resolve_segment over path segments from the mount point; empty at any segment => not_found"
-  resolve_parent: "fold resolve_segment over all-but-last segment; return (container_id, final_name)"
+  resolve: "run resolve_path once from the mount point; read the last row for the answer or the error (see that template's notes). Do NOT fold resolve_segment — that is one round trip per segment"
+  resolve_parent: "run resolve_path over all-but-last segment; return (container_id, final_name). A single-segment path needs no query at all: the parent is the mount point"
   streaming_read_write: "descriptor read/write/seek operate on an in-memory buffer; reads reassemble via get_content_meta + read_chunks; a write stages chunks (upsert_chunk + insert_chunk_ref) in an independent commit then swaps the committed pointer (update_content) in a separate txn, releasing the lock"
   copy_pack_unpack: "enumerate_subtree -> host walk in canonical order -> create_* leaves, threading the old->new id map; pack/unpack add MsgPack (de)serialization in the same walk"
