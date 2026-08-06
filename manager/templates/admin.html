@@ -20,6 +20,9 @@
     .log-box div { line-height: 1.6; }
     .stat-mini { font-size: .78rem; color: #495057; }
     [x-cloak] { display: none !important; }
+    /* askModal stacks over an open explorer/editor modal (same bootstrap
+       z-index otherwise, and DOM order would paint it underneath) */
+    #askModal { z-index: 1080; }
     .spin { animation: spin .8s linear infinite; display: inline-block; }
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
@@ -298,6 +301,28 @@
   </div>
 </div>
 
+<!-- input modal (replaces browser prompt(): styled, autofocused, phone-friendly) -->
+<div class="modal fade" id="askModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-sm modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title" x-text="askTitle"></h6>
+        <button type="button" class="btn-close btn-sm" @click="askCancel()"></button>
+      </div>
+      <div class="modal-body py-2">
+        <input class="form-control form-control-sm" x-model="askValue"
+               @keydown.enter.prevent="askOk()"
+               autocapitalize="off" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="modal-footer py-2">
+        <button class="btn btn-sm btn-secondary" @click="askCancel()">Cancel</button>
+        <button class="btn btn-sm btn-primary" @click="askOk()"
+                :disabled="!askValue.trim()" x-text="askBtn"></button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- delete confirm modal -->
 <div class="modal fade" id="delModal" tabindex="-1" aria-labelledby="delModalLabel" aria-hidden="true">
   <div class="modal-dialog modal-sm">
@@ -320,7 +345,7 @@
 
 <!-- file explorer modal -->
 <div class="modal fade" id="expModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable modal-fullscreen-sm-down">
     <div class="modal-content">
       <div class="modal-header py-2">
         <h6 class="modal-title">Files — <span x-text="expVol?.name"></span></h6>
@@ -419,7 +444,7 @@
 
 <!-- preview modal -->
 <div class="modal fade" id="pvModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable modal-fullscreen-sm-down">
     <div class="modal-content">
       <div class="modal-header py-2">
         <h6 class="modal-title" x-text="pvName"></h6>
@@ -443,7 +468,7 @@
 
 <!-- text editor modal -->
 <div class="modal fade" id="edModal" tabindex="-1" data-bs-backdrop="static" aria-hidden="true">
-  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable modal-fullscreen-sm-down">
     <div class="modal-content">
       <div class="modal-header py-2">
         <h6 class="modal-title">
@@ -471,7 +496,7 @@
 
 <!-- paste bin modal: phone-to-desktop (and back) text drop -->
 <div class="modal fade" id="pbModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable modal-fullscreen-sm-down">
     <div class="modal-content">
       <div class="modal-header py-2">
         <h6 class="modal-title">Pastes — <span x-text="expVol?.name"></span></h6>
@@ -543,6 +568,7 @@ function app() {
     pvName: '', pvUrl: '', pvKind: '',
     preflightWarnings: [],
     _autoAttached: false,
+    askTitle: '', askValue: '', askBtn: 'OK', _askResolve: null,
 
     // editor: path is the file's FULL path; dir is where a save uploads to
     edName: '', edDir: '/', edText: '', edLoaded: '', edBusy: false, edErr: '',
@@ -561,6 +587,31 @@ function app() {
     // Is the volume usable by THIS client as-is? Plain: mounted is enough.
     // Encrypted: we must hold its session token (server 'attached' covers
     // cookie-jar clients; a stale local token surfaces as 401 -> PIN modal).
+    // Styled replacement for window.prompt(): resolves the entered string,
+    // or null on cancel/dismiss. Calls are SERIALIZED through a promise
+    // chain -- a second ask() while the modal is mid-hide used to overwrite
+    // the pending resolver, losing the first caller's flow entirely.
+    ask(title, initial = '', btn = 'OK') {
+      const run = () => new Promise(res => {
+        this.askTitle = title; this.askValue = initial; this.askBtn = btn;
+        this._askResolve = res;
+        this._modal('askModal').show();
+      });
+      this._askChain = (this._askChain || Promise.resolve()).then(run, run);
+      return this._askChain;
+    },
+    // Resolution happens in the hidden.bs.modal listener (init), AFTER the
+    // modal has fully hidden -- resolving mid-transition let callers open
+    // the next modal against bootstrap's hide animation, which swallowed it.
+    askOk() {
+      this._askOut = this.askValue.trim() || null;
+      this._modal('askModal').hide();
+    },
+    askCancel() {
+      this._askOut = null;
+      this._modal('askModal').hide();
+    },
+
     attachedFor(v) {
       if (!v.mounted) return false;
       if (v.frontend === 'fuse' || !v.encrypted) return true;
@@ -568,6 +619,18 @@ function app() {
     },
 
     async init() {
+      for (const [id, sel] of [['askModal', '#askModal input'],
+                               ['unlockModal', '#unlockModal input']]) {
+        document.getElementById(id).addEventListener('shown.bs.modal', () => {
+          const i = document.querySelector(sel);
+          if (i) { i.focus(); if (i.select) i.select(); }
+        });
+      }
+      document.getElementById('askModal').addEventListener('hidden.bs.modal', () => {
+        const r = this._askResolve; this._askResolve = null;
+        const v = this._askOut ?? null; this._askOut = null;
+        if (r) r(v);  // Esc/backdrop dismissal never set _askOut -> null
+      });
       await this.refresh();
       try {
         const h = await this.api('GET', '/health');
@@ -713,7 +776,7 @@ function app() {
     addVolume(f) { this.newFsId = f.id; this.showCreate = true; },
 
     async renameFs(f) {
-      const name = prompt('File name:', f.display_name);
+      const name = await this.ask('Rename file', f.display_name, 'Rename');
       if (!name || name === f.display_name) return;
       const r = await this.api('PATCH', `/filesystems/${f.id}`, { display_name: name });
       if (!r.ok) this.addLog(`Rename failed: ${r.data?.error}`);
@@ -875,7 +938,9 @@ function app() {
       try {
         const r = await this.api('GET',
           `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expPath)}`);
-        if (r.ok) this.expEntries = r.data;
+        if (r.ok) this.expEntries = r.data.slice().sort((a, b) =>
+          a.type === b.type ? a.name.localeCompare(b.name)
+                            : (a.type === 'dir' ? -1 : 1));
         else if (r.status === 401) {
           // Unlocked (encrypted) volume, but this browser holds no session:
           // route to the PIN modal once. The guard flag stops a failed
@@ -904,7 +969,7 @@ function app() {
     },
 
     async expMkdir() {
-      const name = prompt('Folder name:');
+      const name = await this.ask('New folder', '', 'Create');
       if (!name) return;
       const r = await this.api('POST',
         `/volumes/${this.expVol.id}/files/mkdir?path=${encodeURIComponent(this.expJoin(name))}`);
@@ -939,19 +1004,19 @@ function app() {
     },
 
     async expRename(e) {
-      const name = prompt('New name:', e.name);
+      const name = await this.ask(`Rename ${e.name}`, e.name, 'Rename');
       if (!name || name === e.name) return;
       await this._transfer('move', this.expJoin(e.name), this.expJoin(name), 'Renamed');
     },
 
     async expMove(e) {
-      const dst = prompt('Move to (full path):', this.expJoin(e.name));
+      const dst = await this.ask('Move to (full path)', this.expJoin(e.name), 'Move');
       if (!dst || dst === this.expJoin(e.name)) return;
       await this._transfer('move', this.expJoin(e.name), dst, 'Moved');
     },
 
     async expCopy(e) {
-      const dst = prompt('Copy to (full path):', this.expJoin(e.name) + '.copy');
+      const dst = await this.ask('Copy to (full path)', this.expJoin(e.name) + '.copy', 'Copy');
       if (!dst) return;
       await this._transfer('copy', this.expJoin(e.name), dst, 'Copied');
     },
@@ -1026,8 +1091,8 @@ function app() {
       this.edBusy = false;
     },
 
-    edNew() {
-      const name = prompt('File name:');
+    async edNew() {
+      const name = await this.ask('New file', '', 'Create');
       if (!name) return;
       this.edErr = ''; this.edName = name; this.edDir = this.expPath;
       this.edText = ''; this.edLoaded = null;  // null: Save enabled even when empty
