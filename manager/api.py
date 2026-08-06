@@ -102,7 +102,11 @@ def create_app(
     # processes and has no per-HTTP-client identity to check.
     # "off": legacy behavior -- even encrypted volumes, once unlocked by
     # anyone, are usable by any client that can reach the manager.
-    auth_mode = auth_mode or os.environ.get("ALOELITE_AUTH", "cookie")
+    #
+    # Default is OFF for 0.3.2: per-client auth is new and opt-in
+    # (ALOELITE_AUTH=cookie / --auth cookie) until it has lived in the field;
+    # the default flips once proven.
+    auth_mode = auth_mode or os.environ.get("ALOELITE_AUTH", "off")
     if auth_mode not in ("off", "cookie"):
         raise ValueError(f"ALOELITE_AUTH must be 'off' or 'cookie', not {auth_mode!r}")
     cookie_auth = auth_mode == "cookie"

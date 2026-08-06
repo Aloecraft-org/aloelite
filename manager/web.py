@@ -52,11 +52,10 @@ def main() -> int:
     ap.add_argument(
         "--auth",
         choices=["cookie", "off"],
-        help="client auth for volume content (default cookie: each browser "
-        "attaches its own session; anyone may mount/unlock, encrypted "
-        "volumes prove the PIN per device). 'off' restores the legacy "
-        "any-client-may-use-an-unlocked-volume behavior for trusted "
-        "networks and cookie-less scripts.",
+        help="client auth for encrypted volume content (default off for "
+        "now). 'cookie': each browser/device proves the PIN once and holds "
+        "its own session; without one, encrypted content answers 401. "
+        "'off': any client may use an unlocked volume (trusted networks).",
     )
     ap.add_argument(
         "--fuse",
