@@ -20,9 +20,22 @@
     .log-box div { line-height: 1.6; }
     .stat-mini { font-size: .78rem; color: #495057; }
     [x-cloak] { display: none !important; }
-    /* askModal stacks over an open explorer/editor modal (same bootstrap
-       z-index otherwise, and DOM order would paint it underneath) */
-    #askModal { z-index: 1080; }
+    /* askModal/confirmModal stack over an open explorer/editor modal (same
+       bootstrap z-index otherwise, and DOM order would paint it underneath) */
+    #askModal, #confirmModal { z-index: 1080; }
+
+    /* NEVER put a bootstrap d-* utility on an element that x-show controls.
+       They are `display: ... !important`, which BEATS the inline display:none
+       x-show sets, so the element is permanently visible -- this shipped as a
+       stray empty "Size:/Modified:" row on every volume. Give x-show'd
+       elements their layout from a plain class like .stat-row, or make the
+       condition an x-if (which removes the node) when a d-* class is needed. */
+    .stat-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+
+    .exp-name { word-break: break-word; }
+    .exp-sub { font-size: .72rem; color: #6c757d; }
+    th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+    th.sortable:hover { color: #0d6efd; }
     .spin { animation: spin .8s linear infinite; display: inline-block; }
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
@@ -95,7 +108,8 @@
             <div class="d-flex align-items-center gap-2 flex-wrap">
               <span class="fw-semibold" x-text="f.display_name"></span>
               <a href="#" class="text-decoration-none small text-muted"
-                 title="Rename" @click.prevent="renameFs(f)">&#9998;</a>
+                 :aria-label="'Rename ' + f.display_name" title="Rename"
+                 @click.prevent="renameFs(f)">&#9998;</a>
               <span class="text-muted small" x-text="f.size_bytes != null ? fmtBytes(f.size_bytes) : ''"></span>
             </div>
             <div class="d-flex gap-2 flex-shrink-0">
@@ -128,7 +142,8 @@
                           class="btn btn-sm btn-outline-warning" @click="lockVol(v)"
                           :disabled="v._busy">Lock</button>
                   <div class="dropdown">
-                    <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="dropdown">&#8942;</button>
+                    <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="dropdown"
+                            :aria-label="'More actions for ' + v.name">&#8942;</button>
                     <ul class="dropdown-menu dropdown-menu-end" style="font-size:.85rem;">
                       <li><a class="dropdown-item" href="#" @click.prevent="mountVol(v)">FUSE mount…</a></li>
                       <li x-show="v.mounted && v.frontend === 'fuse'">
@@ -146,16 +161,19 @@
               </div>
 
               <div x-show="v.mountpoint" class="mono mt-1" x-text="'&#8594; ' + v.mountpoint"></div>
-              <div x-show="v._stat" x-cloak class="mt-1 stat-mini d-flex gap-3">
+              <!-- .stat-row, not d-flex: see the note in <style> -->
+              <div x-show="v._stat" x-cloak class="mt-1 stat-mini stat-row">
                 <span><strong>Size:</strong> <span x-text="v._stat ? fmtBytes(v._stat.size_bytes) : ''"></span></span>
-                <span><strong>Modified:</strong> <span x-text="v._stat ? fmtTime(v._stat.mtime) : ''"></span></span>
+                <span><strong>Modified:</strong> <span x-text="v._stat ? fmtTimeFull(v._stat.mtime) : ''"></span></span>
               </div>
               <div x-show="v._mounts" x-cloak class="mt-1 stat-mini">
-                <template x-for="mt in v._mounts" :key="mt.id">
+                <!-- `|| []` is load-bearing: x-for over the initial null threw
+                     an uncaught TypeError on every page load -->
+                <template x-for="mt in (v._mounts || [])" :key="mt.id">
                   <div>
                     <span class="badge bg-light text-dark border" x-text="mt.state"></span>
                     <span x-text="mt.label"></span>
-                    <span class="mono" x-text="mt.id.slice(0,8) + '…'"></span>
+                    <span class="mono" x-text="(mt.id || '').slice(0,8) + '…'"></span>
                   </div>
                 </template>
                 <div x-show="v._mounts && !v._mounts.length" class="text-muted">No mounts</div>
@@ -313,11 +331,35 @@
         <input class="form-control form-control-sm" x-model="askValue"
                @keydown.enter.prevent="askOk()"
                autocapitalize="off" autocomplete="off" spellcheck="false">
+        <div x-show="askHint" x-cloak class="form-text" style="font-size:.72rem;"
+             x-text="askHint"></div>
       </div>
       <div class="modal-footer py-2">
         <button class="btn btn-sm btn-secondary" @click="askCancel()">Cancel</button>
         <button class="btn btn-sm btn-primary" @click="askOk()"
                 :disabled="!askValue.trim()" x-text="askBtn"></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- confirm modal (replaces window.confirm(): styled, phone-friendly, and it
+     stacks correctly over the explorer/editor instead of being an OS dialog) -->
+<div class="modal fade" id="confirmModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-sm modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title" x-text="cfTitle"></h6>
+        <!-- "Close", not "Cancel": the footer already has a Cancel, and two
+             controls with the same accessible name are ambiguous to read out -->
+        <button type="button" class="btn-close btn-sm" @click="cfCancel()"
+                aria-label="Close"></button>
+      </div>
+      <div class="modal-body py-2 small" x-text="cfBody"></div>
+      <div class="modal-footer py-2">
+        <button class="btn btn-sm btn-secondary" @click="cfCancel()" x-text="cfNo"></button>
+        <button class="btn btn-sm" :class="cfDanger ? 'btn-danger' : 'btn-primary'"
+                @click="cfOk()" x-text="cfYes"></button>
       </div>
     </div>
   </div>
@@ -369,7 +411,8 @@
             <button class="btn btn-sm btn-outline-primary" @click="openPastes()">Pastes</button>
             <button class="btn btn-sm btn-outline-secondary" @click="edNew()">New file</button>
             <button class="btn btn-sm btn-outline-secondary" @click="expMkdir()">New folder</button>
-            <button class="btn btn-sm btn-outline-secondary" @click="loadFiles()" :disabled="expBusy">
+            <button class="btn btn-sm btn-outline-secondary" @click="loadFiles()"
+                    :disabled="expBusy" aria-label="Reload this folder" title="Reload">
               <span :class="expBusy ? 'spin' : ''">&#8635;</span>
             </button>
           </div>
@@ -384,48 +427,92 @@
             <span style="min-width:2.5em;" class="text-end" x-text="u.pct + '%'"></span>
           </div>
         </template>
+        <!-- Filter + summary. Client-side over the folder already loaded, so
+             it costs no request; the summary doubles as "how much is in here",
+             which the listing alone never said. -->
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <input id="expFilter" class="form-control form-control-sm" style="max-width:16rem;"
+                 placeholder="Filter this folder…" x-model="expQuery"
+                 autocapitalize="off" autocomplete="off" spellcheck="false"
+                 aria-label="Filter files in this folder">
+          <button x-show="expQuery" class="btn btn-sm btn-link px-1 text-decoration-none"
+                  @click="expQuery = ''" aria-label="Clear filter">&times;</button>
+          <span class="ms-auto text-muted text-nowrap" style="font-size:.78rem;"
+                x-text="expSummary()"></span>
+        </div>
         <div :class="expDropHover ? 'border border-primary rounded' : ''"
              @dragover.prevent="expDropHover = true"
              @dragleave.prevent="expDropHover = false"
              @drop.prevent="expDropHover = false; expDrop($event)">
         <table class="table table-sm table-hover align-middle mb-0" style="font-size:.85rem;">
           <thead>
-            <tr><th>Name</th><th class="text-end">Size</th><th>Modified</th><th class="text-end"></th></tr>
+            <tr>
+              <th class="sortable" @click="expSortBy('name')"
+                  scope="col" aria-sort="none">Name<span x-text="expCaret('name')"></span></th>
+              <!-- Size/Modified fold away below md; they reappear under the
+                   name (.exp-sub) so a phone loses the columns, not the data. -->
+              <th class="sortable text-end d-none d-md-table-cell" scope="col"
+                  @click="expSortBy('size')">Size<span x-text="expCaret('size')"></span></th>
+              <th class="sortable d-none d-md-table-cell" scope="col"
+                  @click="expSortBy('mtime')">Modified<span x-text="expCaret('mtime')"></span></th>
+              <th class="text-end" scope="col"><span class="visually-hidden">Actions</span></th>
+            </tr>
           </thead>
           <tbody>
-            <template x-for="e in expEntries" :key="e.name">
+            <template x-for="e in expRows()" :key="e.name">
               <tr>
                 <td>
                   <a x-show="e.type === 'dir'" href="#" class="text-decoration-none"
-                     @click.prevent="navTo(expJoin(e.name))">&#128193; <span x-text="e.name"></span></a>
+                     @click.prevent="navTo(expJoin(e.name))">&#128193; <span class="exp-name" x-text="e.name"></span></a>
                   <a x-show="e.type === 'file' && canPreview(e.name)" href="#"
                      class="text-decoration-none text-body"
-                     @click.prevent="expPreview(e)">&#128196; <span x-text="e.name"></span></a>
-                  <span x-show="e.type === 'file' && !canPreview(e.name)">&#128196; <span x-text="e.name"></span></span>
+                     @click.prevent="expPreview(e)">&#128196; <span class="exp-name" x-text="e.name"></span></a>
+                  <span x-show="e.type === 'file' && !canPreview(e.name)">&#128196; <span class="exp-name" x-text="e.name"></span></span>
+                  <div class="exp-sub d-md-none" x-text="expSub(e)"></div>
                 </td>
-                <td class="text-end" x-text="e.type === 'file' ? fmtBytes(e.size) : ''"></td>
-                <td x-text="fmtTime(e.mtime)"></td>
+                <td class="text-end d-none d-md-table-cell"
+                    x-text="e.type === 'file' ? fmtBytes(e.size) : ''"></td>
+                <td class="d-none d-md-table-cell" :title="fmtTimeFull(e.mtime)"
+                    x-text="fmtTime(e.mtime)"></td>
                 <td class="text-end text-nowrap">
-                  <button x-show="e.type === 'file' && canEdit(e.name)"
-                          class="btn btn-sm btn-outline-primary py-0"
-                          title="Edit" @click="edOpen(e)">Edit</button>
-                  <button class="btn btn-sm btn-outline-secondary py-0"
-                          title="Rename" @click="expRename(e)">&#9998;</button>
-                  <button class="btn btn-sm btn-outline-secondary py-0"
-                          title="Move" @click="expMove(e)">&#10132;</button>
-                  <button class="btn btn-sm btn-outline-secondary py-0"
-                          title="Copy" @click="expCopy(e)">&#10697;</button>
-                  <button x-show="e.type === 'file'" class="btn btn-sm btn-outline-secondary py-0"
-                          title="Download" @click="expDownload(e)">&#8595;</button>
-                  <button class="btn btn-sm btn-outline-danger py-0"
-                          title="Delete" @click="expDelete(e)">&#128465;</button>
+                  <!-- x-if, not x-show: these carry d-* classes, which would
+                       override x-show's display:none (see the <style> note). -->
+                  <template x-if="e.type === 'file' && canEdit(e.name)">
+                    <button class="btn btn-sm btn-outline-primary py-0 d-none d-md-inline-block"
+                            :aria-label="'Edit ' + e.name" @click="edOpen(e)">Edit</button>
+                  </template>
+                  <template x-if="e.type === 'file'">
+                    <button class="btn btn-sm btn-outline-secondary py-0 d-none d-md-inline-block"
+                            :aria-label="'Download ' + e.name" @click="expDownload(e)">&#8595;</button>
+                  </template>
+                  <!-- The rest live in a menu: six buttons per row overflowed
+                       the screen on a phone (delete was unreachable) and were
+                       just noise on a desktop. -->
+                  <div class="dropdown d-inline-block">
+                    <button class="btn btn-sm btn-outline-secondary py-0" data-bs-toggle="dropdown"
+                            :aria-label="'Actions for ' + e.name">&#8942;</button>
+                    <ul class="dropdown-menu dropdown-menu-end" style="font-size:.85rem;">
+                      <template x-if="e.type === 'file' && canEdit(e.name)">
+                        <li><a class="dropdown-item" href="#" @click.prevent="edOpen(e)">Edit</a></li>
+                      </template>
+                      <template x-if="e.type === 'file'">
+                        <li><a class="dropdown-item" href="#" @click.prevent="expDownload(e)">Download</a></li>
+                      </template>
+                      <li><a class="dropdown-item" href="#" @click.prevent="expRename(e)">Rename…</a></li>
+                      <li><a class="dropdown-item" href="#" @click.prevent="expMove(e)">Move…</a></li>
+                      <li><a class="dropdown-item" href="#" @click.prevent="expCopy(e)">Copy…</a></li>
+                      <li><hr class="dropdown-divider"></li>
+                      <li><a class="dropdown-item text-danger" href="#"
+                             @click.prevent="expDelete(e)">Delete</a></li>
+                    </ul>
+                  </div>
                 </td>
               </tr>
             </template>
-            <tr x-show="!expEntries.length && !expBusy">
-              <td colspan="4" class="text-muted text-center py-3">
-                Empty folder — drag files here
-              </td>
+            <tr x-show="!expRows().length && !expBusy">
+              <td colspan="4" class="text-muted text-center py-3"
+                  x-text="expQuery ? 'Nothing matches “' + expQuery + '”'
+                                   : 'Empty folder — drag files here'"></td>
             </tr>
           </tbody>
         </table>
@@ -435,9 +522,11 @@
   </div>
 </div>
 
-<div class="position-fixed bottom-0 end-0 p-3" style="z-index:1080;" x-data>
+<!-- aria-live so a screen reader hears the result of an action it cannot see -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:1080;" x-data
+     aria-live="polite" aria-atomic="false">
   <template x-for="t in toasts" :key="t.id">
-    <div class="alert py-2 px-3 mb-2 shadow-sm" style="font-size:.85rem;"
+    <div class="alert py-2 px-3 mb-2 shadow-sm" style="font-size:.85rem;" role="status"
          :class="t.ok ? 'alert-success' : 'alert-danger'" x-text="t.msg"></div>
   </template>
 </div>
@@ -448,8 +537,10 @@
     <div class="modal-content">
       <div class="modal-header py-2">
         <h6 class="modal-title" x-text="pvName"></h6>
+        <!-- the blob is revoked by the hidden.bs.modal listener in init(),
+             which also covers Esc and backdrop clicks -->
         <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"
-                @click="pvUrl = ''"></button>
+                aria-label="Close preview"></button>
       </div>
       <div class="modal-body text-center">
         <img x-show="pvKind === 'img'" :src="pvKind === 'img' ? pvUrl : ''" class="img-fluid">
@@ -470,17 +561,22 @@
 <div class="modal fade" id="edModal" tabindex="-1" data-bs-backdrop="static" aria-hidden="true">
   <div class="modal-dialog modal-xl modal-dialog-scrollable modal-fullscreen-sm-down">
     <div class="modal-content">
-      <div class="modal-header py-2">
-        <h6 class="modal-title">
+      <div class="modal-header py-2 gap-2">
+        <h6 class="modal-title text-truncate me-auto">
           <span x-text="edName"></span>
           <span class="text-muted" x-show="edText !== edLoaded" x-cloak>&nbsp;&#9679; unsaved</span>
+          <!-- which folder this file is in: the editor can be reached from the
+               paste bin too, where the current breadcrumb is not the answer -->
+          <span class="d-block text-muted fw-normal" style="font-size:.72rem;"
+                x-text="edDir"></span>
         </h6>
-        <div class="d-flex gap-2 align-items-center">
+        <div class="d-flex gap-3 align-items-center flex-shrink-0">
           <button class="btn btn-sm btn-primary" @click="edSave()"
                   :disabled="edBusy || edText === edLoaded">
             <span x-show="!edBusy">Save</span><span x-show="edBusy" class="spin">&#8635;</span>
           </button>
-          <button type="button" class="btn-close btn-sm" @click="edClose()"></button>
+          <button type="button" class="btn-close btn-sm" @click="edClose()"
+                  aria-label="Close editor"></button>
         </div>
       </div>
       <div class="modal-body p-2 d-flex flex-column">
@@ -563,12 +659,15 @@ function app() {
 
     expVol: null, expPath: '/', expEntries: [], expErr: '', expBusy: false,
     expDropHover: false,
+    // listing view state: filter text, sort column, sort direction (1 | -1)
+    expQuery: '', expSort: 'name', expDir: 1,
     expUploads: [],
     toasts: [],
     pvName: '', pvUrl: '', pvKind: '',
     preflightWarnings: [],
     _autoAttached: false,
-    askTitle: '', askValue: '', askBtn: 'OK', _askResolve: null,
+    askTitle: '', askValue: '', askBtn: 'OK', askHint: '', _askResolve: null,
+    cfTitle: '', cfBody: '', cfYes: 'OK', cfNo: 'Cancel', cfDanger: false, _cfResolve: null,
 
     // editor: path is the file's FULL path; dir is where a save uploads to
     edName: '', edDir: '/', edText: '', edLoaded: '', edBusy: false, edErr: '',
@@ -591,9 +690,10 @@ function app() {
     // or null on cancel/dismiss. Calls are SERIALIZED through a promise
     // chain -- a second ask() while the modal is mid-hide used to overwrite
     // the pending resolver, losing the first caller's flow entirely.
-    ask(title, initial = '', btn = 'OK') {
+    ask(title, initial = '', btn = 'OK', hint = '') {
       const run = () => new Promise(res => {
         this.askTitle = title; this.askValue = initial; this.askBtn = btn;
+        this.askHint = hint;
         this._askResolve = res;
         this._modal('askModal').show();
       });
@@ -611,6 +711,25 @@ function app() {
       this._askOut = null;
       this._modal('askModal').hide();
     },
+
+    // Styled replacement for window.confirm(), resolving true/false. Shares
+    // ask()'s promise chain deliberately: a confirm raised while an ask is
+    // mid-hide must QUEUE, not stack -- stacking is what silently ate
+    // operations before. Shadowing the global name is intentional, so a stray
+    // bare confirm() left in an Alpine expression lands here, not on the OS
+    // dialog. Inside these methods it must always be called as this.confirm().
+    confirm(title, body = '', yes = 'OK', danger = false, no = 'Cancel') {
+      const run = () => new Promise(res => {
+        this.cfTitle = title; this.cfBody = body;
+        this.cfYes = yes; this.cfNo = no; this.cfDanger = danger;
+        this._cfResolve = res;
+        this._modal('confirmModal').show();
+      });
+      this._askChain = (this._askChain || Promise.resolve()).then(run, run);
+      return this._askChain;
+    },
+    cfOk() { this._cfOut = true; this._modal('confirmModal').hide(); },
+    cfCancel() { this._cfOut = false; this._modal('confirmModal').hide(); },
 
     attachedFor(v) {
       if (!v.mounted) return false;
@@ -630,6 +749,20 @@ function app() {
         const r = this._askResolve; this._askResolve = null;
         const v = this._askOut ?? null; this._askOut = null;
         if (r) r(v);  // Esc/backdrop dismissal never set _askOut -> null
+      });
+      // Same handoff for confirm: resolve only once fully hidden, so the
+      // caller's next modal does not open against bootstrap's hide animation.
+      document.getElementById('confirmModal').addEventListener('hidden.bs.modal', () => {
+        const r = this._cfResolve; this._cfResolve = null;
+        const v = this._cfOut ?? false; this._cfOut = null;
+        if (r) r(v);  // Esc/backdrop dismissal reads as "no"
+      });
+      // Preview blobs were never revoked; closing by Esc or backdrop also left
+      // the last one wired to the <img>/<iframe>. One listener covers every
+      // close path.
+      document.getElementById('pvModal').addEventListener('hidden.bs.modal', () => {
+        if (this.pvUrl.startsWith('blob:')) URL.revokeObjectURL(this.pvUrl);
+        this.pvUrl = ''; this.pvKind = '';
       });
       await this.refresh();
       try {
@@ -897,6 +1030,7 @@ function app() {
     // -- file explorer ------------------------------------------------------
     openExplorer(v) {
       this.expVol = v; this.expPath = '/'; this.expEntries = []; this.expErr = '';
+      this.expQuery = '';
       this._autoAttached = false;  // one auto-attach attempt per open
       this._modal('expModal').show();
       this.loadFiles();
@@ -930,7 +1064,54 @@ function app() {
       return out;
     },
 
-    navTo(p) { this.expPath = p || '/'; this.loadFiles(); },
+    navTo(p) { this.expPath = p || '/'; this.expQuery = ''; this.loadFiles(); },
+
+    // -- listing view: filter + sort applied over the loaded folder ----------
+    expSortBy(k) {
+      if (this.expSort === k) this.expDir = -this.expDir;
+      else { this.expSort = k; this.expDir = 1; }
+    },
+    expCaret(k) { return this.expSort === k ? (this.expDir > 0 ? ' ▴' : ' ▾') : ''; },
+
+    expRows() {
+      const q = this.expQuery.trim().toLowerCase();
+      const rows = q ? this.expEntries.filter(e => e.name.toLowerCase().includes(q))
+                     : this.expEntries.slice();
+      const k = this.expSort, d = this.expDir;
+      rows.sort((a, b) => {
+        // folders first is a filesystem convention, not a sort key: it holds
+        // whichever column the user sorts by
+        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+        let r;
+        if (k === 'size') r = (a.size || 0) - (b.size || 0);
+        else if (k === 'mtime') r = (a.mtime || 0) - (b.mtime || 0);
+        // numeric: 'report-2' must sort before 'report-10', not after it
+        else r = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+        return r * d;
+      });
+      return rows;
+    },
+
+    expSummary() {
+      const shown = this.expRows(), total = this.expEntries.length;
+      const dirs = shown.filter(e => e.type === 'dir').length;
+      const files = shown.length - dirs;
+      const bytes = shown.reduce((n, e) => n + (e.type === 'file' ? (e.size || 0) : 0), 0);
+      const parts = [];
+      if (dirs) parts.push(`${dirs} folder${dirs === 1 ? '' : 's'}`);
+      if (files) parts.push(`${files} file${files === 1 ? '' : 's'}`);
+      let s = parts.join(', ') || 'empty';
+      if (files) s += ` · ${this.fmtBytes(bytes)}`;
+      if (shown.length !== total) s += ` (of ${total})`;
+      return s;
+    },
+
+    // what the hidden Size/Modified columns become on a phone
+    expSub(e) {
+      return e.type === 'file'
+        ? `${this.fmtBytes(e.size)} · ${this.fmtTime(e.mtime)}`
+        : this.fmtTime(e.mtime);
+    },
 
     async loadFiles() {
       if (!this.expVol) return;
@@ -938,9 +1119,7 @@ function app() {
       try {
         const r = await this.api('GET',
           `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expPath)}`);
-        if (r.ok) this.expEntries = r.data.slice().sort((a, b) =>
-          a.type === b.type ? a.name.localeCompare(b.name)
-                            : (a.type === 'dir' ? -1 : 1));
+        if (r.ok) this.expEntries = r.data.slice();  // expRows() filters + sorts
         else if (r.status === 401) {
           // Unlocked (encrypted) volume, but this browser holds no session:
           // route to the PIN modal once. The guard flag stops a failed
@@ -978,7 +1157,10 @@ function app() {
     },
 
     async expDelete(e) {
-      if (!confirm(`Delete ${e.name}${e.type === 'dir' ? ' and its contents' : ''}?`)) return;
+      const ok = await this.confirm(
+        'Delete?', `${e.name}${e.type === 'dir' ? ' and everything inside it' : ''} ` +
+        'will be removed. This cannot be undone.', 'Delete', true);
+      if (!ok) return;
       const r = await this.api('DELETE',
         `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expJoin(e.name))}`);
       if (!r.ok) { this.expErr = r.data?.error || 'delete failed.'; this.toast(this.expErr, false); }
@@ -1009,16 +1191,23 @@ function app() {
       await this._transfer('move', this.expJoin(e.name), this.expJoin(name), 'Renamed');
     },
 
+    // Destination is an absolute path inside the volume, which the prefilled
+    // value demonstrates — the hint says so for anyone who clears the field.
+    _pathHint: 'Absolute path inside this volume, e.g. /reports/2026/name.txt. ' +
+               'The destination folder must already exist.',
+
     async expMove(e) {
-      const dst = await this.ask('Move to (full path)', this.expJoin(e.name), 'Move');
-      if (!dst || dst === this.expJoin(e.name)) return;
-      await this._transfer('move', this.expJoin(e.name), dst, 'Moved');
+      const src = this.expJoin(e.name);
+      const dst = await this.ask(`Move ${e.name}`, src, 'Move', this._pathHint);
+      if (!dst || dst === src) return;
+      await this._transfer('move', src, dst, 'Moved');
     },
 
     async expCopy(e) {
-      const dst = await this.ask('Copy to (full path)', this.expJoin(e.name) + '.copy', 'Copy');
-      if (!dst) return;
-      await this._transfer('copy', this.expJoin(e.name), dst, 'Copied');
+      const src = this.expJoin(e.name);
+      const dst = await this.ask(`Copy ${e.name}`, src + '.copy', 'Copy', this._pathHint);
+      if (!dst || dst === src) return;
+      await this._transfer('copy', src, dst, 'Copied');
     },
 
     async _transfer(op, src, dst, verb) {
@@ -1075,9 +1264,13 @@ function app() {
       return await r.text();
     },
 
-    edOpen(e) {
-      if (e.size > 2 * 1024 * 1024 &&
-          !confirm(`${e.name} is ${this.fmtBytes(e.size)} — open anyway?`)) return;
+    async edOpen(e) {
+      if (e.size > 2 * 1024 * 1024) {
+        const ok = await this.confirm('Large file',
+          `${e.name} is ${this.fmtBytes(e.size)}. Opening it in the editor loads ` +
+          'the whole file into the browser.', 'Open anyway');
+        if (!ok) return;
+      }
       this.edOpenPath(this.expPath, e.name);
     },
 
@@ -1120,9 +1313,12 @@ function app() {
       this.edBusy = false;
     },
 
-    edClose() {
-      if (this.edText !== this.edLoaded &&
-          !confirm('Discard unsaved changes?')) return;
+    async edClose() {
+      if (this.edText !== this.edLoaded) {
+        const ok = await this.confirm('Discard changes?',
+          `${this.edName} has unsaved edits.`, 'Discard', true, 'Keep editing');
+        if (!ok) return;
+      }
       this._modal('edModal').hide();
     },
 
@@ -1229,12 +1425,13 @@ function app() {
         const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
         const magic = 'SQLite format 3\u0000';
         if (String.fromCharCode(...head) === magic) {
-          if (confirm(`"${file.name}" looks like an aloelite filesystem.\n\n` +
-                      `OK = import it as a new filesystem.\n` +
-                      `Cancel = store it as a file inside this volume.`)) {
-            await this._importFile(file);
-            return;
-          }
+          // both outcomes are legitimate, so name them on the buttons rather
+          // than making the user decode OK/Cancel
+          const imp = await this.confirm('That looks like an aloelite file',
+            `"${file.name}" is an aloelite filesystem. Import it as its own ` +
+            'filesystem, or store it as an ordinary file inside this volume?',
+            'Import it', false, 'Store as a file');
+          if (imp) { await this._importFile(file); return; }
         }
       }
       await this._uploadXhr(file, dirPath);
@@ -1313,7 +1510,21 @@ function app() {
       return `${(n / 1099511627776).toFixed(2)} TB`;
     },
 
-    fmtTime(ts) { return new Date(ts * 1000).toLocaleString(); },
+    // Compact by default — the full toLocaleString ate three lines per row on
+    // a phone, and the year is noise for a file touched this year. The exact
+    // stamp stays available as the cell's title / in stat.
+    fmtTime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts * 1000), now = new Date();
+      if (d.toDateString() === now.toDateString()) {
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+      return d.toLocaleDateString([], d.getFullYear() === now.getFullYear()
+        ? { month: 'short', day: 'numeric' }
+        : { year: 'numeric', month: 'short', day: 'numeric' });
+    },
+
+    fmtTimeFull(ts) { return ts ? new Date(ts * 1000).toLocaleString() : ''; },
   };
 }
 </script>
