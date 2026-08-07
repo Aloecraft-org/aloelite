@@ -6,6 +6,9 @@ on:
     tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
+  # Re-running a green-by-infrastructure-accident commit shouldn't need a
+  # push. See the note in publish.yml.
+  workflow_dispatch:
 
 jobs:
   lint:

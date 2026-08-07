@@ -4,13 +4,27 @@ on:
   push:
     tags:
       - "v*"
+  # A tag pushes once. When the tag-triggered run dies for reasons that have
+  # nothing to do with the code -- the 2026-08-06 Actions outage failed every
+  # job at "Getting action download info" -- there is otherwise no way to
+  # retry short of deleting and re-pushing the tag. Dispatch the tag instead.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag to build and publish (e.g. v0.3.3)"
+        required: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+      # On a tag push `inputs.ref` is empty and this is the tag, as before.
+      # On a manual dispatch it is the tag typed into the input, so the build
+      # is of that release -- not of whatever branch the dispatch came from.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
