@@ -8,7 +8,7 @@
 
 [Overview](/README.md) | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
 
-**Troubleshooting (This Document)** | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md)
+**Troubleshooting (This Document)** | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md) | [Roadmap](/doc/ROADMAP.md)
 </div>
 
 ## FUSE

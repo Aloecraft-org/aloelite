@@ -339,10 +339,73 @@ def test_admin_page_is_self_contained(client):
     body = r.data.decode()
     assert "cdn.jsdelivr.net" not in body
     assert "unpkg.com" not in body
-    for asset in ("bootstrap.min.css", "alpine.min.js", "bootstrap.bundle.min.js"):
+    for asset in (
+        "bootstrap.min.css",
+        "alpine.min.js",
+        "bootstrap.bundle.min.js",
+        "admin.js",
+        "marked.js",
+        "prism.js",
+        "signature_pad.js",
+    ):
         assert f"/static/{asset}" in body
         a = client.get(f"/static/{asset}")
         assert a.status_code == 200 and len(a.data) > 10_000
+
+
+# -- inline preview content types -------------------------------------------
+#
+# mimetypes.guess_type is wrong in three different ways for a preview, and
+# each sends the browser somewhere that is not "show me the file":
+# text/markdown and text/csv download, an unguessable type becomes
+# octet-stream and downloads, and .rs guesses an XML type that renders as a
+# parse error. These pin the override so a preview cannot quietly regress
+# back into a download prompt.
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "note.md",  # guessed text/markdown -> download
+        "data.csv",  # guessed text/csv -> download
+        "main.rs",  # guessed application/rls-services+xml -> XML parse error
+        "app.log",  # unguessable -> octet-stream
+        "conf.toml",  # unguessable -> octet-stream
+        "settings.ini",
+        "main.go",
+        "Makefile",  # no extension at all
+        ".bashrc",  # a leading dot is not an extension separator
+        "query.sql",
+        "script.py",
+    ],
+)
+def test_inline_preview_serves_text_as_plain(client, name):
+    assert _upload(client, "/", name, b"hello").status_code == 201
+    r = client.get(f"/volumes/v1/files/download?path=/{name}&inline=1")
+    assert r.status_code == 200
+    ct = r.headers["Content-Type"]
+    assert ct.startswith("text/plain"), f"{name} -> {ct}"
+    # exactly one charset: werkzeug appends its own to any text/* mimetype, so
+    # returning "text/plain; charset=utf-8" from the helper double-stamps it
+    assert ct.count("charset=") == 1, ct
+    assert "utf-8" in ct.lower()
+
+
+def test_inline_preview_keeps_real_binary_types(client):
+    """The override is for text only -- a PNG must still say image/png or the
+    preview's <img> path breaks."""
+    assert _upload(client, "/", "pic.png", b"\x89PNG\r\n\x1a\n").status_code == 201
+    r = client.get("/volumes/v1/files/download?path=/pic.png&inline=1")
+    assert r.headers["Content-Type"] == "image/png"
+
+
+def test_download_without_inline_is_still_an_attachment(client):
+    """Only previews are retyped. A plain download stays a byte stream with an
+    attachment disposition, whatever the extension."""
+    assert _upload(client, "/", "note.md", b"# hi").status_code == 201
+    r = client.get("/volumes/v1/files/download?path=/note.md")
+    assert r.headers["Content-Type"] == "application/octet-stream"
+    assert r.headers["Content-Disposition"].startswith("attachment")
 
 
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>

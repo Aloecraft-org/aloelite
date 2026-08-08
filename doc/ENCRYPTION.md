@@ -8,7 +8,7 @@
 
 [Overview](/README.md) | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
 
-[Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | **Encryption Spec (This Document)**
+[Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | **Encryption Spec (This Document)** | [Roadmap](/doc/ROADMAP.md)
 </div>
 
 > **OPEN DECISION — `mount_secret` seals K_u or K_v?**

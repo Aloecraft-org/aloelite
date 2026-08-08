@@ -8,7 +8,7 @@
 
 [Overview](/README.md) | [Getting Started](/doc/GETTING_STARTED.md) |  **Frequently Asked Questions (This Document)** 
 
-[Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md)
+[Troubleshooting](/doc/TROUBLESHOOTING.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md) | [Roadmap](/doc/ROADMAP.md)
 </div>
 
 ## Frequently Asked Questions

@@ -8,8 +8,15 @@
        CDN references would leak page loads off a private deployment and
        break the UI where the VPN'd client has no other egress. -->
   <link href="{{ url_for('static', filename='bootstrap.min.css') }}" rel="stylesheet">
+  <link href="{{ url_for('static', filename='prism.css') }}" rel="stylesheet">
   <script defer src="{{ url_for('static', filename='alpine.min.js') }}"></script>
   <script src="{{ url_for('static', filename='bootstrap.bundle.min.js') }}"></script>
+  <!-- marked: markdown -> HTML for the preview pane. prism: editor syntax
+       highlighting. signature_pad: the sketch pad's stroke handling. All are
+       plain <script> builds -- no bundler. See static/VENDOR.md. -->
+  <script src="{{ url_for('static', filename='marked.js') }}"></script>
+  <script src="{{ url_for('static', filename='prism.js') }}"></script>
+  <script src="{{ url_for('static', filename='signature_pad.js') }}"></script>
   <style>
     body { background: #f8f9fa; }
     .vol-card { transition: box-shadow .15s; }
@@ -38,6 +45,56 @@
     th.sortable:hover { color: #0d6efd; }
     .spin { animation: spin .8s linear infinite; display: inline-block; }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* --- editor: highlighted <pre> UNDER a transparent <textarea> ---------
+       The two layers must agree on every metric that affects line wrapping
+       (font, size, line-height, padding, white-space, word-break, tab-size)
+       or the caret drifts away from the glyphs it is sitting on. Change one,
+       change both -- that is why they share a selector here. */
+    .ed-stack { position: relative; flex: 1 1 auto; min-height: 58vh;
+                border: 1px solid #dee2e6; border-radius: .375rem; overflow: hidden; }
+    .ed-stack > pre, .ed-stack > textarea {
+      margin: 0; padding: .5rem .75rem; border: 0;
+      font-family: var(--bs-font-monospace, monospace);
+      font-size: .85rem; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word;
+      tab-size: 2; -moz-tab-size: 2;
+    }
+    .ed-stack > pre {
+      position: absolute; inset: 0; overflow: auto;
+      background: #fff; pointer-events: none;
+    }
+    .ed-stack > textarea {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      resize: none; outline: none; overflow: auto;
+      background: transparent; color: transparent; caret-color: #212529;
+    }
+    /* highlighting off (file over the size cap, or an unknown language):
+       the <pre> is not rendered, so the textarea must paint itself */
+    .ed-stack.ed-plain > textarea { color: #212529; background: #fff; }
+    .ed-stack > textarea::selection { background: rgba(13,110,253,.25); }
+    /* plain class, NOT d-flex: x-show controls this row (see the !important
+       warning above) */
+    .ed-md-bar { display: flex; flex-wrap: wrap; gap: .25rem; margin-bottom: .5rem; }
+    .ed-pane { display: flex; gap: .5rem; flex: 1 1 auto; min-height: 58vh; }
+    .ed-pane > * { flex: 1 1 50%; min-width: 0; }
+    .ed-prev { border: 1px solid #dee2e6; border-radius: .375rem; background: #fff; }
+    @media (max-width: 767.98px) { .ed-pane { flex-direction: column; } }
+
+    /* --- sketch pad ------------------------------------------------------ */
+    .sk-wrap { position: relative; border: 1px solid #dee2e6; border-radius: .375rem;
+               overflow: hidden; background: #fff; }
+    .sk-wrap canvas { display: block; width: 100%; height: 60vh; touch-action: none; }
+    .sk-bg { position: absolute; inset: 0; pointer-events: none; }
+    .sk-bg.grid { background-image:
+        linear-gradient(to right, #e9ecef 1px, transparent 1px),
+        linear-gradient(to bottom, #e9ecef 1px, transparent 1px);
+      background-size: 24px 24px; }
+    .sk-bg.dots { background-image: radial-gradient(#ced4da 1.2px, transparent 1.2px);
+      background-size: 20px 20px; }
+    .sk-sw { width: 24px; height: 24px; border-radius: 50%; border: 2px solid #fff;
+             box-shadow: 0 0 0 1px #adb5bd; cursor: pointer; padding: 0; }
+    .sk-sw[aria-pressed="true"] { box-shadow: 0 0 0 2px #0d6efd; }
   </style>
 </head>
 <body x-data="app()" x-init="init()">
@@ -410,6 +467,7 @@
             </label>
             <button class="btn btn-sm btn-outline-primary" @click="openPastes()">Pastes</button>
             <button class="btn btn-sm btn-outline-secondary" @click="edNew()">New file</button>
+            <button class="btn btn-sm btn-outline-secondary" @click="skOpen()">Sketch</button>
             <button class="btn btn-sm btn-outline-secondary" @click="expMkdir()">New folder</button>
             <button class="btn btn-sm btn-outline-secondary" @click="loadFiles()"
                     :disabled="expBusy" aria-label="Reload this folder" title="Reload">
@@ -543,15 +601,30 @@
                 aria-label="Close preview"></button>
       </div>
       <div class="modal-body text-center">
+        <div x-show="pvErr" x-cloak class="alert alert-warning py-1 px-2 small mb-2"
+             x-text="pvErr"></div>
         <img x-show="pvKind === 'img'" :src="pvKind === 'img' ? pvUrl : ''" class="img-fluid">
         <!-- sandbox="" so an uploaded .html can't script against the manager origin -->
         <iframe x-show="pvKind === 'frame'" sandbox=""
                 :src="pvKind === 'frame' ? pvUrl : ''"
                 style="width:100%; height:70vh; border:0;"></iframe>
+        <!-- rendered markdown. Same sandbox, but the HTML is ours (marked
+             output), delivered by srcdoc rather than as a volume URL. -->
+        <iframe x-show="pvKind === 'md'" sandbox=""
+                :srcdoc="pvKind === 'md' ? pvDoc : ''"
+                style="width:100%; height:70vh; border:0;"></iframe>
         <!-- pdf viewer refuses to render sandboxed; PDFs are inert enough -->
         <iframe x-show="pvKind === 'pdf'"
                 :src="pvKind === 'pdf' ? pvUrl : ''"
                 style="width:100%; height:70vh; border:0;"></iframe>
+        <!-- media: always a blob: URL (see mediaPreview) so seeking works -->
+        <audio x-show="pvKind === 'audio'" controls preload="metadata"
+               :src="pvKind === 'audio' ? pvUrl : ''" style="width:100%;"
+               @error="pvMediaError()"></audio>
+        <video x-show="pvKind === 'video'" controls preload="metadata"
+               :src="pvKind === 'video' ? pvUrl : ''"
+               style="width:100%; max-height:70vh;"
+               @error="pvMediaError()"></video>
       </div>
     </div>
   </div>
@@ -571,6 +644,16 @@
                 x-text="edDir"></span>
         </h6>
         <div class="d-flex gap-3 align-items-center flex-shrink-0">
+          <!-- markdown files get a view switch; everything else is edit-only -->
+          <div class="btn-group btn-group-sm" role="group" aria-label="View"
+               x-show="edIsMd" x-cloak>
+            <template x-for="m in ['edit', 'split', 'preview']" :key="m">
+              <button type="button" class="btn btn-outline-secondary text-capitalize"
+                      :class="edView === m ? 'active' : ''"
+                      :aria-pressed="edView === m"
+                      @click="edSetView(m)" x-text="m"></button>
+            </template>
+          </div>
           <button class="btn btn-sm btn-primary" @click="edSave()"
                   :disabled="edBusy || edText === edLoaded">
             <span x-show="!edBusy">Save</span><span x-show="edBusy" class="spin">&#8635;</span>
@@ -581,10 +664,95 @@
       </div>
       <div class="modal-body p-2 d-flex flex-column">
         <div x-show="edErr" x-cloak class="alert alert-danger py-1 px-2 small mb-2" x-text="edErr"></div>
-        <textarea class="form-control font-monospace flex-grow-1" x-model="edText"
-                  spellcheck="false" autocapitalize="off" autocomplete="off"
-                  style="min-height:60vh; font-size:.85rem; resize:none;"
-                  @keydown.ctrl.s.prevent="edSave()" @keydown.meta.s.prevent="edSave()"></textarea>
+
+        <!-- markdown formatting toolbar: plain selection surgery on the
+             textarea, no editor library behind it -->
+        <div class="ed-md-bar" x-show="edIsMd && edView !== 'preview'" x-cloak>
+          <template x-for="b in edMdButtons" :key="b.title">
+            <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2"
+                    style="font-size:.78rem;" :title="b.title" :aria-label="b.title"
+                    @click="edMd(b.op)" x-html="b.label"></button>
+          </template>
+        </div>
+
+        <div class="ed-pane" :style="edIsMd && edView === 'split' ? '' : 'display:block;'">
+          <!-- highlighted layer is inert (pointer-events:none); all input
+               goes to the textarea sitting transparently on top of it -->
+          <div class="ed-stack" :class="edHl ? '' : 'ed-plain'"
+               x-show="!(edIsMd && edView === 'preview')">
+            <pre x-show="edHl" aria-hidden="true" x-ref="edPre"><code x-html="edHtml"></code></pre>
+            <textarea x-model="edText" x-ref="edTa"
+                      spellcheck="false" autocapitalize="off" autocomplete="off"
+                      @scroll="edSyncScroll()"
+                      @keydown.tab.prevent="edTab($event)"
+                      @keydown.enter="edEnter($event)"
+                      @keydown.ctrl.s.prevent="edSave()"
+                      @keydown.meta.s.prevent="edSave()"></textarea>
+          </div>
+          <iframe class="ed-prev" sandbox="" x-show="edIsMd && edView !== 'edit'" x-cloak
+                  :srcdoc="edIsMd && edView !== 'edit' ? edMdDoc : ''"></iframe>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- sketch pad: finger/stylus jotting. Saves SVG, which canPreview already
+     shows through the image path, so a sketch is viewable the moment it
+     lands. Pan/zoom is deliberately absent -- see doc/ROADMAP.md. -->
+<div class="modal fade" id="skModal" tabindex="-1" data-bs-backdrop="static" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable modal-fullscreen-sm-down">
+    <div class="modal-content">
+      <div class="modal-header py-2 gap-2">
+        <h6 class="modal-title me-auto">
+          Sketch
+          <span class="d-block text-muted fw-normal" style="font-size:.72rem;"
+                x-text="skDir"></span>
+        </h6>
+        <div class="d-flex gap-2 align-items-center flex-shrink-0">
+          <button class="btn btn-sm btn-primary" @click="skSave()" :disabled="skBusy">
+            <span x-show="!skBusy">Save</span><span x-show="skBusy" class="spin">&#8635;</span>
+          </button>
+          <button type="button" class="btn-close btn-sm" @click="skClose()"
+                  aria-label="Close sketch pad"></button>
+        </div>
+      </div>
+      <div class="modal-body p-2">
+        <div x-show="skErr" x-cloak class="alert alert-danger py-1 px-2 small mb-2" x-text="skErr"></div>
+        <div class="d-flex flex-wrap gap-3 align-items-center mb-2">
+          <div class="d-flex gap-1 align-items-center">
+            <template x-for="c in skColors" :key="c">
+              <button type="button" class="sk-sw" :style="'background:' + c"
+                      :aria-pressed="skColor === c" :aria-label="'Colour ' + c"
+                      @click="skSetColor(c)"></button>
+            </template>
+          </div>
+          <div class="d-flex gap-1 align-items-center">
+            <label class="text-muted" style="font-size:.78rem;" for="skSize">Pen</label>
+            <input id="skSize" type="range" class="form-range" style="width:90px;"
+                   min="1" max="8" step="1" x-model.number="skSize" @input="skSetSize()">
+          </div>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Background">
+            <template x-for="b in ['blank', 'grid', 'dots']" :key="b">
+              <button type="button" class="btn btn-outline-secondary text-capitalize"
+                      :class="skBg === b ? 'active' : ''" :aria-pressed="skBg === b"
+                      @click="skBg = b" x-text="b"></button>
+            </template>
+          </div>
+          <div class="d-flex gap-1 ms-auto">
+            <button class="btn btn-sm btn-outline-secondary" @click="skUndo()">Undo</button>
+            <button class="btn btn-sm btn-outline-danger" @click="skClear()">Clear</button>
+          </div>
+        </div>
+        <div class="sk-wrap">
+          <!-- background sits UNDER the canvas so it is a guide, not ink:
+               it never lands in the saved SVG -->
+          <div class="sk-bg" :class="skBg"></div>
+          <canvas x-ref="skCanvas"></canvas>
+        </div>
+        <p class="text-muted mb-0 mt-1" style="font-size:.72rem;">
+          Saved as SVG in <span x-text="skDir"></span>.
+        </p>
       </div>
     </div>
   </div>
@@ -637,897 +805,7 @@
   </div>
 </div>
 
-<script>
-function app() {
-  return {
-    apiBase: '',   // empty = same origin; set to 'http://localhost:8080' for cross-origin dev
-    fss: [],       // filesystems, each with .volumes
-    log: [],
-    loading: false,
-    apiOk: false,
-
-    showCreate: false,
-    newName: '', newEnc: false, newPin: '', newPin2: '', newFsId: '', newShowTarget: false,
-    createErr: '', creating: false,
-
-    mountTarget: null,
-    mountPin: '', mountPath: '', mountErr: '', mounting: false,
-
-    unlockTarget: null, unlockPin: '', unlockErr: '', unlocking: false,
-
-    delTarget: null,
-
-    expVol: null, expPath: '/', expEntries: [], expErr: '', expBusy: false,
-    expDropHover: false,
-    // listing view state: filter text, sort column, sort direction (1 | -1)
-    expQuery: '', expSort: 'name', expDir: 1,
-    expUploads: [],
-    toasts: [],
-    pvName: '', pvUrl: '', pvKind: '',
-    preflightWarnings: [],
-    _autoAttached: false,
-    askTitle: '', askValue: '', askBtn: 'OK', askHint: '', _askResolve: null,
-    cfTitle: '', cfBody: '', cfYes: 'OK', cfNo: 'Cancel', cfDanger: false, _cfResolve: null,
-
-    // editor: path is the file's FULL path; dir is where a save uploads to
-    edName: '', edDir: '/', edText: '', edLoaded: '', edBusy: false, edErr: '',
-    // paste bin: newest-first entries of the volume's /pastes folder
-    pbText: '', pbEntries: [], pbBusy: false, pbErr: '',
-
-    _modal(id) { return bootstrap.Modal.getOrCreateInstance(document.getElementById(id)); },
-
-    // Per-volume session token, held EXPLICITLY (localStorage + header)
-    // instead of relying on browser cookie policy, which proved
-    // unpredictable (ENCRYPTION.md: the client holds only T).
-    _tok(vid) { try { return localStorage.getItem('aloe_t_' + vid); } catch { return null; } },
-    _setTok(vid, t) { try { localStorage.setItem('aloe_t_' + vid, t); } catch {} },
-    _clearTok(vid) { try { localStorage.removeItem('aloe_t_' + vid); } catch {} },
-
-    // Is the volume usable by THIS client as-is? Plain: mounted is enough.
-    // Encrypted: we must hold its session token (server 'attached' covers
-    // cookie-jar clients; a stale local token surfaces as 401 -> PIN modal).
-    // Styled replacement for window.prompt(): resolves the entered string,
-    // or null on cancel/dismiss. Calls are SERIALIZED through a promise
-    // chain -- a second ask() while the modal is mid-hide used to overwrite
-    // the pending resolver, losing the first caller's flow entirely.
-    ask(title, initial = '', btn = 'OK', hint = '') {
-      const run = () => new Promise(res => {
-        this.askTitle = title; this.askValue = initial; this.askBtn = btn;
-        this.askHint = hint;
-        this._askResolve = res;
-        this._modal('askModal').show();
-      });
-      this._askChain = (this._askChain || Promise.resolve()).then(run, run);
-      return this._askChain;
-    },
-    // Resolution happens in the hidden.bs.modal listener (init), AFTER the
-    // modal has fully hidden -- resolving mid-transition let callers open
-    // the next modal against bootstrap's hide animation, which swallowed it.
-    askOk() {
-      this._askOut = this.askValue.trim() || null;
-      this._modal('askModal').hide();
-    },
-    askCancel() {
-      this._askOut = null;
-      this._modal('askModal').hide();
-    },
-
-    // Styled replacement for window.confirm(), resolving true/false. Shares
-    // ask()'s promise chain deliberately: a confirm raised while an ask is
-    // mid-hide must QUEUE, not stack -- stacking is what silently ate
-    // operations before. Shadowing the global name is intentional, so a stray
-    // bare confirm() left in an Alpine expression lands here, not on the OS
-    // dialog. Inside these methods it must always be called as this.confirm().
-    confirm(title, body = '', yes = 'OK', danger = false, no = 'Cancel') {
-      const run = () => new Promise(res => {
-        this.cfTitle = title; this.cfBody = body;
-        this.cfYes = yes; this.cfNo = no; this.cfDanger = danger;
-        this._cfResolve = res;
-        this._modal('confirmModal').show();
-      });
-      this._askChain = (this._askChain || Promise.resolve()).then(run, run);
-      return this._askChain;
-    },
-    cfOk() { this._cfOut = true; this._modal('confirmModal').hide(); },
-    cfCancel() { this._cfOut = false; this._modal('confirmModal').hide(); },
-
-    attachedFor(v) {
-      if (!v.mounted) return false;
-      if (v.frontend === 'fuse' || !v.encrypted) return true;
-      return v.attached === true || !!this._tok(v.id);
-    },
-
-    async init() {
-      for (const [id, sel] of [['askModal', '#askModal input'],
-                               ['unlockModal', '#unlockModal input']]) {
-        document.getElementById(id).addEventListener('shown.bs.modal', () => {
-          const i = document.querySelector(sel);
-          if (i) { i.focus(); if (i.select) i.select(); }
-        });
-      }
-      document.getElementById('askModal').addEventListener('hidden.bs.modal', () => {
-        const r = this._askResolve; this._askResolve = null;
-        const v = this._askOut ?? null; this._askOut = null;
-        if (r) r(v);  // Esc/backdrop dismissal never set _askOut -> null
-      });
-      // Same handoff for confirm: resolve only once fully hidden, so the
-      // caller's next modal does not open against bootstrap's hide animation.
-      document.getElementById('confirmModal').addEventListener('hidden.bs.modal', () => {
-        const r = this._cfResolve; this._cfResolve = null;
-        const v = this._cfOut ?? false; this._cfOut = null;
-        if (r) r(v);  // Esc/backdrop dismissal reads as "no"
-      });
-      // Preview blobs were never revoked; closing by Esc or backdrop also left
-      // the last one wired to the <img>/<iframe>. One listener covers every
-      // close path.
-      document.getElementById('pvModal').addEventListener('hidden.bs.modal', () => {
-        if (this.pvUrl.startsWith('blob:')) URL.revokeObjectURL(this.pvUrl);
-        this.pvUrl = ''; this.pvKind = '';
-      });
-      await this.refresh();
-      try {
-        const h = await this.api('GET', '/health');
-        if (h.ok) this.preflightWarnings = h.data.warnings || [];
-      } catch {}
-      // reopen showCreate watcher so Alpine show/hide still works alongside BS modals
-      this.$watch('showCreate', v => v ? this._modal('createModal').show() : this._modal('createModal').hide());
-    },
-
-    addLog(msg) {
-      const t = new Date().toLocaleTimeString();
-      this.log.unshift(`[${t}]  ${msg}`);
-      if (this.log.length > 60) this.log.pop();
-    },
-
-    toast(msg, ok = true) {
-      const t = { id: Date.now() + Math.random(), msg, ok };
-      this.toasts.push(t);
-      setTimeout(() => { this.toasts = this.toasts.filter(x => x.id !== t.id); }, 3500);
-    },
-
-    async api(method, path, body) {
-      const opts = { method, headers: { 'Content-Type': 'application/json', 'X-Aloelite': '1' } };
-      const tv = path.match(/^\/volumes\/([^\/?]+)/);
-      if (tv) { const t = this._tok(tv[1]); if (t) opts.headers['X-Aloelite-Token'] = t; }
-      if (body !== undefined) opts.body = JSON.stringify(body);
-      const r = await fetch(this.apiBase + path, opts);
-      const ct = r.headers.get('content-type') || '';
-      const data = ct.includes('application/json') ? await r.json() : null;
-      return { ok: r.ok, status: r.status, data };
-    },
-
-    _vol(id) {
-      for (const f of this.fss) for (const v of f.volumes) if (v.id === id) return v;
-      return null;
-    },
-
-    async refresh() {
-      this.loading = true;
-      try {
-        const r = await this.api('GET', '/filesystems');
-        this.apiOk = r.ok;
-        if (r.ok) {
-          const prev = {};
-          for (const f of this.fss) for (const v of f.volumes) prev[v.id] = v;
-          this.fss = (r.data || []).map(f => ({
-            ...f,
-            volumes: (f.volumes || []).map(v => ({
-              ...v,
-              _stat: prev[v.id]?._stat ?? null,
-              _mounts: prev[v.id]?._mounts ?? null,
-              _log:  prev[v.id]?._log  ?? null,
-              _busy: false,
-            })),
-          }));
-        }
-      } catch { this.apiOk = false; }
-      this.loading = false;
-    },
-
-    async doCreate() {
-      if (!this.newName.trim()) { this.createErr = 'Name is required.'; return; }
-      if (this.newEnc && !this.newPin) { this.createErr = 'PIN is required for encrypted volumes.'; return; }
-      if (this.newEnc && this.newPin !== this.newPin2) { this.createErr = 'PINs do not match.'; return; }
-      this.creating = true; this.createErr = '';
-      try {
-        const body = { name: this.newName.trim(), encrypted: this.newEnc };
-        if (this.newEnc) body.pin = this.newPin;
-        if (this.newFsId) body.fs_id = this.newFsId;
-        const r = await this.api('POST', '/volumes', body);
-        if (!r.ok) { this.createErr = r.data?.error || 'Failed to create volume.'; this.creating = false; return; }
-        const vid = r.data.id;
-        // one action: create -> unlock (direct) -> open the explorer
-        const m = await this.api('POST', `/volumes/${vid}/mount`,
-          this.newEnc ? { mode: 'direct', pin: this.newPin } : { mode: 'direct' });
-        this.addLog(`Created "${this.newName.trim()}"`);
-        this._modal('createModal').hide();
-        this.newName = ''; this.newEnc = false; this.newPin = ''; this.newPin2 = '';
-        this.newFsId = ''; this.newShowTarget = false;
-        await this.refresh();
-        if (m.ok) {
-          const v = this._vol(vid);
-          if (v) this.openExplorer(v);
-        } else {
-          this.addLog(`Unlock after create failed: ${m.data?.error}`);
-        }
-      } catch { this.createErr = 'Could not reach API.'; }
-      this.creating = false;
-    },
-
-    // -- Open / Lock (the simple path) -------------------------------------
-    async openVol(v) {
-      if (v.mounted) {
-        if (!this.attachedFor(v)) {
-          // "open elsewhere": this browser has no session -- the way in is
-          // the PIN, straight to the modal, no explorer flash
-          this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
-          this._modal('unlockModal').show();
-          return;
-        }
-        this.openExplorer(v); return;
-      }
-      if (v.encrypted) {
-        this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
-        this._modal('unlockModal').show();
-        return;
-      }
-      v._busy = true;
-      const r = await this.api('POST', `/volumes/${v.id}/mount`, { mode: 'direct' });
-      v._busy = false;
-      if (r.ok) { await this.refresh(); const nv = this._vol(v.id); if (nv) this.openExplorer(nv); }
-      else this.addLog(`Open "${v.name}" failed: ${r.data?.error}`);
-    },
-
-    async doUnlock() {
-      const v = this.unlockTarget;
-      if (!v) return;
-      this.unlocking = true; this.unlockErr = '';
-      const r = await this.api('POST', `/volumes/${v.id}/mount`,
-        { mode: 'direct', pin: this.unlockPin });
-      this.unlocking = false;
-      if (r.ok) {
-        if (r.data?.token) this._setTok(v.id, r.data.token);
-        this._modal('unlockModal').hide();
-        this.unlockPin = '';
-        await this.refresh();
-        const nv = this._vol(v.id);
-        if (nv) this.openExplorer(nv);
-      } else {
-        this.unlockErr = r.data?.error || 'Unlock failed.';
-      }
-    },
-
-    async lockVol(v) {
-      v._busy = true;
-      const r = await this.api('DELETE', `/volumes/${v.id}/mount`);
-      v._busy = false;
-      if (r.ok) { this._clearTok(v.id); this.addLog(`Locked "${v.name}"`); await this.refresh(); }
-      else this.addLog(`Lock "${v.name}" failed: ${r.data?.error}`);
-    },
-
-    // -- filesystem actions -------------------------------------------------
-    addVolume(f) { this.newFsId = f.id; this.showCreate = true; },
-
-    async renameFs(f) {
-      const name = await this.ask('Rename file', f.display_name, 'Rename');
-      if (!name || name === f.display_name) return;
-      const r = await this.api('PATCH', `/filesystems/${f.id}`, { display_name: name });
-      if (!r.ok) this.addLog(`Rename failed: ${r.data?.error}`);
-      await this.refresh();
-    },
-
-    downloadFs(f) {
-      this.addLog(`Downloading "${f.display_name}"…`);
-      const a = document.createElement('a');
-      a.href = `${this.apiBase}/filesystems/${f.id}/export`;
-      a.download = f.display_name;
-      a.click();
-    },
-
-    async importFs(ev) {
-      const file = ev.target.files[0];
-      ev.target.value = '';
-      if (!file) return;
-      await this._importFile(file);
-    },
-
-    async _importFile(file) {
-      const fd = new FormData();
-      fd.append('file', file);
-      try {
-        const r = await fetch(`${this.apiBase}/filesystems/import`, { method: 'POST', body: fd, headers: { 'X-Aloelite': '1' } });
-        const d = await r.json().catch(() => null);
-        if (r.ok) this.addLog(`Imported "${d.display_name}" (${d.volumes.length} volume(s))`);
-        else this.addLog(`Import failed: ${d?.error || r.status}`);
-      } catch { this.addLog('Could not reach API.'); }
-      await this.refresh();
-    },
-
-    mountVol(v) {
-      this.mountTarget = v; this.mountPin = ''; this.mountPath = ''; this.mountErr = '';
-      this._modal('mountModal').show();
-    },
-
-    async doMount() {
-      if (!this.mountTarget) return;
-      this.mounting = true; this.mountErr = '';
-      await this._doMountRequest(this.mountTarget, this.mountPin || null, this.mountPath || null);
-      this.mounting = false;
-    },
-
-    async _doMountRequest(v, pin, mountPath) {
-      v._busy = true;
-      try {
-        const body = {};
-        if (pin) body.pin = pin;
-        if (mountPath) body.mount_name = mountPath;
-        const r = await this.api('POST', `/volumes/${v.id}/mount`, body);
-        if (r.ok) {
-          this.addLog(`Mounted "${v.name}" → ${r.data.mountpoint}`);
-          this._modal('mountModal').hide();
-          this.mountPin = ''; this.mountPath = ''; this.mountErr = '';
-          await this.refresh();
-        } else {
-          const msg = r.data?.error || 'Mount failed.';
-          if (this.mountTarget?.id === v.id) this.mountErr = msg;
-          else this.addLog(`Error mounting "${v.name}": ${msg}`);
-        }
-      } catch {
-        const msg = 'Could not reach API.';
-        if (this.mountTarget?.id === v.id) this.mountErr = msg;
-        else this.addLog(msg);
-      }
-      v._busy = false;
-    },
-
-    confirmDelete(v) {
-      this.delTarget = v;
-      this._modal('delModal').show();
-    },
-
-    async doDelete() {
-      if (!this.delTarget) return;
-      const v = this.delTarget;
-      this._modal('delModal').hide();
-      try {
-        const r = await this.api('DELETE', `/volumes/${v.id}`);
-        if (r.ok) { this.addLog(`Deleted "${v.name}"`); await this.refresh(); }
-        else { this.addLog(`Error deleting "${v.name}": ${r.data?.error}`); }
-      } catch { this.addLog('Could not reach API.'); }
-    },
-
-    async doCheckpoint(v) {
-      v._busy = true;
-      try {
-        const r = await this.api('POST', `/volumes/${v.id}/checkpoint`);
-        if (r.ok) {
-          const d = r.data;
-          v._log = `Checkpoint: ${d.wal_frames_checkpointed} frames written, ${d.wal_frames_remaining} remaining.`;
-          this.addLog(`Checkpoint "${v.name}": ${d.wal_frames_checkpointed} frames, ${d.wal_frames_remaining} remaining`);
-        } else {
-          v._log = `Checkpoint error: ${r.data?.error}`;
-        }
-      } catch { v._log = 'Could not reach API.'; }
-      v._busy = false;
-    },
-
-    async doStat(v) {
-      try {
-        const r = await this.api('GET', `/volumes/${v.id}/stat`);
-        if (r.ok) { v._stat = r.data; }
-        else { this.addLog(`Stat error for "${v.name}": ${r.data?.error}`); }
-      } catch { this.addLog('Could not reach API.'); }
-    },
-
-    async doMounts(v) {
-      try {
-        const r = await this.api('GET', `/volumes/${v.id}/mounts`);
-        if (r.ok) { v._mounts = r.data; }
-        else { this.addLog(`Mounts error for "${v.name}": ${r.data?.error}`); }
-      } catch { this.addLog('Could not reach API.'); }
-    },
-
-    // -- file explorer ------------------------------------------------------
-    openExplorer(v) {
-      this.expVol = v; this.expPath = '/'; this.expEntries = []; this.expErr = '';
-      this.expQuery = '';
-      this._autoAttached = false;  // one auto-attach attempt per open
-      this._modal('expModal').show();
-      this.loadFiles();
-    },
-
-    // Cookie mode, encrypted volume: unlocked server-side, but THIS browser
-    // has no session -- attaching means proving the PIN. Close the explorer
-    // FULLY before raising the PIN modal (bootstrap hide is async; showing
-    // during the transition stacks an empty explorer over the PIN field).
-    // Plain volumes never 401, so no silent-attach path is needed.
-    attachVol(v) {
-      this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
-      const el = document.getElementById('expModal');
-      el.addEventListener(
-        'hidden.bs.modal',
-        () => this._modal('unlockModal').show(),
-        { once: true },
-      );
-      this._modal('expModal').hide();
-    },
-
-    expJoin(name) {
-      return (this.expPath === '/' ? '' : this.expPath) + '/' + name;
-    },
-
-    expCrumbs() {
-      const segs = this.expPath.split('/').filter(Boolean);
-      const out = [{ name: this.expVol?.name || '/', path: '/' }];
-      let p = '';
-      for (const s of segs) { p += '/' + s; out.push({ name: s, path: p }); }
-      return out;
-    },
-
-    navTo(p) { this.expPath = p || '/'; this.expQuery = ''; this.loadFiles(); },
-
-    // -- listing view: filter + sort applied over the loaded folder ----------
-    expSortBy(k) {
-      if (this.expSort === k) this.expDir = -this.expDir;
-      else { this.expSort = k; this.expDir = 1; }
-    },
-    expCaret(k) { return this.expSort === k ? (this.expDir > 0 ? ' ▴' : ' ▾') : ''; },
-
-    expRows() {
-      const q = this.expQuery.trim().toLowerCase();
-      const rows = q ? this.expEntries.filter(e => e.name.toLowerCase().includes(q))
-                     : this.expEntries.slice();
-      const k = this.expSort, d = this.expDir;
-      rows.sort((a, b) => {
-        // folders first is a filesystem convention, not a sort key: it holds
-        // whichever column the user sorts by
-        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
-        let r;
-        if (k === 'size') r = (a.size || 0) - (b.size || 0);
-        else if (k === 'mtime') r = (a.mtime || 0) - (b.mtime || 0);
-        // numeric: 'report-2' must sort before 'report-10', not after it
-        else r = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
-        return r * d;
-      });
-      return rows;
-    },
-
-    expSummary() {
-      const shown = this.expRows(), total = this.expEntries.length;
-      const dirs = shown.filter(e => e.type === 'dir').length;
-      const files = shown.length - dirs;
-      const bytes = shown.reduce((n, e) => n + (e.type === 'file' ? (e.size || 0) : 0), 0);
-      const parts = [];
-      if (dirs) parts.push(`${dirs} folder${dirs === 1 ? '' : 's'}`);
-      if (files) parts.push(`${files} file${files === 1 ? '' : 's'}`);
-      let s = parts.join(', ') || 'empty';
-      if (files) s += ` · ${this.fmtBytes(bytes)}`;
-      if (shown.length !== total) s += ` (of ${total})`;
-      return s;
-    },
-
-    // what the hidden Size/Modified columns become on a phone
-    expSub(e) {
-      return e.type === 'file'
-        ? `${this.fmtBytes(e.size)} · ${this.fmtTime(e.mtime)}`
-        : this.fmtTime(e.mtime);
-    },
-
-    async loadFiles() {
-      if (!this.expVol) return;
-      this.expBusy = true; this.expErr = '';
-      try {
-        const r = await this.api('GET',
-          `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expPath)}`);
-        if (r.ok) this.expEntries = r.data.slice();  // expRows() filters + sorts
-        else if (r.status === 401) {
-          // Unlocked (encrypted) volume, but this browser holds no session:
-          // route to the PIN modal once. The guard flag stops a failed
-          // attach from looping through here forever.
-          this.expEntries = [];
-          this._clearTok(this.expVol.id);  // token is stale or absent
-          if (!this._autoAttached) {
-            this._autoAttached = true;
-            this.expBusy = false;
-            this.attachVol(this.expVol);
-            return;
-          }
-          this.expErr = 'This browser has no session for this volume — unlock it.';
-        }
-        else if (r.status === 409) {
-          // Session gone (e.g. manager restarted): route back into Open.
-          this.expEntries = [];
-          this._modal('expModal').hide();
-          await this.refresh();
-          const v = this._vol(this.expVol.id);
-          if (v) this.openVol(v);
-        }
-        else { this.expEntries = []; this.expErr = r.data?.error || 'Failed to list files.'; }
-      } catch { this.expErr = 'Could not reach API.'; }
-      this.expBusy = false;
-    },
-
-    async expMkdir() {
-      const name = await this.ask('New folder', '', 'Create');
-      if (!name) return;
-      const r = await this.api('POST',
-        `/volumes/${this.expVol.id}/files/mkdir?path=${encodeURIComponent(this.expJoin(name))}`);
-      if (!r.ok) this.expErr = r.data?.error || 'mkdir failed.';
-      this.loadFiles();
-    },
-
-    async expDelete(e) {
-      const ok = await this.confirm(
-        'Delete?', `${e.name}${e.type === 'dir' ? ' and everything inside it' : ''} ` +
-        'will be removed. This cannot be undone.', 'Delete', true);
-      if (!ok) return;
-      const r = await this.api('DELETE',
-        `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expJoin(e.name))}`);
-      if (!r.ok) { this.expErr = r.data?.error || 'delete failed.'; this.toast(this.expErr, false); }
-      else this.toast(`Deleted ${e.name}`);
-      this.loadFiles();
-    },
-
-    async expDownload(e) {
-      const a = document.createElement('a');
-      const url = `${this.apiBase}/volumes/${this.expVol.id}/files/download?path=${encodeURIComponent(this.expJoin(e.name))}`;
-      if (this._tok(this.expVol.id)) {
-        const r = await fetch(url, { headers: this._authHeaders(this.expVol.id) });
-        if (!r.ok) { this.toast('Download failed', false); return; }
-        a.href = URL.createObjectURL(await r.blob());
-        a.download = e.name;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-        return;
-      }
-      a.href = url;
-      a.download = e.name;
-      a.click();
-    },
-
-    async expRename(e) {
-      const name = await this.ask(`Rename ${e.name}`, e.name, 'Rename');
-      if (!name || name === e.name) return;
-      await this._transfer('move', this.expJoin(e.name), this.expJoin(name), 'Renamed');
-    },
-
-    // Destination is an absolute path inside the volume, which the prefilled
-    // value demonstrates — the hint says so for anyone who clears the field.
-    _pathHint: 'Absolute path inside this volume, e.g. /reports/2026/name.txt. ' +
-               'The destination folder must already exist.',
-
-    async expMove(e) {
-      const src = this.expJoin(e.name);
-      const dst = await this.ask(`Move ${e.name}`, src, 'Move', this._pathHint);
-      if (!dst || dst === src) return;
-      await this._transfer('move', src, dst, 'Moved');
-    },
-
-    async expCopy(e) {
-      const src = this.expJoin(e.name);
-      const dst = await this.ask(`Copy ${e.name}`, src + '.copy', 'Copy', this._pathHint);
-      if (!dst || dst === src) return;
-      await this._transfer('copy', src, dst, 'Copied');
-    },
-
-    async _transfer(op, src, dst, verb) {
-      const r = await this.api('POST', `/volumes/${this.expVol.id}/files/transfer`, { op, src, dst });
-      if (r.ok) this.toast(`${verb} to ${dst}`);
-      else { this.expErr = r.data?.error || `${op} failed.`; this.toast(this.expErr, false); }
-      this.loadFiles();
-    },
-
-    canPreview(name) {
-      return /\.(png|jpe?g|gif|webp|svg|bmp|pdf|txt|md|log|json|csv|ya?ml|py|js|html?|css|sh|toml|ini|xml)$/i.test(name);
-    },
-
-    async expPreview(e) {
-      this.pvName = e.name;
-      this.pvKind = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(e.name) ? 'img'
-        : (/\.pdf$/i.test(e.name) ? 'pdf' : 'frame');
-      const url = `${this.apiBase}/volumes/${this.expVol.id}/files/download` +
-        `?path=${encodeURIComponent(this.expJoin(e.name))}&inline=1`;
-      if (this._tok(this.expVol.id)) {
-        const r = await fetch(url, { headers: this._authHeaders(this.expVol.id) });
-        if (!r.ok) { this.toast('Preview failed', false); return; }
-        this.pvUrl = URL.createObjectURL(await r.blob());
-      } else {
-        this.pvUrl = url;
-      }
-      this._modal('pvModal').show();
-    },
-
-    // -- text editor --------------------------------------------------------
-    canEdit(name) {
-      // text-ish extensions, or none at all (Makefile, LICENSE, dotfiles)
-      return /\.(txt|md|log|json|csv|ya?ml|py|js|ts|html?|css|sh|toml|ini|xml|conf|cfg|rs|go|c|h|sql|env)$/i.test(name)
-        || !/\./.test(name.replace(/^\./, ''));
-    },
-
-    _authHeaders(vid) {
-      const t = this._tok(vid);
-      const h = { 'X-Aloelite': '1' };
-      if (t) h['X-Aloelite-Token'] = t;
-      return h;
-    },
-
-    _fileUrl(dir, name, inline) {
-      const p = (dir === '/' ? '' : dir) + '/' + name;
-      return `${this.apiBase}/volumes/${this.expVol.id}/files/download` +
-        `?path=${encodeURIComponent(p)}${inline ? '&inline=1' : ''}`;
-    },
-
-    async _fetchText(dir, name) {
-      const r = await fetch(this._fileUrl(dir, name, true),
-        { headers: this._authHeaders(this.expVol.id) });
-      if (!r.ok) throw new Error(`load failed (${r.status})`);
-      return await r.text();
-    },
-
-    async edOpen(e) {
-      if (e.size > 2 * 1024 * 1024) {
-        const ok = await this.confirm('Large file',
-          `${e.name} is ${this.fmtBytes(e.size)}. Opening it in the editor loads ` +
-          'the whole file into the browser.', 'Open anyway');
-        if (!ok) return;
-      }
-      this.edOpenPath(this.expPath, e.name);
-    },
-
-    async edOpenPath(dir, name) {
-      this.edErr = ''; this.edBusy = true;
-      this.edName = name; this.edDir = dir;
-      try {
-        this.edText = this.edLoaded = await this._fetchText(dir, name);
-        this._modal('edModal').show();
-      } catch (err) { this.toast(`Could not open ${name}: ${err.message}`, false); }
-      this.edBusy = false;
-    },
-
-    async edNew() {
-      const name = await this.ask('New file', '', 'Create');
-      if (!name) return;
-      this.edErr = ''; this.edName = name; this.edDir = this.expPath;
-      this.edText = ''; this.edLoaded = null;  // null: Save enabled even when empty
-      this._modal('edModal').show();
-    },
-
-    async edSave() {
-      if (this.edBusy || this.edText === this.edLoaded) return;
-      this.edBusy = true; this.edErr = '';
-      try {
-        const fd = new FormData();
-        fd.append('file', new File([this.edText], this.edName, { type: 'text/plain' }));
-        const r = await fetch(
-          `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(this.edDir)}`,
-          { method: 'POST', body: fd, headers: this._authHeaders(this.expVol.id) });
-        if (!r.ok) {
-          const d = await r.json().catch(() => null);
-          this.edErr = d?.error || `save failed (${r.status})`;
-        } else {
-          this.edLoaded = this.edText;
-          this.toast(`Saved ${this.edName}`);
-          this.loadFiles();
-        }
-      } catch { this.edErr = 'Could not reach API.'; }
-      this.edBusy = false;
-    },
-
-    async edClose() {
-      if (this.edText !== this.edLoaded) {
-        const ok = await this.confirm('Discard changes?',
-          `${this.edName} has unsaved edits.`, 'Discard', true, 'Keep editing');
-        if (!ok) return;
-      }
-      this._modal('edModal').hide();
-    },
-
-    // -- paste bin (phone <-> desktop text drop; lives in /pastes) ----------
-    async openPastes() {
-      this.pbErr = ''; this.pbText = '';
-      this._modal('pbModal').show();
-      await this.pbRefresh();
-    },
-
-    async pbRefresh() {
-      this.pbBusy = true; this.pbEntries = [];
-      try {
-        const r = await this.api('GET',
-          `/volumes/${this.expVol.id}/files?path=${encodeURIComponent('/pastes')}`);
-        if (r.ok) {
-          const files = r.data.filter(e => e.type === 'file')
-            .sort((a, b) => b.mtime - a.mtime).slice(0, 50);
-          // inline previews for the newest few small ones
-          for (const e of files.slice(0, 10)) {
-            if (e.size <= 16384) {
-              try {
-                const t = await this._fetchText('/pastes', e.name);
-                e.preview = t.slice(0, 120).replace(/\s+/g, ' ');
-              } catch { /* name-only row */ }
-            }
-          }
-          this.pbEntries = files;
-        }
-        // 404/409: no /pastes folder yet — an empty list is the right answer
-      } catch { this.pbErr = 'Could not reach API.'; }
-      this.pbBusy = false;
-    },
-
-    async pbSave() {
-      if (!this.pbText.trim()) return;
-      this.pbBusy = true; this.pbErr = '';
-      try {
-        // best-effort mkdir; 409/500 "exists" is fine
-        await this.api('POST',
-          `/volumes/${this.expVol.id}/files/mkdir?path=${encodeURIComponent('/pastes')}`);
-        const ts = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
-        const fd = new FormData();
-        fd.append('file', new File([this.pbText], `paste-${ts}.txt`, { type: 'text/plain' }));
-        const r = await fetch(
-          `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent('/pastes')}`,
-          { method: 'POST', body: fd, headers: this._authHeaders(this.expVol.id) });
-        if (!r.ok) {
-          const d = await r.json().catch(() => null);
-          this.pbErr = d?.error || `save failed (${r.status})`;
-        } else {
-          this.pbText = '';
-          this.toast('Paste saved');
-          await this.pbRefresh();
-        }
-      } catch { this.pbErr = 'Could not reach API.'; }
-      this.pbBusy = false;
-    },
-
-    async pbCopy(e) {
-      try {
-        const t = await this._fetchText('/pastes', e.name);
-        await this.copyText(t);
-        this.toast('Copied to clipboard');
-      } catch { this.toast('Copy failed', false); }
-    },
-
-    async pbDelete(e) {
-      const r = await this.api('DELETE',
-        `/volumes/${this.expVol.id}/files?path=${encodeURIComponent('/pastes/' + e.name)}`);
-      if (!r.ok) this.toast(r.data?.error || 'delete failed', false);
-      await this.pbRefresh();
-    },
-
-    async copyText(t) {
-      // navigator.clipboard needs a secure context; a VPN'd http:// origin
-      // isn't one, so fall back to the selection-based path
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(t);
-        return;
-      }
-      const ta = document.createElement('textarea');
-      ta.value = t;
-      ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.focus(); ta.select();
-      try { document.execCommand('copy'); } finally { ta.remove(); }
-    },
-
-    async expUpload(ev) {
-      const files = [...ev.target.files];
-      ev.target.value = '';
-      if (!files.length) return;
-      this.expBusy = true; this.expErr = '';
-      for (const f of files) await this._uploadOne(f, this.expPath);
-      this.expBusy = false;
-      this.loadFiles();
-    },
-
-    async _uploadOne(file, dirPath) {
-      // Courtesy guard: an aloelite file dropped into a volume is usually an
-      // import aimed at the wrong zone — but storing it as content is legal.
-      if (/\.(sqlite|fs|aloe)$/i.test(file.name)) {
-        const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
-        const magic = 'SQLite format 3\u0000';
-        if (String.fromCharCode(...head) === magic) {
-          // both outcomes are legitimate, so name them on the buttons rather
-          // than making the user decode OK/Cancel
-          const imp = await this.confirm('That looks like an aloelite file',
-            `"${file.name}" is an aloelite filesystem. Import it as its own ` +
-            'filesystem, or store it as an ordinary file inside this volume?',
-            'Import it', false, 'Store as a file');
-          if (imp) { await this._importFile(file); return; }
-        }
-      }
-      await this._uploadXhr(file, dirPath);
-    },
-
-    _uploadXhr(file, dirPath) {
-      return new Promise(res => {
-        this.expUploads.push({ id: Date.now() + Math.random(), name: file.name, pct: 0 });
-        const item = this.expUploads[this.expUploads.length - 1]; // proxied ref
-        const done = () => { this.expUploads = this.expUploads.filter(u => u.id !== item.id); };
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST',
-          `${this.apiBase}/volumes/${this.expVol.id}/files/upload?path=${encodeURIComponent(dirPath)}`);
-        xhr.setRequestHeader('X-Aloelite', '1');
-        const xt = this._tok(this.expVol.id);
-        if (xt) xhr.setRequestHeader('X-Aloelite-Token', xt);
-        xhr.upload.onprogress = e => {
-          if (e.lengthComputable) item.pct = Math.round(e.loaded / e.total * 100);
-        };
-        xhr.onload = () => {
-          done();
-          if (xhr.status >= 200 && xhr.status < 300) {
-            this.toast(`Uploaded ${file.name}`); res(true);
-          } else {
-            let d = null; try { d = JSON.parse(xhr.responseText); } catch {}
-            this.expErr = d?.error || `upload of ${file.name} failed`;
-            this.toast(this.expErr, false); res(false);
-          }
-        };
-        xhr.onerror = () => {
-          done(); this.expErr = 'Could not reach API.';
-          this.toast(this.expErr, false); res(false);
-        };
-        const fd = new FormData();
-        fd.append('file', file);
-        xhr.send(fd);
-      });
-    },
-
-    async expDrop(ev) {
-      this.expBusy = true; this.expErr = '';
-      const items = [...(ev.dataTransfer.items || [])];
-      const entries = items.map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
-      if (entries.length) {
-        for (const e of entries) await this._dropEntry(e, this.expPath);
-      } else {
-        for (const f of [...ev.dataTransfer.files]) await this._uploadOne(f, this.expPath);
-      }
-      this.expBusy = false;
-      this.loadFiles();
-    },
-
-    async _dropEntry(entry, dirPath) {
-      if (entry.isFile) {
-        const file = await new Promise((res, rej) => entry.file(res, rej));
-        await this._uploadOne(file, dirPath);
-        return;
-      }
-      const sub = (dirPath === '/' ? '' : dirPath) + '/' + entry.name;
-      await this.api('POST',
-        `/volumes/${this.expVol.id}/files/mkdir?path=${encodeURIComponent(sub)}`);
-      const reader = entry.createReader();
-      // readEntries returns batches; loop until empty
-      for (;;) {
-        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-        if (!batch.length) break;
-        for (const child of batch) await this._dropEntry(child, sub);
-      }
-    },
-
-    fmtBytes(n) {
-      if (n < 1024) return `${n} B`;
-      if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
-      if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
-      if (n < 1099511627776) return `${(n / 1073741824).toFixed(2)} GB`;
-      return `${(n / 1099511627776).toFixed(2)} TB`;
-    },
-
-    // Compact by default — the full toLocaleString ate three lines per row on
-    // a phone, and the year is noise for a file touched this year. The exact
-    // stamp stays available as the cell's title / in stat.
-    fmtTime(ts) {
-      if (!ts) return '';
-      const d = new Date(ts * 1000), now = new Date();
-      if (d.toDateString() === now.toDateString()) {
-        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      }
-      return d.toLocaleDateString([], d.getFullYear() === now.getFullYear()
-        ? { month: 'short', day: 'numeric' }
-        : { year: 'numeric', month: 'short', day: 'numeric' });
-    },
-
-    fmtTimeFull(ts) { return ts ? new Date(ts * 1000).toLocaleString() : ''; },
-  };
-}
-</script>
+<script src="{{ url_for('static', filename='admin.js') }}"></script>
 
 </body>
 </html>

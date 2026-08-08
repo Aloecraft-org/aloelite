@@ -60,6 +60,51 @@ ALOELITE_ROOT = _default_root()
 HOST_MNT_PREFIX = "/mnt/aloelite"  # host-visible path consumers bind-mount
 _STREAM_CHUNK = 1 << 20
 
+# Text-ish extensions that an inline (preview) download must serve as
+# text/plain. mimetypes.guess_type is actively wrong for a preview here: it
+# maps .md to text/markdown and .csv to text/csv (browsers download both
+# rather than display them), returns None for .toml/.ini/.go/.log/.env (so
+# they fell through to octet-stream, i.e. a download prompt), and maps .rs to
+# application/rls-services+xml, which renders as an XML parse error. A
+# preview is a text view in every one of these cases, so say so.
+#
+# .html/.htm and .svg are deliberately absent: those have real renderable
+# types and the preview already displays them (HTML inside the sandboxed
+# iframe, SVG through the image path).
+_TEXT_EXTS = frozenset(
+    """
+    txt text md markdown rst log out err json jsonl ndjson csv tsv
+    yaml yml toml ini cfg conf config env properties xml plist
+    py pyi js mjs cjs ts tsx jsx css scss sass less
+    sh bash zsh fish ps1 bat rs go c h cc cpp hpp cs java kt kts swift
+    rb php pl pm lua r jl sql graphql proto tf hcl
+    diff patch srt vtt sub gitignore gitattributes dockerignore editorconfig
+    """.split()
+)
+
+
+def _inline_mimetype(name: str) -> str:
+    """Content-Type for an inline (preview) download of `name`.
+
+    Text-ish content is forced to text/plain so the browser renders it in the
+    preview iframe instead of offering a download. Bare type only, no
+    parameters: werkzeug appends `; charset=utf-8` to any text/* mimetype
+    itself, and passing a charset here gets it stamped on twice.
+
+    A file with no extension at all (Makefile, LICENSE, .bashrc) counts as
+    text -- the same rule the UI's canEdit() applies, so the Edit button and
+    the preview link agree about what a file is.
+    """
+    base = os.path.basename(name).lower()
+    # base[1:] so a leading dot (".bashrc", ".gitignore") is not read as an
+    # extension separator.
+    has_ext = "." in base[1:]
+    if not has_ext:
+        return "text/plain"
+    if base.rsplit(".", 1)[-1] in _TEXT_EXTS:
+        return "text/plain"
+    return mimetypes.guess_type(base)[0] or "application/octet-stream"
+
 
 # --- direct-SQLite helpers (independent of FUSE) ---------------------------
 def _wal_checkpoint_truncate(sqlite_path: str) -> tuple[int, int]:
@@ -659,9 +704,7 @@ def create_app(
 
             name = path.rstrip("/").rsplit("/", 1)[-1] or rec.id
             inline = request.args.get("inline") in ("1", "true")
-            mt = (
-                mimetypes.guess_type(name)[0] if inline else None
-            ) or "application/octet-stream"
+            mt = _inline_mimetype(name) if inline else "application/octet-stream"
             disp = "inline" if inline else "attachment"
             return Response(
                 generate(),
@@ -779,7 +822,15 @@ def create_app(
             return err
         _rec, _root, p = ctx
         inline = request.args.get("inline") in ("1", "true")
-        resp = send_file(p, as_attachment=not inline, download_name=os.path.basename(p))
+        name = os.path.basename(p)
+        # same inline-preview typing as the direct path, so a volume previews
+        # identically whichever frontend is serving it
+        resp = send_file(
+            p,
+            as_attachment=not inline,
+            download_name=name,
+            mimetype=_inline_mimetype(name) if inline else None,
+        )
         # volume content (pastes may hold secrets) must never persist in a
         # browser/proxy cache
         resp.headers["Cache-Control"] = "no-store"
