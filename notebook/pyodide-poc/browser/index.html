@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>aloelite — in-browser proof of concept</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 880px; margin: 2rem auto; padding: 0 1rem;
+         background: #101418; color: #d7dee7; }
+  h1 { font-size: 1.35rem; } h1 small { font-weight: 400; opacity: .65; font-size: .85rem; }
+  .card { background: #171d24; border: 1px solid #232c36; border-radius: 10px; padding: 1rem 1.25rem; margin: 1rem 0; }
+  .muted { opacity: .65; }
+  pre { background: #0c1014; border-radius: 8px; padding: .75rem 1rem; overflow-x: auto;
+        font-size: .78rem; line-height: 1.45; }
+  .ok { color: #6fdb8d; } .bad { color: #ff7a7a; }
+  #status { font-weight: 600; }
+  button { background: #2b6cb0; border: 0; color: white; border-radius: 8px; padding: .55rem 1rem;
+           font-size: .9rem; cursor: pointer; } button:disabled { opacity: .4; cursor: default; }
+  .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+  <h1>aloelite <small>— unmodified Python engine, running client-side in your browser (Pyodide PoC)</small></h1>
+  <div class="card">
+    <div class="row">
+      <span id="status">booting…</span>
+      <span id="timing" class="muted"></span>
+    </div>
+    <div id="log" class="muted" style="font-size:.85rem; margin-top:.5rem;"></div>
+  </div>
+  <div class="card" id="resultCard" hidden>
+    <div class="row" style="justify-content: space-between;">
+      <b>smoke report <span class="ok">(all sections asserted)</span></b>
+      <button id="dl" disabled>download pyodide-demo.fs</button>
+    </div>
+    <div class="muted" id="fsmeta" style="font-size:.8rem; margin:.4rem 0;"></div>
+    <pre id="report"></pre>
+  </div>
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+  const log = (m) => { $("log").textContent = m; };
+  const t0 = performance.now();
+  const secs = () => ((performance.now() - t0) / 1000).toFixed(1) + "s";
+  try {
+    log("loading pyodide runtime…");
+    const { loadPyodide } = await import("/pyodide/pyodide.mjs");
+    const py = await loadPyodide({ indexURL: "/pyodide/" });
+    log(`pyodide ${py.version} up (${secs()}), loading wheels…`);
+    await py.loadPackage(["cryptography", "pydantic", "pyyaml", "msgpack"], { messageCallback: () => {} });
+    log(`wheels loaded (${secs()}), unpacking aloelite source…`);
+    const zip = await (await fetch("/aloelite_src.zip")).arrayBuffer();
+    py.FS.mkdir("/repo");
+    py.unpackArchive(zip, "zip", { extractDir: "/repo" });
+    for (const d of ["/poc", "/out"]) py.FS.mkdir(d);
+    py.FS.writeFile("/poc/pyodide_compat.py", await (await fetch("/pyodide_compat.py")).text());
+    log(`running smoke test (encrypted volume, Argon2id, chunked IO)… (${secs()})`);
+    const smoke = await (await fetch("/smoke.py")).text();
+    const reportJson = await py.runPythonAsync(smoke);
+    const report = JSON.parse(reportJson);
+    $("report").textContent = JSON.stringify(report, null, 2);
+    $("resultCard").hidden = false;
+    $("status").innerHTML = report.ok
+      ? '<span class="ok">PASSED — aloelite ran entirely client-side</span>'
+      : '<span class="bad">FAILED</span>';
+    $("timing").textContent = `total ${secs()}`;
+    log("");
+    const bytes = py.FS.readFile("/out/pyodide-demo.fs");
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    $("fsmeta").textContent =
+      `single-file filesystem created in this tab: ${bytes.length} bytes, sha256 ${hex.slice(0, 16)}… ` +
+      `— downloads open directly in desktop aloelite (PIN 1234).`;
+    $("dl").disabled = false;
+    $("dl").onclick = () => {
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.sqlite3" }));
+      Object.assign(document.createElement("a"), { href: url, download: "pyodide-demo.fs" }).click();
+    };
+  } catch (err) {
+    $("status").innerHTML = '<span class="bad">FAILED</span>';
+    log(String(err?.message ?? err).slice(0, 2000));
+    console.error(err);
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "aloelite-pyodide-poc",
+  "private": true,
+  "type": "module",
+  "description": "Proof of concept: unmodified aloelite running client-side under Pyodide",
+  "scripts": {
+    "smoke": "node run_poc.mjs",
+    "conformance": "node run_conformance.mjs",
+    "serve": "./serve_browser_demo.sh"
+  },
+  "dependencies": {
+    "pyodide": "^314.0.3"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.57.0"
+  }
+}
