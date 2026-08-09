@@ -5,12 +5,15 @@
 import { createEngine } from "./engine/api.js";
 import { EngineError, isEngineError } from "./engine/errors.js";
 
-// Size guards. Placeholder values pending the memory spike (web/HANDOFF.md);
-// the wasm heap is 32-bit, and the whole .fs plus any file being read is
-// materialized in it, so these are load-bearing, not cosmetic.
-const FS_WARN_BYTES = 200 * 1024 * 1024; // confirm before opening
-const FS_HARD_BYTES = 700 * 1024 * 1024; // refuse to open
-const READ_MAX_BYTES = 150 * 1024 * 1024; // refuse read/download of one file
+// Size guards, calibrated by the memory spike (web/HANDOFF.md, "Memory
+// spike"). Measured on Pyodide 314: read_all costs ~2.9x the file in wasm
+// heap; 1.2 GiB read_all works under the 4 GiB compiled max, 1.4 GiB raises
+// a clean MemoryError; a constrained tab (iOS Safari) budgets ~1.5-2 GB.
+// Streaming reads (not yet exposed here — HANDOFF next-step 2) are
+// flat-memory and faster, and will lift READ_MAX when they land.
+const FS_WARN_BYTES = 256 * 1024 * 1024; // confirm before opening
+const FS_HARD_BYTES = 1024 * 1024 * 1024; // refuse to open
+const READ_MAX_BYTES = 256 * 1024 * 1024; // refuse read/download of one file
 const PREVIEW_TEXT_MAX = 2 * 1024 * 1024;
 const PREVIEW_IMAGE_MAX = 32 * 1024 * 1024;
 const PREVIEW_MEDIA_MAX = 64 * 1024 * 1024;

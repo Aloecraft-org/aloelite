@@ -47,11 +47,35 @@ solid v0 skeleton, not a launched product.
 
 ## Memory spike (size guards)
 
-A spike measuring 100/300/600 MB volumes through the browser-realistic
-path (bytes → MEMFS → open → mount → read_all → Uint8Array extraction) was
-run on this branch; its numbers set the guard constants at the top of
-`static/app.js` (`FS_WARN_BYTES`, `FS_HARD_BYTES`, `READ_MAX_BYTES`).
-<!-- SPIKE_RESULTS -->
+Measured on Pyodide 314.0.3 (Node 22), browser-realistic path: bytes →
+MEMFS → open → encrypted mount → read_all → Uint8Array extraction, fresh
+process per size, sha256-verified. These numbers set the guard constants
+at the top of `static/app.js`.
+
+| payload | open | mount (Argon2id) | read_all | wasm heap high-water | verdict |
+|---|---|---|---|---|---|
+| 100 MiB | 1.2s | 0.4s | 2.6s | 344 MB | ok |
+| 300 MiB | 1.2s | 0.8s | 8.7s | 944 MB | ok |
+| 600 MiB | 1.2s | 0.7s | 17.4s | 1844 MB | ok |
+| 1200 MiB | 1.2s | 0.7s | 36.2s | 3645 MB | ok (desktop-only territory) |
+| 1400 MiB | 1.2s | 0.6s | — | >4 GiB attempted | clean MemoryError, no wasm abort |
+
+- **open/mount cost is flat regardless of size** (~1.2s / ~0.4-0.8s): only
+  reads materialize content. 2000-file volume: full recursive listing walk
+  0.24s, ~1.4ms per small-file read — node count is a non-issue.
+- **read_all costs ~2.9x the file in wasm heap.** Streaming via the
+  engine's `open_read` descriptors is **flat-memory (zero heap growth) and
+  ~2.7x faster** (94 vs 35 MB/s) — the strongest possible case for
+  next-step 2 below.
+- MEMFS file bytes live in the JS heap, not wasm linear memory, so the
+  .fs copy itself doesn't consume wasm heap. Pyodide 314's compiled wasm
+  max is 4 GiB; plan for ~1.5-2 GB on constrained tabs (iOS Safari).
+- OOM surfaces as a catchable Python MemoryError (the interpreter and
+  mount survive) — a future streaming fallback can catch it gracefully.
+
+Guards chosen: warn at 256 MiB, hard-refuse at 1 GiB (load double-buffering
+plus one whole-file read stays under a ~2 GB tab budget), read_all capped
+at 256 MiB until streaming lands.
 
 ## Next steps, in priority order
 
