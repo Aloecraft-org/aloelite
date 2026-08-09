@@ -73,7 +73,6 @@ export function createPyodideEngine(overrides = {}) {
       pyTake = py.runPython("bootstrap.take_bytes");
       onProgress("ready", 1);
     } catch (e) {
-      booting = null; // allow a retry after e.g. a transient network failure
       if (e instanceof EngineError) throw e;
       throw new EngineError("boot_failed", `engine runtime failed to load: ${e}`);
     }
@@ -133,7 +132,14 @@ export function createPyodideEngine(overrides = {}) {
 
   return {
     async boot(onProgress) {
-      booting ??= bootOnce(onProgress);
+      // The retry reset lives on the chain, NOT inside bootOnce: a failure
+      // thrown before bootOnce's first await would otherwise run its catch
+      // synchronously BEFORE this assignment, storing a permanently-rejected
+      // promise and bricking every later boot() call.
+      booting ??= bootOnce(onProgress).catch((e) => {
+        booting = null;
+        throw e;
+      });
       return booting;
     },
     async openVolumeFile(fileName, bytes) {
@@ -141,7 +147,18 @@ export function createPyodideEngine(overrides = {}) {
       const safe = fileName.replace(/[^A-Za-z0-9._-]/g, "_") || "volume.fs";
       const path = `/work/f${++workSeq}_${safe}`;
       py.FS.writeFile(path, bytes);
-      return makeSession(fileName, invoke("open_file", { path }));
+      try {
+        return makeSession(fileName, invoke("open_file", { path }));
+      } catch (e) {
+        // a failed open (not a sqlite file, newer schema era, ...) must not
+        // strand the upload in MEMFS — retries of big files would stack up
+        try {
+          py.FS.unlink(path);
+        } catch {
+          /* already gone */
+        }
+        throw e;
+      }
     },
     async createScratch(volumeName, pin = null) {
       await this.boot();

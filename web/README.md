@@ -68,6 +68,11 @@ permits no external origin for anything. Keep it that way — no CDN, no
 analytics, no error reporting. `browser_test.mjs` fails on any CSP violation,
 so a change that would break the claim breaks the test first.
 
+One directive cannot live in the meta tag: serve
+`Content-Security-Policy: frame-ancestors 'none'` (or `X-Frame-Options:
+DENY`) as an **HTTP header** from the static host, so no other site can
+frame the viewer.
+
 Self-hosting the viewer is exactly this same static copy on your own origin —
 do it if you want the no-upload guarantee behind your own firewall. It is
 *not* a replacement for the manager.

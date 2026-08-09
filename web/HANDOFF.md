@@ -76,6 +76,34 @@ run on this branch; its numbers set the guard constants at the top of
 6. **Deploy pipeline**: a `dev/build_dist.sh` that materializes `dist/`
    with real files (no symlinks) + hashes, ready to rsync to a host.
 
+## Security review outcomes (adversarial pass, all applied or filed)
+
+A hostile-.fs threat-model review confirmed the trust claim holds: every DOM
+write of volume-controlled data is textContent, no blob: navigation exists,
+path resolution is graph-relative (no MEMFS/host traversal), and the PIN is
+never retained engine-side. Applied hardening: PIN fields cleared after
+unlock, explicit `object-src`/`frame-src 'none'`, failed-open MEMFS cleanup,
+best-effort close with sidecar unlinks, mount-by-id (bypassing name-first
+resolution a crafted file could shadow), and `_quarantine_untrusted()` in
+bootstrap.py which strips a foreign file's own trigger/view definitions
+before the engine opens it.
+
+**Two items for the ENGINE (author's call, affects desktop too):**
+1. `db.py` era-refresh drops+recreates derived objects only when the file's
+   era is OLDER than installed. A file stamped with the CURRENT era keeps
+   its own trigger/view definitions (`IF NOT EXISTS`), and those fire on
+   open/mount writes. In wasm the blast radius is DoS/garbage-data only (no
+   UDF callbacks, no load_extension, no network); on desktop the same
+   reasoning applies but deserves the author's eyes. Candidate fix: make the
+   drop+recreate unconditional on open. The viewer quarantines regardless.
+2. Mounting writes mount rows into the opened file (a mount is a row), so a
+   "read-only" viewer session still mutates its in-MEMFS copy — the user's
+   original is untouched and export is hidden for read-only mounts, so this
+   is currently inert; it becomes relevant if export-for-opened-files is
+   ever added.
+3. `frame-ancestors 'none'` cannot be set via meta tag — it must be an HTTP
+   header on the static host (README deploy section).
+
 ## Gotchas for the next session
 
 - The sandbox proxy blocks the Pyodide CDN; `fetch_runtime.sh` streams

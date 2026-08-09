@@ -122,27 +122,83 @@ def _stat_row(st) -> dict:
 
 
 # --- operations ---------------------------------------------------------------
-def _op_open_file(a: dict) -> dict:
-    fs = Aloelite(a["path"])
+def _register_session(fs: Aloelite, path: str, build) -> dict:
+    """Register fs under a new session id, closing the connection if the rest
+    of session construction fails (a leaked open connection pins the MEMFS
+    file in the wasm heap with no recovery path)."""
+    try:
+        result = build(fs)
+    except BaseException:
+        fs.close()
+        raise
     sid = _nid()
-    _sessions[sid] = {"fs": fs, "path": a["path"], "mounts": set()}
-    return {"session": sid, "volumes": _volumes(fs)}
+    _sessions[sid] = {"fs": fs, "path": path, "mounts": set()}
+    return {"session": sid, **result}
+
+
+def _quarantine_untrusted(path: str) -> None:
+    """Strip attacker-defined derived objects BEFORE the engine touches the
+    file. db.py's era-refresh drops+recreates triggers/views only when the
+    file's era is OLDER than the installed schema; a hostile file stamped
+    with the current era keeps its own definitions (IF NOT EXISTS), and those
+    triggers would fire on the open/mount writes. Dropping everything and
+    zeroing the era forces the engine's own refresh path to rebuild every
+    derived object from the INSTALLED schema. (Also filed as an engine-level
+    hardening candidate in web/HANDOFF.md — this is the viewer-side seal.)"""
+    c = _sq.connect(path)
+    try:
+        derived = c.execute(
+            "SELECT type, name FROM sqlite_master WHERE type IN ('trigger', 'view')"
+        ).fetchall()
+        quoted = lambda n: n.replace('"', '""')  # noqa: E731
+        for typ, name in derived:
+            if typ == "trigger":
+                c.execute(f'DROP TRIGGER IF EXISTS "{quoted(name)}"')
+        for typ, name in derived:
+            if typ == "view":
+                c.execute(f'DROP VIEW IF EXISTS "{quoted(name)}"')
+        c.execute("PRAGMA user_version = 0")
+        c.commit()
+    finally:
+        c.close()
+
+
+def _op_open_file(a: dict) -> dict:
+    _quarantine_untrusted(a["path"])
+    return _register_session(
+        Aloelite(a["path"]), a["path"], lambda fs: {"volumes": _volumes(fs)}
+    )
 
 
 def _op_create_scratch(a: dict) -> dict:
     path = a.get("path", "/work/scratch.fs")
-    fs = Aloelite(path)
     pin = a.get("pin")
-    fs.create_volume(a.get("name") or "scratch", pin=pin.encode() if pin else None)
-    sid = _nid()
-    _sessions[sid] = {"fs": fs, "path": path, "mounts": set()}
-    return {"session": sid, "volumes": _volumes(fs)}
+
+    def build(fs):
+        fs.create_volume(a.get("name") or "scratch", pin=pin.encode() if pin else None)
+        return {"volumes": _volumes(fs)}
+
+    return _register_session(Aloelite(path), path, build)
 
 
 def _op_mount(a: dict) -> dict:
     s = _session(a)
     pin = a.get("pin")
-    m = s["fs"].mount(a["volume"], pin=pin.encode() if pin else None)
+    # Mount strictly BY ID. Aloelite.mount() resolves name-first, so a volume
+    # whose NAME equals another volume's id string would silently win — with a
+    # hostile or merely odd file the user would browse the wrong volume. The
+    # viewer only ever addresses volumes by id, so mirror aloelite.py's
+    # id branch directly against the ops layer.
+    import aloelite.operations as ops
+    from aloelite.aloelite import Mount as _Mount
+
+    db = s["fs"].db
+    if db.one("resolution.get_volume", {"volume": a["volume"]}) is None:
+        raise aloe_errors.NotFound(f"no volume with id {a['volume']!r}")
+    mid_engine = ops.mount(db, a["volume"], "/", None, pin.encode() if pin else None)
+    sess = db.active_session
+    token = sess["token"] if sess and sess.get("mount_id") == mid_engine else None
+    m = _Mount(db, mid_engine, token=token)
     mid = _nid()
     _mounts[mid] = {
         "m": m,
@@ -223,18 +279,23 @@ def _op_export(a: dict) -> dict:
 
 
 def _op_close_session(a: dict) -> dict:
+    # Teardown is best-effort and MUST reach the unlink step: MEMFS is this
+    # tab's wasm heap, and a session whose close raised would otherwise pin
+    # the volume's full size forever (the session id is already popped, so
+    # there is no retry path).
     s = _sessions.pop(a["session"], None)
     if s is not None:
-        for mid in list(s["mounts"]):
-            _op_unmount({"mount": mid})
-        s["fs"].close()
-        # MEMFS is this tab's wasm heap: drop the backing file (and any
-        # journal sidecar) or every open/close cycle leaks the volume's size.
-        import os
+        try:
+            for mid in list(s["mounts"]):
+                _op_unmount({"mount": mid})
+            s["fs"].close()
+        finally:
+            import os
 
-        for path in (s["path"], s["path"] + "-journal", s["path"] + "-wal"):
-            if os.path.exists(path):
-                os.remove(path)
+            sidecars = ("", "-journal", "-wal", "-shm")
+            for path in (s["path"] + suffix for suffix in sidecars):
+                if os.path.exists(path):
+                    os.remove(path)
     return {}
 
 
@@ -279,11 +340,12 @@ def call(op: str, args_json: str, data=None) -> str:
 
 def take_bytes():
     """Hand the parked bytes to JS as a real Uint8Array (built Python-side, so
-    no PyProxy needs managing over there)."""
+    no PyProxy needs managing over there). The global is cleared BEFORE the JS
+    allocation so an OOM there can't strand a huge payload in the parking slot."""
     global _pending_bytes
     import js
 
-    buf = js.Uint8Array.new(len(_pending_bytes))
-    buf.assign(_pending_bytes)
-    _pending_bytes = b""
+    payload, _pending_bytes = _pending_bytes, b""
+    buf = js.Uint8Array.new(len(payload))
+    buf.assign(payload)
     return buf

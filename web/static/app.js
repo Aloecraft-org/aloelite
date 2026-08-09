@@ -154,6 +154,9 @@ async function mountVolume(v, /** @type {string|null} */ pin) {
       pin: pin ?? undefined,
       readOnly: !state.isScratch,
     });
+    // the secret has done its job — don't leave it sitting in the DOM
+    /** @type {HTMLInputElement} */ ($("#pinInput")).value = "";
+    /** @type {HTMLInputElement} */ ($("#scratchPin")).value = "";
     state.volumeName = v.name || v.id;
     $("#toast").classList.add("hidden");
     $("#volBadge").textContent = state.volumeName + (v.encrypted ? " 🔒" : "");
