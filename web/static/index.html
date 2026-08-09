@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- The trust claim ("files never leave this tab") is ENFORCED here: no
+     external origin is permitted for anything. Keep this list free of
+     third-party hosts forever — analytics included. 'wasm-unsafe-eval' is
+     required to compile the Python runtime; if a Pyodide build ever needs
+     full 'unsafe-eval', prefer pinning the version that doesn't. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob: data:; media-src blob:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Open an aloelite encrypted volume in your browser. Nothing is uploaded — the engine runs entirely client-side.">
+<title>aloelite viewer</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<main>
+  <header class="site">
+    <h1>aloelite viewer</h1>
+    <span class="tag">open a portable encrypted filesystem, right here</span>
+  </header>
+
+  <!-- ============ landing: loads instantly, no engine until you act ======= -->
+  <section id="view-landing">
+    <p class="privacy" data-testid="privacy-line">
+      Your file never leaves this tab. The aloelite engine runs entirely in your
+      browser — nothing is uploaded, and this page talks to no other servers
+      (enforced by its content-security policy; check the network tab).
+    </p>
+    <div class="grid2">
+      <div class="card">
+        <h2>Open a volume</h2>
+        <p>Browse a <code>.fs</code> file someone sent you — read-only, no install.</p>
+        <div class="drop" id="drop" data-testid="drop">
+          drop a <code>.fs</code> file here, or
+          <button class="linklike" id="pickBtn" data-testid="pick">choose a file</button>
+          <input type="file" id="fileInput" class="hidden" accept=".fs,.sqlite,.db,application/vnd.sqlite3">
+        </div>
+      </div>
+      <div class="card">
+        <h2>Try it from scratch</h2>
+        <p>Create a volume in this tab, add files, then download the single
+           <code>.fs</code> — it opens in desktop aloelite as-is.</p>
+        <label for="scratchPin">optional PIN (encrypts the volume)</label>
+        <input type="password" id="scratchPin" autocomplete="off" placeholder="leave empty for unencrypted">
+        <p class="mt"><button id="tryBtn" data-testid="try">Create a scratch volume</button></p>
+      </div>
+    </div>
+    <p class="tag small">
+      First use downloads the ~20&nbsp;MB engine runtime, then it's cached.
+    </p>
+  </section>
+
+  <!-- ============ boot progress =========================================== -->
+  <section id="view-boot" class="hidden">
+    <div class="card">
+      <h2 id="bootTitle">Starting the engine…</h2>
+      <div class="progress"><div id="bootBar"></div></div>
+      <div id="bootStage">…</div>
+    </div>
+  </section>
+
+  <!-- ============ volume picker / unlock ================================== -->
+  <section id="view-volumes" class="hidden">
+    <div class="card">
+      <h2 id="volumesTitle">Volumes</h2>
+      <div id="volList" data-testid="volumes"></div>
+    </div>
+    <div class="card hidden" id="pinCard">
+      <h2>Unlock <span id="pinVolName"></span></h2>
+      <p>This volume is encrypted. The PIN is used only inside this tab.</p>
+      <label for="pinInput">PIN</label>
+      <input type="password" id="pinInput" autocomplete="off" data-testid="pin">
+      <p class="mt">
+        <button id="pinGo" data-testid="unlock">Unlock</button>
+        <button class="secondary" id="pinCancel">Back</button>
+      </p>
+    </div>
+    <p><button class="secondary" id="volBack">← different file</button></p>
+  </section>
+
+  <!-- ============ browser ================================================= -->
+  <section id="view-browser" class="hidden">
+    <div class="crumbbar">
+      <span id="crumbs" data-testid="crumbs"></span>
+      <span class="spacer"></span>
+      <span class="badge" id="volBadge"></span>
+      <span class="badge ro hidden" id="roBadge" data-testid="ro-badge">read-only</span>
+    </div>
+    <div class="toolbar" id="writeTools">
+      <button class="secondary" id="mkdirBtn">New folder</button>
+      <button class="secondary" id="uploadBtn">Add files</button>
+      <input type="file" id="uploadInput" class="hidden" multiple>
+      <button id="exportBtn" data-testid="export">Download .fs</button>
+    </div>
+    <div class="card">
+      <table class="listing"><tbody id="rows" data-testid="rows"></tbody></table>
+      <div class="empty hidden" id="emptyNote">this folder is empty</div>
+    </div>
+    <div class="card hidden" id="previewCard">
+      <h2 id="previewName"></h2>
+      <div id="previewMeta"></div>
+      <div id="previewBody" data-testid="preview"></div>
+    </div>
+    <p><button class="secondary" id="closeBtn">← close this volume</button></p>
+  </section>
+
+  <div id="toast" class="hidden" data-testid="toast"></div>
+
+  <footer class="site">
+    <a href="https://github.com/Aloecraft-org/aloelite">aloelite</a> — a portable
+    encrypted filesystem in one file. Self-hosting this viewer is a static-file
+    copy (see <code>web/README.md</code>); if you want mounts, FUSE and volume
+    management, use the standard <code>aloelite-web</code> manager instead.
+  </footer>
+</main>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

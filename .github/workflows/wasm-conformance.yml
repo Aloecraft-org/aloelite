@@ -1,0 +1,73 @@
+# Runs aloelite's own conformance suite INSIDE the Pyodide/wasm runtime, plus
+# the web viewer's engine-adapter contract test. This is the guard on the
+# sqlite compat shim (notebook/pyodide-poc/pyodide_compat.py and its twin in
+# web/static/engine/): the shim substitutes for native jsonb()/unixepoch and
+# must keep matching what native sqlite >= 3.45 does, byte for byte.
+#
+# Deliberately a separate workflow from main.yml: it needs a ~400 MB (streamed)
+# runtime fetch on cache miss and should never block the core gate.
+name: wasm-conformance
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "aloelite/**"
+      - "sql/**"
+      - "config/**"
+      - "conformance/**"
+      - "notebook/pyodide-poc/**"
+      - "web/**"
+      - ".github/workflows/wasm-conformance.yml"
+
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: notebook/pyodide-poc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pyodide runtime
+        run: npm install --no-audit --no-fund
+
+      - name: Restore wasm wheels
+        id: wheels
+        uses: actions/cache@v4
+        with:
+          path: notebook/pyodide-poc/wheels-cache
+          # the pyodide version range lives in package.json; bumping it
+          # invalidates the cache, which is exactly when wheels change
+          key: pyodide-wheels-${{ hashFiles('notebook/pyodide-poc/package.json') }}
+
+      - name: Fetch wasm wheels (cache miss)
+        if: steps.wheels.outputs.cache-hit != 'true'
+        run: |
+          ./fetch_wheels.sh
+          mkdir -p wheels-cache
+          cp node_modules/pyodide/*.whl wheels-cache/
+
+      - name: Install cached wheels (cache hit)
+        if: steps.wheels.outputs.cache-hit == 'true'
+        run: cp wheels-cache/*.whl node_modules/pyodide/
+
+      - name: Conformance suite in wasm (221 tests)
+        run: node run_conformance.mjs
+
+      - name: End-to-end smoke in wasm
+        run: node run_poc.mjs
+
+      - name: Cross-check wasm-created file with native CPython
+        run: |
+          pip install "cryptography>=44" "pydantic>=2" pyyaml msgpack
+          python3 cross_check.py
+
+      - name: Web viewer engine-adapter contract test
+        working-directory: web
+        run: node dev/adapter_test.mjs
