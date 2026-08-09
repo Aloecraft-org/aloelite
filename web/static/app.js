@@ -3,7 +3,7 @@
 // engine/api.js; no backend types leak in here. Views are sections toggled by
 // showView(); state is one flat object.
 import { createEngine } from "./engine/api.js";
-import { EngineError } from "./engine/errors.js";
+import { EngineError, isEngineError } from "./engine/errors.js";
 
 // Size guards. Placeholder values pending the memory spike (web/HANDOFF.md);
 // the wasm heap is 32-bit, and the whole .fs plus any file being read is
@@ -52,6 +52,7 @@ const joinPath = (dir, name) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
 const paintThen = () => new Promise((r) => setTimeout(r, 30));
 
 let toastTimer = 0;
+let toastGen = 0;
 function toast(msg, kind = "error", ms = 4200) {
   const t = $("#toast");
   t.textContent = msg;
@@ -59,6 +60,13 @@ function toast(msg, kind = "error", ms = 4200) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.add("hidden"), ms);
   t.classList.remove("hidden");
+  return ++toastGen; // token: lets a busy-toast owner hide only ITS toast
+}
+function hideToast(token) {
+  if (token === toastGen) {
+    clearTimeout(toastTimer);
+    $("#toast").classList.add("hidden");
+  }
 }
 
 function showView(name) {
@@ -78,12 +86,16 @@ async function ensureEngine() {
   await state.engine.boot((stage, f) => {
     $("#bootStage").textContent = stage;
     $("#bootBar").style.width = `${Math.round(f * 100)}%`;
+    $("#bootBar").parentElement?.setAttribute("aria-valuenow", String(Math.round(f * 100)));
   });
   return state.engine;
 }
 
 // --- open-a-file flow -------------------------------------------------------
 async function openFile(/** @type {File} */ file) {
+  // clear immediately so re-picking the SAME file after a failure refires
+  // the change event (the standard retry gesture)
+  /** @type {HTMLInputElement} */ ($("#fileInput")).value = "";
   if (file.size > FS_HARD_BYTES) {
     toast(`${file.name} is ${fmtBytes(file.size)} — beyond what the in-browser engine can hold (limit ${fmtBytes(FS_HARD_BYTES)}). Use desktop aloelite for this one.`);
     return;
@@ -104,7 +116,7 @@ async function openFile(/** @type {File} */ file) {
   }
 }
 
-function renderVolumePicker() {
+function renderVolumePicker(autoAdvance = true) {
   const s = state.session;
   if (!s) return;
   showView("volumes");
@@ -129,8 +141,10 @@ function renderVolumePicker() {
     row.append(left, btn);
     list.append(row);
   }
-  // exactly one volume: skip the picker click
-  if (s.volumes.length === 1) pickVolume(s.volumes[0]);
+  // Exactly one volume: skip the picker click — but ONLY on the first
+  // render. Re-renders from a mount failure must not auto-advance, or a
+  // volume that always fails (corrupt, wrong file) loops forever.
+  if (autoAdvance && s.volumes.length === 1) pickVolume(s.volumes[0]);
 }
 
 function pickVolume(/** @type {import("./engine/api.js").VolumeDesc} */ v) {
@@ -147,10 +161,22 @@ function pickVolume(/** @type {import("./engine/api.js").VolumeDesc} */ v) {
 }
 
 async function mountVolume(v, /** @type {string|null} */ pin) {
+  const session = state.session;
+  if (!session) return; // user backed out while an attempt was in flight
+  let busy = 0;
   try {
-    toast(v.encrypted ? "Unlocking volume… (key stretching takes a moment)" : "Opening volume…", "info", 60000);
+    // a failed root listing can strand a live mount; never stack a second one
+    if (state.mount) {
+      try {
+        await state.mount.unmount();
+      } catch {
+        /* already dead */
+      }
+      state.mount = null;
+    }
+    busy = toast(v.encrypted ? "Unlocking volume… (key stretching takes a moment)" : "Opening volume…", "info", 120000);
     await paintThen();
-    state.mount = await /** @type {NonNullable<typeof state.session>} */ (state.session).mount(v.id, {
+    state.mount = await session.mount(v.id, {
       pin: pin ?? undefined,
       readOnly: !state.isScratch,
     });
@@ -158,8 +184,15 @@ async function mountVolume(v, /** @type {string|null} */ pin) {
     /** @type {HTMLInputElement} */ ($("#pinInput")).value = "";
     /** @type {HTMLInputElement} */ ($("#scratchPin")).value = "";
     state.volumeName = v.name || v.id;
-    $("#toast").classList.add("hidden");
-    $("#volBadge").textContent = state.volumeName + (v.encrypted ? " 🔒" : "");
+    hideToast(busy);
+    const badge = $("#volBadge");
+    badge.textContent = "";
+    badge.append(el("span", {}, state.volumeName));
+    badge.title = v.encrypted ? "encrypted" : "";
+    if (v.encrypted) {
+      badge.append(el("span", { className: "icon", ariaHidden: "true" }, " 🔒"));
+      badge.append(el("span", { className: "sr-only" }, " (encrypted)"));
+    }
     $("#roBadge").classList.toggle("hidden", !state.mount.readOnly);
     $("#writeTools").classList.toggle("hidden", state.mount.readOnly);
     await browse("/");
@@ -171,7 +204,7 @@ async function mountVolume(v, /** @type {string|null} */ pin) {
       return;
     }
     toast(`Could not open volume: ${errText(e)}`);
-    renderVolumePicker();
+    renderVolumePicker(false);
   }
 }
 
@@ -209,12 +242,14 @@ async function browse(/** @type {string} */ path) {
     for (const entry of entries) {
       const tr = el("tr");
       const name = el("td", { className: "name" });
-      name.append(el("span", { className: "icon" }, entry.type === "container" ? "📁" : "📄"));
-      name.append(el("span", {}, entry.name));
-      name.onclick = () =>
+      const nameBtn = el("button", { className: "rowlink" });
+      nameBtn.append(el("span", { className: "icon", ariaHidden: "true" }, entry.type === "container" ? "📁" : "📄"));
+      nameBtn.append(el("span", {}, entry.name));
+      nameBtn.onclick = () =>
         entry.type === "container"
           ? browse(joinPath(path, entry.name))
           : preview(joinPath(path, entry.name));
+      name.append(nameBtn);
       const size = el("td", { className: "size" });
       if (entry.type === "entry") sizeCells.push([size, joinPath(path, entry.name)]);
       const actions = el("td", { className: "actions" });
@@ -239,14 +274,18 @@ async function browse(/** @type {string} */ path) {
       tr.append(name, size, actions);
       rows.append(tr);
     }
-    // sizes arrive lazily so a big directory paints immediately
-    for (const [cell, p] of sizeCells.slice(0, LAZY_SIZE_ROWS)) {
-      try {
-        cell.textContent = fmtBytes((await m.stat(p)).size);
-      } catch {
-        break; // mount went away; stop quietly
+    // sizes arrive lazily so a big directory paints immediately; the scan is
+    // fire-and-forget so navigation/mutations never wait on 500 stats
+    void (async () => {
+      for (const [cell, p] of sizeCells.slice(0, LAZY_SIZE_ROWS)) {
+        try {
+          cell.textContent = fmtBytes((await m.stat(p)).size);
+        } catch (e) {
+          if (isEngineError(e, "mount_invalid")) break; // mount gone: stop
+          // one bad entry (deleted meanwhile, corrupt node) skips only itself
+        }
       }
-    }
+    })();
   } catch (e) {
     toast(`Could not list ${path}: ${errText(e)}`);
   }
@@ -291,6 +330,7 @@ async function preview(/** @type {string} */ path) {
       meta.append(el("span", { className: "kv" }, `${k}: ${v}`));
     const body = $("#previewBody");
     body.textContent = "";
+    hidePreviewUrlOnly(); // a text/binary preview must release the previous media blob too
     hideBody: {
       if (size > READ_MAX_BYTES) {
         body.append(el("p", { className: "empty" }, `too large to read in-browser (${fmtBytes(size)})`));
@@ -301,11 +341,10 @@ async function preview(/** @type {string} */ path) {
       const isVideo = VIDEO_EXT.test(st.name);
       const mediaCap = isImg ? PREVIEW_IMAGE_MAX : PREVIEW_MEDIA_MAX;
       if ((isImg || isAudio || isVideo) && size <= mediaCap) {
-        toast("Reading file…", "info", 30000);
+        const busy = toast("Reading file…", "info", 120000);
         await paintThen();
         const bytes = await m.readFile(path);
-        $("#toast").classList.add("hidden");
-        hidePreviewUrlOnly();
+        hideToast(busy);
         previewUrl = URL.createObjectURL(new Blob([bytes]));
         if (isImg) body.append(el("img", { src: previewUrl, alt: st.name }));
         else if (isAudio) body.append(el("audio", { src: previewUrl, controls: true }));
@@ -355,10 +394,10 @@ async function download(/** @type {string} */ path, /** @type {string} */ name) 
       toast(`${name} is ${fmtBytes(st.size ?? 0)} — beyond the in-browser read limit.`);
       return;
     }
-    toast("Reading file…", "info", 30000);
+    const busy = toast("Reading file…", "info", 120000);
     await paintThen();
     const bytes = await m.readFile(path);
-    $("#toast").classList.add("hidden");
+    hideToast(busy);
     saveBlob(bytes, name);
   } catch (e) {
     toast(`Download failed: ${errText(e)}`);
@@ -410,7 +449,7 @@ function wire() {
     if (state.pendingVolume) void mountVolume(state.pendingVolume, pin || null);
   };
   $("#pinInput").addEventListener("keydown", (e) => e.key === "Enter" && $("#pinGo").click());
-  $("#pinCancel").onclick = renderVolumePicker;
+  $("#pinCancel").onclick = () => renderVolumePicker(false);
   $("#volBack").onclick = resetToLanding;
   $("#closeBtn").onclick = resetToLanding;
 
@@ -430,10 +469,10 @@ function wire() {
   $("#exportBtn").onclick = async () => {
     if (!state.session) return;
     try {
-      toast("Packing the .fs snapshot…", "info", 30000);
+      const busy = toast("Packing the .fs snapshot…", "info", 120000);
       await paintThen();
       const bytes = await state.session.exportBytes();
-      $("#toast").classList.add("hidden");
+      hideToast(busy);
       saveBlob(bytes, state.isScratch ? "scratch.fs" : state.session.fileName);
       toast("Downloaded — that file opens in desktop aloelite as-is.", "info");
     } catch (e) {

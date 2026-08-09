@@ -157,3 +157,24 @@ footer.site a { color: var(--accent); }
 .mt { margin-top: .7rem; }
 .spacer { flex: 1; }
 .small { font-size: .85rem; }
+
+/* screen-reader-only content */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+
+/* listing rows are real buttons (keyboard-operable), styled as plain text */
+table.listing .name button.rowlink {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--text); font: inherit; text-align: left;
+  display: block; width: 100%; /* fill the cell: clicking anywhere in it works */
+  overflow-wrap: anywhere; /* long names must shrink the table, not the page */
+}
+table.listing .name button.rowlink:hover { color: var(--accent); }
+
+/* narrow screens: nothing may force the page to pan horizontally */
+.badge { display: inline-block; max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
+.crumbbar button.linklike { overflow-wrap: anywhere; }
+#previewCard video, #previewCard audio { max-width: 100%; }
+#previewName { overflow-wrap: anywhere; }

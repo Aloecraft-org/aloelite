@@ -35,16 +35,40 @@ const norm = (p) => (p.startsWith("/") ? p : "/" + p).replace(/\/+$/, "") || "/"
 /** @returns {import("./api.js").Engine} */
 export function createMockEngine() {
   let seq = 0;
+  let booted = false;
+  // Fixture hooks so UI tests can reach paths the happy mock hides:
+  //   ?bootfail        -> boot rejects (boot_failed)
+  //   open "corrupt*"  -> open fails (fs_error)
+  //   open "single*"   -> one unencrypted volume (exercises auto-advance)
+  //   open "badmount*" -> one unencrypted volume whose mount always fails
+  const search = typeof location === "undefined" ? "" : location.search;
   return {
     async boot(onProgress = () => {}) {
+      if (new URLSearchParams(search).has("bootfail"))
+        throw new EngineError("boot_failed", "forced by ?bootfail fixture");
+      if (booted) {
+        onProgress("ready", 1);
+        return;
+      }
       for (const [stage, f] of [["loading Python runtime", 0.3], ["loading packages", 0.6], ["loading aloelite", 0.9], ["ready", 1]]) {
         await delay(120);
         onProgress(String(stage), Number(f));
       }
+      booted = true;
     },
     async openVolumeFile(fileName) {
       await this.boot();
       await delay(80);
+      if (fileName.startsWith("corrupt"))
+        throw new EngineError("fs_error", "file is not a database");
+      if (fileName.startsWith("single"))
+        return makeSession(fileName, [
+          { id: `mock-${++seq}-s1`, name: "only", encrypted: false, encMode: "none", createdAt: now() },
+        ]);
+      if (fileName.startsWith("badmount"))
+        return makeSession(fileName, [
+          { id: `mock-${++seq}-bm`, name: "cursed", encrypted: false, encMode: "none", createdAt: now(), _alwaysFail: true },
+        ]);
       return makeSession(fileName, [
         { id: `mock-${++seq}-a`, name: "documents", encrypted: true, encMode: "convergent", createdAt: now() },
         { id: `mock-${seq}-b`, name: "public", encrypted: false, encMode: "none", createdAt: now() },
@@ -61,21 +85,33 @@ export function createMockEngine() {
   /** @param {string} fileName @param {import("./api.js").VolumeDesc[]} volumes @param {string|null} [scratchPin] */
   function makeSession(fileName, volumes, scratchPin) {
     const trees = new Map(volumes.map((v) => [v.id, sampleTree()]));
+    let sessionClosed = false;
+    const liveSession = () => {
+      if (sessionClosed) throw new EngineError("mount_invalid", "session is closed");
+    };
     return {
       fileName,
       volumes,
       async mount(volumeId, opts = {}) {
+        liveSession();
         await delay(scratchPin !== undefined ? 60 : 450); // fake Argon2id stall
         const vol = volumes.find((v) => v.id === volumeId);
         if (!vol) throw new EngineError("not_found");
+        if (vol._alwaysFail) throw new EngineError("corrupt", "forced by badmount fixture");
         const pinWanted = scratchPin !== undefined ? scratchPin : "1234";
         if (vol.encrypted && !opts.pin) throw new EngineError("encryption_required");
         if (!vol.encrypted && opts.pin) throw new EngineError("encryption_required");
         if (vol.encrypted && opts.pin !== pinWanted) throw new EngineError("bad_key");
         const nodes = trees.get(volumeId) ?? sampleTree();
         const readOnly = opts.readOnly ?? true;
+        let unmounted = false;
+        const live = () => {
+          liveSession();
+          if (unmounted) throw new EngineError("mount_invalid", "mount is closed");
+        };
 
         const get = (path, type = null) => {
+          live();
           const n = nodes.get(norm(path));
           if (!n) throw new EngineError("not_found");
           if (type === "container" && n.type !== "container") throw new EngineError("not_a_container");
@@ -95,7 +131,13 @@ export function createMockEngine() {
             return [...nodes.entries()]
               .filter(([k]) => k !== "/" && parent(k) === p)
               .map(([k, n]) => ({ name: baseName(k), type: n.type, node: k }))
-              .sort((a, b) => (a.type !== b.type ? (a.type === "container" ? -1 : 1) : a.name.localeCompare(b.name)));
+              // mirror bootstrap.py's sort key exactly: (type != container,
+              // name.lower()) in CODEPOINT order — not locale collation
+              .sort((a, b) => {
+                if (a.type !== b.type) return a.type === "container" ? -1 : 1;
+                const [x, y] = [a.name.toLowerCase(), b.name.toLowerCase()];
+                return x < y ? -1 : x > y ? 1 : 0;
+              });
           },
           async stat(path) {
             const n = get(path);
@@ -116,6 +158,7 @@ export function createMockEngine() {
             nodes.set(norm(path), { type: "entry", bytes: new Uint8Array(bytes), created: prev?.created ?? t, modified: t });
           },
           async mkdir(path) {
+            live();
             writable();
             const parts = norm(path).split("/").filter(Boolean);
             let p = "";
@@ -133,13 +176,18 @@ export function createMockEngine() {
             children.forEach((k) => nodes.delete(k));
             nodes.delete(p);
           },
-          async unmount() {},
+          async unmount() {
+            unmounted = true;
+          },
         };
       },
       async exportBytes() {
+        liveSession();
         return enc(`mock export of ${fileName} @ ${new Date().toISOString()}\n`);
       },
-      async close() {},
+      async close() {
+        sessionClosed = true;
+      },
     };
   }
 }

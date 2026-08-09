@@ -70,9 +70,19 @@ run on this branch; its numbers set the guard constants at the top of
 4. **Payload**: serve brotli + immutable caching; consider a service
    worker for offline repeat visits. The 20 MB floor stands until the
    non-Pyodide engine lands.
-5. **Polish**: keyboard operability of listing rows, aria on icon-only
-   buttons, mobile table overflow, breadcrumb truncation for deep paths —
-   an a11y pass was reviewed but only partially applied.
+5. **Polish** (a UI review pass was run; these were applied: keyboard-
+   operable rows, toast/progress aria, sr-only table headers, badge/name
+   overflow fixes, mock fixture hooks `?bootfail` / `corrupt*` / `single*` /
+   `badmount*`, mock liveness + codepoint sort. Still open, in order):
+   - a real busy-state indicator instead of long-timeout toasts (the busy
+     toast can expire while a slow phone still works, leaving no feedback;
+     goes away naturally with the worker + progress events)
+   - focus management on view switches (focus resets to body; give each
+     section's heading tabindex="-1" and focus it in showView)
+   - a cancel button on the boot view for a stalled download
+   - boot retry after a mid-download failure leaves the orphaned partial
+     runtime in memory (~100 MB) — acceptable, but worth knowing
+   - text previews read without a busy indicator (capped at 2 MB, fast)
 6. **Deploy pipeline**: a `dev/build_dist.sh` that materializes `dist/`
    with real files (no symlinks) + hashes, ready to rsync to a host.
 

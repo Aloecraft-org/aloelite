@@ -56,8 +56,8 @@
   <section id="view-boot" class="hidden">
     <div class="card">
       <h2 id="bootTitle">Starting the engine…</h2>
-      <div class="progress"><div id="bootBar"></div></div>
-      <div id="bootStage">…</div>
+      <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="bootBar"></div></div>
+      <div id="bootStage" aria-live="polite">…</div>
     </div>
   </section>
 
@@ -95,7 +95,10 @@
       <button id="exportBtn" data-testid="export">Download .fs</button>
     </div>
     <div class="card">
-      <table class="listing"><tbody id="rows" data-testid="rows"></tbody></table>
+      <table class="listing">
+        <thead class="sr-only"><tr><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Actions</th></tr></thead>
+        <tbody id="rows" data-testid="rows"></tbody>
+      </table>
       <div class="empty hidden" id="emptyNote">this folder is empty</div>
     </div>
     <div class="card hidden" id="previewCard">
@@ -106,7 +109,7 @@
     <p><button class="secondary" id="closeBtn">← close this volume</button></p>
   </section>
 
-  <div id="toast" class="hidden" data-testid="toast"></div>
+  <div id="toast" class="hidden" role="status" aria-live="assertive" data-testid="toast"></div>
 
   <footer class="site">
     <a href="https://github.com/Aloecraft-org/aloelite">aloelite</a> — a portable
