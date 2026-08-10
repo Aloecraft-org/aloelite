@@ -145,6 +145,7 @@ _OPERATION_PROJECTION = {
     "streaming.seek": ("aloelite.descriptor", "Descriptor", "seek"),
     "streaming.tell": ("aloelite.descriptor", "Descriptor", "tell"),
     "streaming.close": ("aloelite.descriptor", "Descriptor", "close"),
+    "streaming.abort": ("aloelite.descriptor", "Descriptor", "abort"),
 }
 
 

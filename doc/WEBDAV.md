@@ -265,13 +265,23 @@ that are easy to conflate. Most of the cheap work makes the current frontend
 |---|---|---|---|---|
 | 1 | Conditional requests (`If-Match`/`If-None-Match`/`If-Range`) | safety | ~½ day | **done** — section 2a |
 | 2 | Engine lock checks on `move`/`remove`/`set_metadata` | safety | ~1 day | **done** — ACC-11 |
-| 3 | Decouple lock lifetime from the descriptor | safety | ~1–2 days | open |
+| 3a | Descriptor `abort` + scope-exit semantics | safety | ~1 day | **done** — `streaming.abort` |
+| 3b | Lock as a first-class object (no descriptor) | class 2 | ~1–2 days | open |
 | 4 | TLS | Windows | small | open |
 | 5 | Class 2 lite: exclusive, depth-0, minimal `If:` | read-write | ~3–4 days | open |
 
 Rung 1 partly substitutes for locking rather than building toward it:
 optimistic concurrency is what most people are really after when they ask for
 locks, and it costs no protocol state.
+
+Rung 3 split in two once the code was in front of it. **3a** (abort) turned out
+to be independent of lock decoupling and closed the interrupted-`PUT` data loss
+on its own, so it shipped first. **3b** — a lock that can exist with no open
+descriptor, carrying an owner and a timeout across requests — is the part rung 5
+actually needs, and is still open. `open_write` currently mints the lock itself
+and `close()`/`abort()` release it; a WebDAV `LOCK` needs `lock`/`unlock`/`renew`
+as operations in their own right, plus an `open_write` that accepts an existing
+token instead of always minting one.
 
 Rung 2 is worth doing on its own merits — locks currently guard only the five
 content-write paths (`write_all`, `append`, `write_range`, `truncate`,
@@ -431,18 +441,23 @@ replace-in-place, and NODE-5 permits same-name siblings with one visible, so a
 naive `move` onto an existing name leaves *two* children rather than replacing
 one.
 
-**Two non-atomic windows, both pinned by tests.** Neither is a WebDAV-layer
-choice so much as a consequence of what the engine offers, and both are worth
-knowing before pointing a flaky network at this:
+**An interrupted `PUT` is now atomic** (was not, in the first cut). A client
+that vanishes mid-transfer leaves the previous content whole; the partial bytes
+are never visible to any reader.
 
-- **An interrupted `PUT` commits what arrived**, replacing the previous
-  content. `Descriptor.close()` commits unconditionally and there is no abort,
-  so the only alternative — skipping `close()` on the error path — would strand
-  the write lock and leave the resource *unwritable* rather than merely
-  truncated. It matches what FUSE does with a partial write. A clean fix needs
-  an engine-level descriptor abort: discard staged chunks, release the lock,
-  leave the committed pointer alone. Cheap to add — the staged-chunks-above-the-
-  committed-pointer machinery already exists for exactly this shape of crash.
+The fix was `Descriptor.abort()` plus commit-on-clean-exit/abort-on-exception
+in `Descriptor.__exit__`, and the reason it could land without disturbing FUSE
+is that `aloelite/fuse.py` never uses `with` on a writer — it parks the
+descriptor in `self._open` and calls `close()` from `flush()`/`release()`. So a
+POSIX write still commits whatever it wrote, partial or not, which is what
+applications expect from a local filesystem; only the whole-file-transfer
+callers (`cli.py` upload, `manager/api.py` upload, DAV `PUT`) abort. The commit
+decision lives at the call site, which is what lets one `Descriptor` serve both
+frontends. See `streaming.abort` in `config/mount-api.yaml` for the contract
+the other three ports inherit.
+
+**One non-atomic window remains, pinned by a test:**
+
 - **`MOVE`/`COPY` with `Overwrite: T` deletes the destination first**, so a
   failure between the delete and the move loses the destination's old content.
   The engine has no replace-in-place, and the alternative (move first) is worse:

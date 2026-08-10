@@ -330,7 +330,7 @@ operations:
     note: >
       The flat primitives below back a per-binding wrapper (Rust Read/Write,
       Python file-like, JS stream, Kotlin InputStream). open_write takes an
-      exclusive mount-scoped lock (ACC-6/7) held until close. A long stream is
+      exclusive mount-scoped lock (ACC-6/7) held until close or abort. A long stream is
       an ordinary lock with a generous ttl, not a special case. Must not hold a
       write transaction open for the stream's life (IO-4/5); writes batch behind
       a single commit at close.
@@ -364,6 +364,23 @@ operations:
       returns: void
       flags:   { mutates: true }
       note:    "flushes, commits the staged content atomically, releases the lock"
+    abort:
+      params:  { fd: FdId }
+      returns: void
+      flags:   { mutates: true }
+      note: >
+        The counterpart to close: releases the lock WITHOUT advancing the
+        committed version pointer, so the entry keeps its previous bytes and a
+        partial write is never visible. Idempotent, and a no-op on a read
+        descriptor. Staged chunks are left above the committed pointer rather
+        than deleted eagerly — that is already the CV-3 "incomplete write"
+        state, and CV-7's prune_content is what reclaims it. A binding whose
+        native wrapper has scope-exit semantics (Python __exit__, Rust Drop,
+        Kotlin use) should COMMIT on a clean exit and ABORT on an unwinding
+        one: a block that raised did not finish producing the content, so
+        committing what arrived publishes a truncated file as whole. Explicit
+        close() must keep committing whatever was written, which is what a
+        POSIX/FUSE frontend needs.
 
   # --- maintenance ---------------------------------------------------------
   maintenance:

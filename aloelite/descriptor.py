@@ -228,6 +228,31 @@ class Descriptor:
         return self._pos
 
     # -- lifecycle -----------------------------------------------------------
+    def abort(self) -> None:
+        """Discard this write and release the lock. Idempotent.
+
+        The counterpart to close(): the committed version pointer is left
+        exactly where it was, so the entry keeps its previous bytes and the
+        partial write is never visible. Read descriptors have nothing to
+        discard and nothing to release, so abort is close without the commit.
+
+        Staged chunks are NOT deleted eagerly. Sitting above the committed
+        pointer they are already the modelled 'incomplete write' state of CV-3,
+        and CV-7 makes prune_content responsible for reclaiming them -- the
+        same treatment the LockInvalid path in close() has always relied on.
+        Deleting them here would add a second reclamation mechanism for a state
+        that already has one, and would make abort O(chunks) on a path that
+        typically runs while an error is already propagating.
+        """
+        if self._closed:
+            return
+        try:
+            if self.writable and self._lock is not None:
+                with self._db.txn():
+                    self._db.rowcount("mutation.release_lock", {"lock": self._lock})
+        finally:
+            self._closed = True
+
     def close(self) -> None:
         """Commit (writers) and release the lock. Idempotent.
 
@@ -283,8 +308,29 @@ class Descriptor:
     def __enter__(self) -> "Descriptor":
         return self
 
-    def __exit__(self, *exc: object) -> None:
-        self.close()
+    def __exit__(self, exc_type: object, *rest: object) -> None:
+        """Commit on a clean exit, ABORT when the block is unwinding.
+
+        The asymmetry is the point. A `with` block that raises did not finish
+        producing the content, so committing whatever arrived publishes a
+        truncated file as if it were the whole thing -- silently, since the
+        exception is about the transfer, not about the data. Every `with` user
+        of a write descriptor is a whole-file transfer (cli.py upload,
+        manager/api.py upload, manager/dav.py PUT), and for all three a partial
+        commit is data loss.
+
+        This deliberately does NOT change POSIX behaviour: aloelite/fuse.py
+        never uses `with` on a writer. It parks the descriptor in self._open
+        and calls close() explicitly from flush()/release(), so a FUSE write
+        still commits exactly what it wrote, partial or not -- which is what a
+        local filesystem does and what applications expect. Routing the two
+        frontends through one Descriptor works precisely because the commit
+        decision lives at the call site, not inside the descriptor.
+        """
+        if exc_type is None:
+            self.close()
+        else:
+            self.abort()
 
 
 __all__ = ["Descriptor"]

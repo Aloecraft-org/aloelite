@@ -390,6 +390,98 @@ def test_lock_checks_never_block_the_holding_mount(db, mount):
     assert ops.exists(db, mount, "/g")
 
 
+def test_with_block_that_raises_aborts_the_write(db, mount):
+    """The rule that closed the interrupted-upload data loss: a block that
+    raised did not finish producing the content, so committing what arrived
+    would publish a truncated file as if it were whole -- silently, since the
+    exception is about the transfer, not the data."""
+    ops.create_entry(db, mount, "/f", b"original")
+
+    class Boom(Exception):
+        pass
+
+    with pytest.raises(Boom):
+        with ops.open_write(db, mount, "/f") as w:
+            w.write(b"partial")
+            raise Boom
+    assert ops.read_all(db, mount, "/f") == b"original"
+    # and the entry is still writable -- the lock was released, not stranded
+    ops.write_all(db, mount, "/f", b"after")
+    assert ops.read_all(db, mount, "/f") == b"after"
+
+
+def test_with_block_that_completes_still_commits(db, mount):
+    ops.create_entry(db, mount, "/f", b"original")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"replaced")
+    assert ops.read_all(db, mount, "/f") == b"replaced"
+
+
+def test_explicit_close_after_an_error_still_commits(db, mount):
+    """THE FUSE CONTRACT, pinned. aloelite/fuse.py never uses `with`: it parks
+    the writer in self._open and calls close() from flush()/release(). A
+    partial POSIX write must still land, the way it does on a local
+    filesystem, so the commit decision has to stay at the call site rather
+    than move inside the descriptor."""
+    ops.create_entry(db, mount, "/f", b"original")
+    w = ops.open_write(db, mount, "/f")
+    try:
+        w.write(b"partial")
+        raise RuntimeError("something upstream failed")
+    except RuntimeError:
+        pass
+    w.close()  # explicit close commits regardless of the error
+    assert ops.read_all(db, mount, "/f") == b"partial"
+
+
+def test_abort_releases_the_lock_for_another_mount(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    w = ops.open_write(db, mount, "/f")
+    w.write(b"discarded")
+    with pytest.raises(errors.LockHeld):
+        ops.write_all(db, other, "/f", b"blocked")
+    w.abort()
+    ops.write_all(db, other, "/f", b"permitted")
+    assert ops.read_all(db, mount, "/f") == b"permitted"
+
+
+def test_abort_on_a_read_descriptor_is_a_noop(db, mount):
+    ops.create_entry(db, mount, "/f", b"data")
+    r = ops.open_read(db, mount, "/f")
+    r.abort()
+    assert r.closed
+    assert ops.read_all(db, mount, "/f") == b"data"
+
+
+def test_abort_below_one_chunk_stages_nothing_to_reclaim(db, mount):
+    """A write that never fills a chunk never flushes, so it never allocates a
+    version at all -- there is nothing for prune to find. Worth pinning
+    because it is the reason the leak test below needs a tiny chunk size."""
+    ops.create_entry(db, mount, "/f", b"original")
+    w = ops.open_write(db, mount, "/f")
+    w.write(b"x" * 64)  # default chunk is 1 MiB
+    w.abort()
+    assert ops.prune_content(db, None).versions_pruned == 0
+    assert ops.read_all(db, mount, "/f") == b"original"
+
+
+def test_aborted_versions_are_reclaimed_by_prune_content(db):
+    """abort deliberately leaves staged chunks above the committed pointer
+    instead of deleting them: that is already the CV-3 incomplete-write state
+    and CV-7's prune_content owns reclaiming it. If that were not true, abort
+    would trade a data-loss bug for a disk leak."""
+    vol = ops.create_volume(db, "tiny-chunks", chunk_size=8)
+    m = ops.mount(db, vol.id, "/", ttl_ms=60_000)
+    ops.create_entry(db, m, "/f", b"original")
+    w = ops.open_write(db, m, "/f")
+    w.write(b"Y" * 96)  # 12 full chunks, each flushed in its own txn
+    w.abort()
+    report = ops.prune_content(db, vol.id)
+    assert report.versions_pruned >= 1
+    assert ops.read_all(db, m, "/f") == b"original"
+
+
 def test_open_write_creates_missing_entry(db, mount):
     # open_write(TRUNCATE) on a missing path creates the entry inside the
     # operation's own transaction (no wrapper pre-create, no TOCTOU window)

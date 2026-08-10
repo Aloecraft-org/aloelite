@@ -23,6 +23,13 @@ manager (its own concern: the lock lifecycle), so it composes:
     with fs.mount(vol) as m:
         with m.open_write("/f") as w:
             w.write(b"...")
+
+That `with` COMMITS on a clean exit and ABORTS if the block raises, leaving the
+entry's previous bytes untouched -- a block that did not finish producing the
+content should not publish a truncated file as if it were whole. Callers that
+want a partial write kept (a POSIX frontend, where that is the expected
+behaviour) call close() explicitly instead of using `with`; see
+Descriptor.abort and aloelite/fuse.py.
 """
 
 from __future__ import annotations

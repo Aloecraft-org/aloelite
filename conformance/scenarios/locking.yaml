@@ -159,6 +159,43 @@ scenarios:
         via: second
         expect: true
 
+  - scenario: aborting-a-write-releases-the-lock
+    requirements: [ACC-7, ACC-9, CV-3]
+    harness: two_mounts_one_volume
+    description: >
+      An abort must free the entry as completely as a close does. If it did
+      not, the safe way to discard a partial write would be to strand the lock
+      and leave the resource permanently unwritable — worse than the partial
+      commit it was meant to avoid. The other mount must find the ORIGINAL
+      bytes, not the aborted ones.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {utf8: "abandoned"}}
+      - op: write_all
+        args: {path: /contended.txt, data: {utf8: "blocked"}}
+        via: second
+        raises: lock_held
+      - op: abort
+        args: {fd: {ref: writer}}
+        via: first
+      - op: read_all
+        args: {path: /contended.txt}
+        via: second
+        expect: {utf8: "original"}
+      - op: write_all
+        args: {path: /contended.txt, data: {utf8: "now permitted"}}
+        via: second
+      - op: read_all
+        args: {path: /contended.txt}
+        via: second
+        expect: {utf8: "now permitted"}
+
   - scenario: releasing-a-write-lock-readmits-the-other-mount
     requirements: [ACC-7, ACC-9]
     harness: two_mounts_one_volume

@@ -345,15 +345,15 @@ def test_zero_length_put(client):
     assert r.data == b""
 
 
-def test_interrupted_put_commits_partial_content_but_does_not_wedge(client):
-    """Pins a KNOWN LIMITATION rather than asserting desirable behaviour.
+def test_interrupted_put_is_atomic_and_does_not_wedge(client):
+    """A client that vanishes mid-PUT must leave the PREVIOUS content intact.
 
-    Descriptor.close() commits unconditionally and the engine offers no abort,
-    so a client that vanishes mid-PUT leaves the partial bytes committed over
-    the previous version. The alternative -- not closing -- would strand the
-    write lock and make the resource unwritable, which is worse. What must
-    hold regardless is the second half: the session lock is released, so one
-    dead transfer cannot wedge the whole volume.
+    This used to pin the opposite: Descriptor.close() committed
+    unconditionally, so the partial bytes replaced the file and the loss was
+    silent -- the error was about the transfer, not the data, so nothing
+    surfaced it. Descriptor.abort() plus abort-on-exception in __exit__ closed
+    it. The second assertion is the one that was always required: the session
+    lock is released either way, so one dead transfer cannot wedge the volume.
     """
     from werkzeug.test import EnvironBuilder
 
@@ -385,9 +385,14 @@ def test_interrupted_put_commits_partial_content_but_does_not_wedge(client):
     finally:
         app.testing = True
 
-    assert client.get("/dav/v1/b.txt").data == b"AAAA"  # partial, committed
-    # The part that actually matters: the volume still answers.
+    # The partial write is discarded; the previous version survives whole.
+    assert client.get("/dav/v1/b.txt").data == b"ORIGINAL"
+    # The volume still answers -- the write lock was released, not stranded.
     assert _propfind(client, "/", depth="1").status_code == 207
+    # And the resource is still writable, which is the half that a
+    # "just don't close it" fix would have broken.
+    assert _put(client, "/b.txt", b"AFTER").status_code == 204
+    assert client.get("/dav/v1/b.txt").data == b"AFTER"
 
 
 def test_mkcol_conflicts(client):
