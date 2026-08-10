@@ -724,8 +724,31 @@ validation:
       ) AS held
     params: { node: "NodeId", mount: "the requesting MountId" }
     returns: "{ held: 0|1 }"
-    consumed_by: [write_all, open_write]
-    notes: "held = 1 => raise lock_held. Excludes the caller's own mount."
+    consumed_by: [write_all, open_write, move, remove, set_metadata]
+    notes: >
+      held = 1 => raise lock_held. Excludes the caller's own mount. Guards the
+      content-write paths AND the namespace/annotation paths that would destroy
+      or relocate the node out from under the lock holder.
+
+  check_lock_held_subtree:
+    sql: |
+      SELECT node_id
+      FROM valid_lock
+      WHERE mount_id <> :mount
+        AND node_id IN (SELECT node_id FROM subtree WHERE root_id = :root)
+      LIMIT 1
+    params: { root: "NodeId at the top of the subtree", mount: "the requesting MountId" }
+    returns: "{ node_id } of one locked member, or empty when none is locked"
+    consumed_by: [remove_recursive]
+    notes: >
+      Returns the offending node rather than a 0|1 so the error can name it —
+      "something in this tree is locked" is not an actionable message when the
+      tree is deep. Any single locked member is enough to refuse, so LIMIT 1.
+      Destruction is checked TRANSITIVELY (a recursive remove destroys locked
+      descendants), while relocation is checked only at the node itself: moving
+      an ancestor changes a locked node's path but neither its content nor its
+      existence, and blocking that would make an exclusive write lock behave
+      like a lock on every ancestor directory.
 
 # ----------------------------------------------------------------------------
 # Recursive / set operations (over the subtree view)

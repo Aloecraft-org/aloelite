@@ -836,6 +836,8 @@ def set_metadata(db: Db, mount: MountId, path: str, metadata: dict[str, str]) ->
     with db.txn():
         m = _require_mount(db, mount)
         node = resolve(db, m.mount_point, path).node
+        if db.scalar("validation.check_lock_held", {"node": node, "mount": mount}):
+            raise LockHeld(node=node)
         db.rowcount(
             "mutation.set_metadata",
             {"node": node, "metadata": _meta_to_json(metadata)},
@@ -851,6 +853,8 @@ def move(db: Db, mount: MountId, src: str, dst: str) -> None:
         m = _require_mount(db, mount)
         found = resolve(db, m.mount_point, src)
         node, ntype = found.node, found.type
+        if db.scalar("validation.check_lock_held", {"node": node, "mount": mount}):
+            raise LockHeld(node=node)
         parent, new_name = resolve_parent(db, m.mount_point, dst)
         _require_name(new_name)
         if ntype is NodeType.CONTAINER:
@@ -874,6 +878,10 @@ def remove(db: Db, mount: MountId, path: str) -> None:
     with db.txn():
         m = _require_mount(db, mount)
         found = resolve(db, m.mount_point, path)
+        if db.scalar(
+            "validation.check_lock_held", {"node": found.node, "mount": mount}
+        ):
+            raise LockHeld(node=found.node)
         if found.type is NodeType.CONTAINER:
             if db.scalar("validation.check_empty", {"container": found.node}):
                 raise NotEmpty(node=found.node)
@@ -888,6 +896,15 @@ def remove_recursive(db: Db, mount: MountId, path: str) -> None:
     with db.txn():
         m = _require_mount(db, mount)
         node = resolve(db, m.mount_point, path).node
+        # Checked over the WHOLE subtree, not just the root: this destroys
+        # every member, so a lock anywhere below is a lock on something this
+        # statement would archive. Naming the offender matters -- "something
+        # in this tree is locked" is not actionable on a deep tree.
+        locked = db.one(
+            "validation.check_lock_held_subtree", {"root": node, "mount": mount}
+        )
+        if locked is not None:
+            raise LockHeld(node=NodeId(locked["node_id"]))
         db.rowcount("recursive.archive_subtree", {"root": node})
 
 

@@ -264,7 +264,7 @@ that are easy to conflate. Most of the cheap work makes the current frontend
 | # | Step | Goal | Cost | State |
 |---|---|---|---|---|
 | 1 | Conditional requests (`If-Match`/`If-None-Match`/`If-Range`) | safety | ~½ day | **done** — section 2a |
-| 2 | Engine lock checks on `move`/`remove`/`set_metadata` | safety | ~1 day | open |
+| 2 | Engine lock checks on `move`/`remove`/`set_metadata` | safety | ~1 day | **done** — ACC-11 |
 | 3 | Decouple lock lifetime from the descriptor | safety | ~1–2 days | open |
 | 4 | TLS | Windows | small | open |
 | 5 | Class 2 lite: exclusive, depth-0, minimal `If:` | read-write | ~3–4 days | open |

@@ -308,6 +308,88 @@ def test_same_mount_does_not_self_block(db, mount):
     assert ops.read_all(db, mount, "/f") in (b"x", b"y")
 
 
+def _other_mount(db, mount):
+    return ops.mount(db, ops.mount_info(db, mount).volume, "/", ttl_ms=60_000)
+
+
+def test_write_lock_blocks_remove_from_another_mount(db, mount):
+    """Removing a file another mount is actively writing discards that
+    writer's data with no error on either side. The lock already existed; it
+    simply was not consulted outside the content-write paths."""
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld):
+            ops.remove(db, other, "/f")
+    ops.remove(db, other, "/f")  # released on close
+
+
+def test_write_lock_blocks_move_from_another_mount(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld):
+            ops.move(db, other, "/f", "/g")
+    ops.move(db, other, "/f", "/g")
+
+
+def test_write_lock_blocks_set_metadata_from_another_mount(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld):
+            ops.set_metadata(db, other, "/f", {"k": "v"})
+    ops.set_metadata(db, other, "/f", {"k": "v"})
+
+
+def test_recursive_remove_is_blocked_by_a_lock_deep_in_the_subtree(db, mount):
+    """Destruction is checked TRANSITIVELY. The lock is three levels down and
+    the remove is issued at the top, so a root-only check would miss it and
+    archive the locked node anyway."""
+    other = _other_mount(db, mount)
+    ops.create_container(db, mount, "/a")
+    ops.create_container(db, mount, "/a/b")
+    ops.create_container(db, mount, "/a/b/c")
+    ops.create_entry(db, mount, "/a/b/c/deep", b"")
+    with ops.open_write(db, mount, "/a/b/c/deep") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld) as caught:
+            ops.remove_recursive(db, other, "/a")
+        # The error names the offending descendant, not the tree root.
+        assert caught.value.context["node"] == ops.stat(db, mount, "/a/b/c/deep").id
+        assert ops.exists(db, mount, "/a/b/c/deep")
+    ops.remove_recursive(db, other, "/a")
+    assert not ops.exists(db, mount, "/a")
+
+
+def test_moving_an_ancestor_of_a_locked_node_is_allowed(db, mount):
+    """Relocation is checked at the node itself only. Moving an ancestor
+    changes a locked node's path but neither its content nor its existence;
+    blocking it would make an exclusive write lock behave like a lock on every
+    directory above it."""
+    other = _other_mount(db, mount)
+    ops.create_container(db, mount, "/a")
+    ops.create_entry(db, mount, "/a/f", b"")
+    with ops.open_write(db, mount, "/a/f") as w:
+        w.write(b"x")
+        ops.move(db, other, "/a", "/moved")  # allowed
+    assert ops.exists(db, mount, "/moved/f")
+
+
+def test_lock_checks_never_block_the_holding_mount(db, mount):
+    """Cross-mount exclusivity only -- the same mount must still be able to
+    rename or annotate what it is itself writing."""
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        ops.set_metadata(db, mount, "/f", {"k": "v"})
+        ops.move(db, mount, "/f", "/g")
+    assert ops.exists(db, mount, "/g")
+
+
 def test_open_write_creates_missing_entry(db, mount):
     # open_write(TRUNCATE) on a missing path creates the entry inside the
     # operation's own transaction (no wrapper pre-create, no TOCTOU window)
