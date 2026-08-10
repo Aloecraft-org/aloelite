@@ -172,15 +172,83 @@ def _iso8601(ms: int) -> str:
 
 
 def _etag(info) -> str:
-    """A WEAK validator, and deliberately labelled as one.
+    """A STRONG validator wherever the engine can back one.
 
-    node_id pins identity and modified_at pins the content generation, which
-    is the best available: there is no content digest column (content.hash is
-    written as NULL by every write path today). modified_at is milliseconds,
-    so two writes inside the same millisecond alias -- exactly the case a weak
-    etag is allowed to be wrong about, and precisely why this is not strong.
+    content.version is the CV-3 committed version pointer: it advances on
+    every commit, so unlike modified_at -- milliseconds, and demonstrably
+    capable of aliasing two writes in one tick -- it identifies content
+    exactly. That distinction is not cosmetic. If-Match and If-Range both
+    require STRONG comparison (RFC 9110 8.8.3.2), and a weak validator can
+    never satisfy one, so a weak etag would silently reduce both headers to
+    permanent no-ops: every If-Match would 412 and every resumed download
+    would restart.
+
+    Containers have no content row and so no version; they fall back to the
+    weak form, which is all a collection can honestly offer.
     """
-    return f'W/"{info.id}-{info.modified_at}"'
+    if info.version is None:
+        return f'W/"{info.id}-{info.modified_at}"'
+    return f'"{info.id}-{info.version}"'
+
+
+# An entity-tag cannot contain a double quote (RFC 9110 8.8.3: etagc excludes
+# it), so scanning for quoted runs is exact. Splitting on commas would NOT be:
+# a comma is a legal etagc and may appear inside the quotes.
+_ETAG_RE = re.compile(r'(W/)?"([^"]*)"')
+
+
+def _parse_etag_list(raw: str) -> str | list[tuple[bool, str]]:
+    """An If-Match/If-None-Match value as '*' or [(is_weak, opaque), ...]."""
+    if raw.strip() == "*":
+        return "*"
+    return [(bool(weak), opaque) for weak, opaque in _ETAG_RE.findall(raw)]
+
+
+def _etag_matches(candidates, current: str | None, *, strong: bool) -> bool:
+    """RFC 9110 8.8.3.2 comparison. Under STRONG comparison a weak tag on
+    either side never matches; under weak comparison only the opaque parts
+    are compared."""
+    if current is None:
+        return False
+    found = _ETAG_RE.fullmatch(current.strip())
+    if not found:
+        return False
+    cur_weak, cur_opaque = bool(found.group(1)), found.group(2)
+    for weak, opaque in candidates:
+        if opaque != cur_opaque:
+            continue
+        if strong and (weak or cur_weak):
+            continue
+        return True
+    return False
+
+
+def _check_preconditions(current: str | None, *, exists: bool, is_read: bool) -> bool:
+    """Evaluate If-Match / If-None-Match, in the order RFC 9110 13.2.2 fixes.
+
+    Returns True when the caller should answer 304; raises 412 otherwise.
+    This is what gives DAV clients lost-update protection WITHOUT a lock:
+    'If-Match: <etag>' means "only if nobody else wrote since I read", and
+    'If-None-Match: *' means "create, but do not clobber".
+    """
+    raw_match = request.headers.get("If-Match")
+    if raw_match is not None:
+        parsed = _parse_etag_list(raw_match)
+        ok = exists if parsed == "*" else _etag_matches(parsed, current, strong=True)
+        if not ok:
+            raise DavFault(412, "If-Match precondition failed")
+
+    raw_none = request.headers.get("If-None-Match")
+    if raw_none is not None:
+        parsed = _parse_etag_list(raw_none)
+        matched = (
+            exists if parsed == "*" else _etag_matches(parsed, current, strong=False)
+        )
+        if matched:
+            if is_read:
+                return True
+            raise DavFault(412, "If-None-Match precondition failed")
+    return False
 
 
 def _parse_xml(data: bytes):
@@ -696,6 +764,7 @@ def create_dav_blueprint(
             raise DavFault(400, "body must be a DAV:propertyupdate")
 
         info = m.stat(path)
+        _check_preconditions(_etag(info), exists=True, is_read=False)
         # set_metadata is a WHOLESALE REPLACE (NODE-6), so start from what is
         # there and keep every non-DAV key: 'mode' and 'symlink' belong to the
         # FUSE frontend and a PROPPATCH must not erase them.
@@ -813,9 +882,19 @@ def create_dav_blueprint(
             # davfs2 and rclone from mistaking an error page for content.
             raise DavFault(405, "cannot GET a collection")
         size = info.size or 0
+        etag = _etag(info)
+        if _check_preconditions(etag, exists=True, is_read=True):
+            # 304 carries the validators and NO body, not even Content-Length
+            # of the entity -- a client that sees one is meant to reuse what it
+            # already has.
+            return Response(
+                b"",
+                status=304,
+                headers={"ETag": etag, "Last-Modified": _rfc1123(info.modified_at)},
+            )
         headers = {
             "Content-Type": _content_type(info.name),
-            "ETag": _etag(info),
+            "ETag": etag,
             "Last-Modified": _rfc1123(info.modified_at),
             "Accept-Ranges": "bytes",
             # Volume content may hold secrets; never let a proxy or browser
@@ -823,6 +902,22 @@ def create_dav_blueprint(
             "Cache-Control": "no-store",
         }
         rng = _parse_range(size)
+        if rng is not None and (raw_if_range := request.headers.get("If-Range")):
+            # THE RESUMED-DOWNLOAD CORRUPTION GUARD. A client resuming an
+            # interrupted transfer sends the validator it started with; if the
+            # file changed meanwhile, serving the requested range would splice
+            # new bytes onto the prefix it already holds and produce a corrupt
+            # file with no error anywhere. Ignoring the Range and sending the
+            # whole current entity is the RFC 9110 14.2 answer and is never
+            # wrong -- only more expensive.
+            #
+            # Comparison is STRONG, and the date form is deliberately not
+            # honoured: Last-Modified is second-resolution here, so it cannot
+            # distinguish a same-second change, and treating it as sufficient
+            # would reintroduce exactly the corruption this guards against.
+            parsed = _parse_etag_list(raw_if_range)
+            if parsed == "*" or not _etag_matches(parsed, etag, strong=True):
+                rng = None
         if rng is None:
             start, end = 0, size - 1
             status = 200
@@ -891,6 +986,13 @@ def create_dav_blueprint(
             existing = None
         if existing is not None and existing.type.value == "container":
             raise DavFault(405, "cannot PUT over a collection")
+        # Checked BEFORE open_write, which would otherwise truncate the very
+        # content the precondition exists to protect.
+        _check_preconditions(
+            _etag(existing) if existing is not None else None,
+            exists=existing is not None,
+            is_read=False,
+        )
 
         # open_write creates the entry when missing, but only if the PARENT
         # resolves; a missing parent surfaces as NotFound and RFC 4918 9.7.1
@@ -950,6 +1052,7 @@ def create_dav_blueprint(
         if path == "/":
             raise DavFault(403, "cannot DELETE the volume root")
         info = m.stat(path)
+        _check_preconditions(_etag(info), exists=True, is_read=False)
         if info.type.value == "container":
             # DELETE on a collection is Depth: infinity by definition
             # (RFC 4918 9.6.1) -- there is no shallow form to honour.
@@ -991,6 +1094,11 @@ def create_dav_blueprint(
             src_info = m.stat(path)
             if src_info.type.value == "container":
                 raise DavFault(400, "Depth: 0 COPY of a collection is not supported")
+
+        # Preconditions gate the SOURCE (the request-URI), and are evaluated
+        # before the destination is cleared below: a failed precondition must
+        # not leave the destination already deleted.
+        _check_preconditions(_etag(m.stat(path)), exists=True, is_read=False)
 
         try:
             dst_info = m.stat(dst)

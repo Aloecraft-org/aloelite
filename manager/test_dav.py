@@ -187,7 +187,8 @@ def test_propfind_depth_1_lists_children_with_live_properties(client):
     # the classic bug and clients do notice.
     assert _prop(entry, "getlastmodified").text.endswith("GMT")
     assert _prop(entry, "creationdate").text.endswith("Z")
-    assert _prop(entry, "getetag").text.startswith('W/"')
+    # Strong for an entry: backed by content.version, not by modified_at.
+    assert _prop(entry, "getetag").text.startswith('"')
 
     coll = by_href["/dav/v1/sub/"]
     assert _prop(coll, "resourcetype").find(f"{D}collection") is not None
@@ -256,7 +257,7 @@ def test_get_returns_content_etag_and_no_store(client):
     assert r.data == b"0123456789"
     assert r.headers["Accept-Ranges"] == "bytes"
     assert r.headers["Cache-Control"] == "no-store"
-    assert r.headers["ETag"].startswith('W/"')
+    assert r.headers["ETag"].startswith('"')  # strong; see _etag
 
 
 def test_head_has_headers_and_no_body(client):
@@ -698,6 +699,173 @@ def test_trailing_slash_on_a_file_still_resolves(client):
 
 def test_unknown_volume_is_404(client):
     assert client.open("/dav/nosuch/", method="PROPFIND").status_code == 404
+
+
+# --------------------------------------------------------------------------
+# Conditional requests (RFC 9110). Lost-update protection WITHOUT locking.
+# --------------------------------------------------------------------------
+def _etag_of(client, path="/a.txt") -> str:
+    return client.open(f"/dav/v1{path}", method="HEAD").headers["ETag"]
+
+
+def test_file_etag_is_strong_and_collection_etag_is_weak(client):
+    """If-Match and If-Range use strong comparison, so a weak etag makes both
+    permanent no-ops. Files get a strong tag from content.version; collections
+    have no version and must not pretend otherwise."""
+    _put(client, "/a.txt", b"x")
+    assert not _etag_of(client).startswith("W/")
+
+    client.open("/dav/v1/sub", method="MKCOL")
+    coll = _prop(
+        _responses(_propfind(client, "/sub/", depth="0"))["/dav/v1/sub/"], "getetag"
+    )
+    assert coll.text.startswith('W/"')
+
+
+def test_etag_distinguishes_writes_in_the_same_millisecond(client):
+    """The whole reason for moving off modified_at: a tight rewrite loop can
+    land two commits in one millisecond, and a validator that aliases them
+    lets a client keep stale content it believes it revalidated."""
+    _put(client, "/a.txt", b"seed")
+    tags = []
+    for i in range(6):
+        _put(client, "/a.txt", f"body-{i}".encode())
+        tags.append(_etag_of(client))
+    assert len(set(tags)) == len(tags)
+
+
+def test_if_none_match_returns_304_without_a_body(client):
+    _put(client, "/a.txt", b"hello")
+    tag = _etag_of(client)
+    r = client.get("/dav/v1/a.txt", headers={"If-None-Match": tag})
+    assert r.status_code == 304
+    assert r.data == b""
+    assert r.headers["ETag"] == tag
+    # A stale validator must still deliver the body.
+    r = client.get("/dav/v1/a.txt", headers={"If-None-Match": '"nope-1"'})
+    assert r.status_code == 200 and r.data == b"hello"
+
+
+def test_if_none_match_star_makes_put_create_only(client):
+    """'Create, but do not clobber' -- the safe way to upload without first
+    issuing a HEAD and racing between the two."""
+    assert (
+        _put(client, "/new.txt", b"first", headers={"If-None-Match": "*"}).status_code
+        == 201
+    )
+    r = _put(client, "/new.txt", b"second", headers={"If-None-Match": "*"})
+    assert r.status_code == 412
+    assert client.get("/dav/v1/new.txt").data == b"first"  # untouched
+
+
+def test_if_match_prevents_the_lost_update(client):
+    """Two clients read the same version; the second writer must be refused
+    rather than silently overwriting the first."""
+    _put(client, "/a.txt", b"original")
+    stale = _etag_of(client)
+    _put(client, "/a.txt", b"someone else's edit")  # the other writer wins the race
+
+    r = _put(client, "/a.txt", b"my edit", headers={"If-Match": stale})
+    assert r.status_code == 412
+    assert client.get("/dav/v1/a.txt").data == b"someone else's edit"
+
+    # With the current validator the same write succeeds.
+    r = _put(client, "/a.txt", b"my edit", headers={"If-Match": _etag_of(client)})
+    assert r.status_code == 204
+    assert client.get("/dav/v1/a.txt").data == b"my edit"
+
+
+def test_if_match_on_a_missing_resource_is_412(client):
+    assert (
+        _put(client, "/ghost.txt", b"x", headers={"If-Match": '"any-1"'}).status_code
+        == 412
+    )
+
+
+def test_weak_validator_never_satisfies_if_match(client):
+    """Strong comparison, per RFC 9110 8.8.3.2 -- a W/ tag must not pass."""
+    _put(client, "/a.txt", b"x")
+    weak = "W/" + _etag_of(client)
+    assert _put(client, "/a.txt", b"y", headers={"If-Match": weak}).status_code == 412
+
+
+def test_if_range_stale_serves_the_whole_entity_not_a_spliced_range(client):
+    """THE RESUMED-DOWNLOAD CORRUPTION GUARD. A client resumes with the
+    validator it started on; if the file changed, honouring the Range would
+    splice new bytes onto the prefix it already holds and hand back a corrupt
+    file with no error. The RFC answer is to ignore the Range and send 200."""
+    _put(client, "/a.txt", b"AAAAAAAAAA")
+    stale = _etag_of(client)
+    _put(client, "/a.txt", b"BBBBBBBBBBBBBBBBBBBB")  # changed under the client
+
+    r = client.get("/dav/v1/a.txt", headers={"Range": "bytes=5-9", "If-Range": stale})
+    assert r.status_code == 200  # NOT 206
+    assert r.data == b"BBBBBBBBBBBBBBBBBBBB"
+
+    # Current validator -> the range is honoured as normal.
+    r = client.get(
+        "/dav/v1/a.txt", headers={"Range": "bytes=5-9", "If-Range": _etag_of(client)}
+    )
+    assert r.status_code == 206 and r.data == b"BBBBB"
+
+
+def test_if_range_is_ignored_without_a_range_header(client):
+    _put(client, "/a.txt", b"hello")
+    r = client.get("/dav/v1/a.txt", headers={"If-Range": '"stale-1"'})
+    assert r.status_code == 200 and r.data == b"hello"
+
+
+def test_failed_precondition_on_move_leaves_the_destination_intact(client):
+    """Overwrite: T clears the destination before moving, so the precondition
+    has to be evaluated first -- otherwise a 412 would still have destroyed
+    the destination's content."""
+    _put(client, "/src.txt", b"source")
+    _put(client, "/dst.txt", b"destination")
+    r = client.open(
+        "/dav/v1/src.txt",
+        method="MOVE",
+        headers={"Destination": "/dav/v1/dst.txt", "If-Match": '"stale-1"'},
+    )
+    assert r.status_code == 412
+    assert client.get("/dav/v1/dst.txt").data == b"destination"
+    assert client.get("/dav/v1/src.txt").data == b"source"
+
+
+def test_if_match_guards_delete(client):
+    _put(client, "/a.txt", b"x")
+    assert (
+        client.open(
+            "/dav/v1/a.txt", method="DELETE", headers={"If-Match": '"stale-1"'}
+        ).status_code
+        == 412
+    )
+    assert client.get("/dav/v1/a.txt").status_code == 200
+    assert (
+        client.open(
+            "/dav/v1/a.txt", method="DELETE", headers={"If-Match": _etag_of(client)}
+        ).status_code
+        == 204
+    )
+
+
+def test_etag_list_parsing_handles_commas_inside_the_opaque_part(client):
+    """A comma is a legal etagc, so splitting the header on commas is wrong.
+    Unit-level because our own etags never contain one."""
+    from manager.dav import _etag_matches, _parse_etag_list
+
+    parsed = _parse_etag_list('"a,b", W/"c,d"')
+    assert parsed == [(False, "a,b"), (True, "c,d")]
+    assert _etag_matches(parsed, '"a,b"', strong=True)
+    assert not _etag_matches(parsed, '"c,d"', strong=True)  # weak side
+    assert _etag_matches(parsed, '"c,d"', strong=False)
+    assert _parse_etag_list("  *  ") == "*"
+
+
+def test_multiple_candidate_etags_match_any(client):
+    _put(client, "/a.txt", b"x")
+    tag = _etag_of(client)
+    r = _put(client, "/a.txt", b"y", headers={"If-Match": f'"other-1", {tag}'})
+    assert r.status_code == 204
 
 
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>

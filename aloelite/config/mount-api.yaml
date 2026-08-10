@@ -68,8 +68,8 @@ records:
   NodeInfo:
     { id: NodeId, type: NodeType, name: string, created_at: Timestamp,
       modified_at: Timestamp, volume: "VolumeId?", size: "int?",
-      metadata: "{string:string}",
-      note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it). size is the materialized content total, null for a container. metadata is the NODE-6 shallow annotation map, empty when unset (never null)." }
+      version: "int?", metadata: "{string:string}",
+      note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it). size is the materialized content total, null for a container. version is the CV-3 committed version pointer, which advances on every commit and so identifies content exactly -- unlike modified_at, whose millisecond resolution aliases two writes in the same tick; a binding serving HTTP should build its strong ETag from it. Null for anything with no content row, containers chiefly. metadata is the NODE-6 shallow annotation map, empty when unset (never null)." }
   DirEntry:
     { node: NodeId, name: string, type: NodeType, visible: bool, edge: EdgeId,
       current_directory: Path,

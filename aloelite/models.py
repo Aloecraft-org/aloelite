@@ -69,6 +69,11 @@ class NodeInfo(_Record):
     modified_at: Timestamp
     volume: VolumeId | None
     size: Optional[int]
+    # CV-3 committed version pointer: advances on every commit, so unlike
+    # modified_at (millisecond) it cannot alias two writes. That makes it a
+    # STRONG HTTP validator, which If-Match and If-Range both require.
+    # None for anything with no content row -- directories, chiefly.
+    version: Optional[int] = None
     # NODE-6: shallow {string:string} annotation map; {} when unset
     metadata: dict[str, str]
 
@@ -88,6 +93,7 @@ class NodeInfo(_Record):
             modified_at=Timestamp(modified),
             volume=VolumeId(r["volume_id"]) if r["volume_id"] is not None else None,
             size=r["size"],
+            version=r["version"] if "version" in r.keys() else None,
             metadata=metadata,
         )
 

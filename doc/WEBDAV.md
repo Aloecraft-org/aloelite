@@ -25,6 +25,7 @@ pointing Windows or macOS at this.
 ## Contents
 - [1. Running it](#1-running-it)
 - [2. What is implemented](#2-what-is-implemented)
+- [2a. Conditional requests](#2a-conditional-requests)
 - [3. Client notes](#3-client-notes)
 - [4. Class 2 locking assessment](#4-class-2-locking-assessment)
 - [5. Design notes](#5-design-notes)
@@ -93,8 +94,8 @@ per manager lifetime. The PIN itself is never stored.
 | `OPTIONS` | — | `DAV: 1`, `MS-Author-Via: DAV`, `Accept-Ranges: bytes`. Answers before auth. |
 | `PROPFIND` | `stat`, `list`, `stat_by_id` | Depth 0 and 1. Depth infinity → 403 `propfind-finite-depth`. |
 | `PROPPATCH` | `set_metadata` | Dead properties only; live ones → 403. |
-| `GET` / `HEAD` | `open_read` + `seek` | Single-range `206`, `416` with `Content-Range: bytes */n`. |
-| `PUT` | `open_write` (TRUNCATE) | Streamed, bounded memory. `Content-Range` → 400. |
+| `GET` / `HEAD` | `open_read` + `seek` | Single-range `206`, `416` with `Content-Range: bytes */n`. `If-None-Match` → `304`, `If-Range` guards resumes. |
+| `PUT` | `open_write` (TRUNCATE) | Streamed, bounded memory. `Content-Range` → 400. `If-Match` / `If-None-Match` → `412`. |
 | `MKCOL` | `create_container` | Body → 415, exists → 405, missing parent → 409. |
 | `DELETE` | `remove` / `remove_recursive` | Always recursive on a collection, per RFC. |
 | `COPY` / `MOVE` | `copy` / `move` | `Destination`, `Overwrite`. |
@@ -128,6 +129,65 @@ Stored in the node's NODE-6 metadata map under a `dav:` key prefix. Capped at
 `fuse.py` keeps `mode` and `symlink` in that same map, so PROPPATCH merges
 rather than replaces — otherwise every file Explorer touched would silently
 lose its permission bits. There is a test pinning exactly that.
+
+---
+
+## 2a. Conditional requests
+
+`If-Match`, `If-None-Match` and `If-Range` are honoured on every method that
+reads or changes a resource. This is the part of the concurrency story that
+does **not** need locking, and it is worth understanding before reaching for
+class 2: `If-Match` is the standards-correct answer to the lost update, and it
+is what most people actually want when they ask for locks.
+
+### The ETag is strong, and that is load-bearing
+
+`_etag` builds from `content.version`, the CV-3 committed version pointer,
+which advances on every commit. The earlier form used `modified_at`, and had
+to be labelled weak because milliseconds alias: a tight rewrite loop really
+does land two commits in one tick, and `manager/test_dav.py` pins that.
+
+Weak was not merely imprecise, it was disabling. `If-Match` and `If-Range`
+both require **strong** comparison (RFC 9110 8.8.3.2), and a weak validator
+can never satisfy one — so a weak ETag silently reduces both headers to
+permanent no-ops. Every `If-Match` would `412` and every resumed download
+would restart from zero, with nothing in any log to say why. Exposing
+`version` on `NodeInfo` (one column on a join `get_node` already does) is what
+makes the whole feature possible.
+
+Collections have no content row, so they keep the weak `W/"id-mtime"` form.
+That is all a collection can honestly offer, and nothing requires better.
+
+### What each header buys
+
+- **`If-Match: <etag>` — the lost update.** Two clients read version 4; the
+  second to write is refused with `412` instead of silently discarding the
+  first one's work. Available on `PUT`, `DELETE`, `MOVE`, `COPY`, `PROPPATCH`.
+- **`If-None-Match: *` — create, don't clobber.** Upload safely without a
+  preceding `HEAD`, and without racing between the two requests.
+- **`If-None-Match: <etag>` on GET — `304`.** Ordinary revalidation.
+- **`If-Range` — the resumed-download corruption guard.** This one fixed a
+  live bug rather than adding conformance. A client resuming an interrupted
+  transfer sends the validator it started with; the header was previously
+  ignored, so if the file had changed, the requested range was served from the
+  *new* content and spliced onto the prefix the client already held. A corrupt
+  file, no error raised anywhere. rclone resumes, so this was reachable in
+  normal use. Now a stale validator means the `Range` is dropped and the whole
+  current entity is sent — more expensive, never wrong.
+
+The date form of `If-Range` is deliberately **not** honoured. `Last-Modified`
+is second-resolution, so it cannot distinguish a same-second change, and
+accepting it would reintroduce the very corruption the header is there to
+prevent. A date always falls back to the full body.
+
+### Ordering
+
+Preconditions are evaluated in RFC 9110 13.2.2 order, and — this is the part
+that is easy to get wrong — **before** any destructive step. `PUT` checks
+before `open_write`, which would otherwise truncate the content the
+precondition exists to protect, and `MOVE`/`COPY` check before the
+`Overwrite: T` delete of the destination, so a `412` cannot leave the
+destination already gone. Both are pinned by tests.
 
 ---
 
@@ -194,6 +254,43 @@ edits.
 
 **Verdict: viable, and cheaper than it looks — because the hard part is already
 built.** The estimate is **5–8 engineer-days**, with no `SCHEMA_ERA` bump.
+
+### 4.0 The ladder between here and there
+
+Class 2 is not the only rung, and the intermediate ones split across two goals
+that are easy to conflate. Most of the cheap work makes the current frontend
+*safer*; only the last two make a desktop client mount *read-write*.
+
+| # | Step | Goal | Cost | State |
+|---|---|---|---|---|
+| 1 | Conditional requests (`If-Match`/`If-None-Match`/`If-Range`) | safety | ~½ day | **done** — section 2a |
+| 2 | Engine lock checks on `move`/`remove`/`set_metadata` | safety | ~1 day | open |
+| 3 | Decouple lock lifetime from the descriptor | safety | ~1–2 days | open |
+| 4 | TLS | Windows | small | open |
+| 5 | Class 2 lite: exclusive, depth-0, minimal `If:` | read-write | ~3–4 days | open |
+
+Rung 1 partly substitutes for locking rather than building toward it:
+optimistic concurrency is what most people are really after when they ask for
+locks, and it costs no protocol state.
+
+Rung 2 is worth doing on its own merits — locks currently guard only the five
+content-write paths (`write_all`, `append`, `write_range`, `truncate`,
+`open_write`), so `move`, `remove` and `set_metadata` ignore them entirely.
+That is **FUSE-visible too**: today you can `rm` or `mv` a file another mount
+holds open for write. Rung 3 additionally buys the descriptor abort that would
+close the interrupted-`PUT` window in section 5.
+
+**Order matters for honesty, not just speed.** Rung 5 can be built on
+manager-memory locks alone, and would then advertise `DAV: 1, 2` truthfully
+for DAV-vs-DAV while quietly lying about DAV-vs-FUSE and DAV-vs-web-UI. Doing
+2 and 3 first puts it on engine lock rows, where `direct.py`'s
+one-mount-row-per-client design makes cross-frontend exclusion fall out for
+free. Same destination; one route ships a claim that is true.
+
+One cost to price in: engine-level lock semantics from rungs 2–3 belong in
+`conformance/scenarios/` so the Rust, JS/WASM and Kotlin ports inherit the
+oracle instead of re-deriving it. That is real extra work, and it is also the
+only way the semantics get pinned once rather than four times.
 
 ### 4.1 What the engine already gives you
 
