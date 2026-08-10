@@ -33,8 +33,8 @@ def main() -> int:
         description="Aloelite web manager — browse, upload, and download "
         "files in aloelite filesystems from a browser.",
         epilog="Environment variables ALOELITE_API_PORT, ALOELITE_API_HOST, "
-        "ALOELITE_ROOT, and ALOELITE_DIRECT_ONLY are honored when the "
-        "corresponding flag is absent.",
+        "ALOELITE_ROOT, ALOELITE_DIRECT_ONLY, and ALOELITE_WEBDAV are honored "
+        "when the corresponding flag is absent.",
     )
     ap.add_argument(
         "-v",
@@ -62,6 +62,14 @@ def main() -> int:
         action="store_true",
         help="enable FUSE provisioning mode (container-grade preflight)",
     )
+    ap.add_argument(
+        "--webdav",
+        action="store_true",
+        help="serve every volume over WebDAV at /dav/<volume-id> (RFC 4918 "
+        "class 1: no locking, so macOS Finder mounts read-only). Off by "
+        "default; encrypted volumes authenticate with HTTP Basic where the "
+        "password is the PIN, so bind loopback or put TLS in front.",
+    )
     args = ap.parse_args()
 
     if args.port is not None:
@@ -74,6 +82,8 @@ def main() -> int:
         os.environ["ALOELITE_AUTH"] = args.auth
     if args.fuse:
         os.environ["ALOELITE_DIRECT_ONLY"] = "0"
+    if args.webdav:
+        os.environ["ALOELITE_WEBDAV"] = "1"
     os.environ.setdefault("ALOELITE_DIRECT_ONLY", "1")
 
     if os.geteuid() == 0 and not args.root and not os.environ.get("ALOELITE_ROOT"):

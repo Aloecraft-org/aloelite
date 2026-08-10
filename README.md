@@ -10,7 +10,7 @@ A portable encrypted filesystem stored inside one file
 
 **Overview (current)** | [Getting Started](https://github.com/Aloecraft-org/aloelite/blob/main/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](https://github.com/Aloecraft-org/aloelite/blob/main/doc/FAQ.md) 
 
-[Troubleshooting](https://github.com/Aloecraft-org/aloelite/blob/main/doc/TROUBLESHOOTING.md) | [Requirements Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/REQUIREMENTS.md) | [Encryption Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ENCRYPTION.md) | [Roadmap](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ROADMAP.md)
+[Troubleshooting](https://github.com/Aloecraft-org/aloelite/blob/main/doc/TROUBLESHOOTING.md) | [Requirements Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/REQUIREMENTS.md) | [Encryption Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ENCRYPTION.md) | [WebDAV](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WEBDAV.md) | [Roadmap](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ROADMAP.md)
 
 [![PyPI Version](https://img.shields.io/pypi/v/aloelite.svg)](https://pypi.org/project/aloelite/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/aloelite.svg)](https://pypi.org/project/aloelite/)
@@ -32,6 +32,7 @@ A portable encrypted filesystem stored inside one file
 - [Command Line](#command-line)
 - [Mount API](#mount-api)
 - [FUSE](#fuse)
+- [WebDAV](#webdav)
 - [Volume Manager and WebUI](#volume-manager-and-webui)
     + [API](#api)
     + [Backup Sync Pattern](#backup-sync-pattern)
@@ -403,6 +404,43 @@ index files), and anything that requires hard links. Both usually have a
 configuration escape hatch — point the mmap-backed store at a regular
 directory, or switch the journal mode — while the payload data stays on
 the volume.
+
+## WebDAV
+
+Mount a volume as a network drive from any OS — no FUSE, no privileges, no
+kernel module. The WebDAV frontend is a **peer of FUSE**, not a layer on it: it
+consumes the same ops API the browser UI does, so it runs anywhere the manager
+runs, including Windows and macOS hosts where FUSE was never an option.
+
+It is off by default — a second write-capable surface on every volume does not
+appear by accident:
+
+```bash
+aloelite-web --webdav                  # or ALOELITE_WEBDAV=1
+
+# Linux
+sudo mount -t davfs http://127.0.0.1:8080/dav/<volume-id> /mnt/vault
+
+# Anywhere, and the best experience today (no locking required)
+rclone mount :webdav:/ /mnt/vault --webdav-url http://127.0.0.1:8080/dav/<volume-id>
+
+# Windows
+net use Z: http://127.0.0.1:8080/dav/<volume-id>
+```
+
+Encrypted volumes authenticate with HTTP Basic where **the password is the
+PIN** — proving it also unlocks the volume. Basic sends that PIN on every
+request, so bind loopback (the default) or put TLS in front.
+
+Ranged `GET` is supported, so clients can seek and resume rather than pulling
+whole files.
+
+**This is RFC 4918 compliance class 1 — no locking — and that has real client
+consequences: macOS Finder mounts read-only, and Windows Explorer mounts
+read-write but fails on save.** `rclone` and `davfs2` are unaffected. See
+[doc/WEBDAV.md](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WEBDAV.md)
+for the per-client detail, the Windows registry workarounds, and the class 2
+assessment.
 
 ## Volume Manager and WebUI
 
