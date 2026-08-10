@@ -45,12 +45,13 @@ from .descriptor import Descriptor
 from .models import (
     ContentPruneReport,
     DirEntry,
+    LockInfo,
     MountInfo,
     NodeInfo,
     PruneReport,
     VolumeInfo,
 )
-from .types import MountId, NodeId, VolumeId, WriteMode
+from .types import LockId, MountId, NodeId, VolumeId, WriteMode
 
 if TYPE_CHECKING:
     # Runtime import lives inside Mount.path() to break the aloelite <-> path
@@ -354,8 +355,23 @@ class Mount:
     def open_read(self, path: str) -> Descriptor:
         return ops.open_read(self._db, self.id, path)
 
-    def open_write(self, path: str, mode: WriteMode = WriteMode.TRUNCATE) -> Descriptor:
-        return ops.open_write(self._db, self.id, path, mode)
+    def open_write(
+        self,
+        path: str,
+        mode: WriteMode = WriteMode.TRUNCATE,
+        lock: LockId | None = None,
+    ) -> Descriptor:
+        return ops.open_write(self._db, self.id, path, mode, lock)
+
+    # -- standalone locks (a lock with no open descriptor) -------------------
+    def lock(self, path: str, ttl_ms: int | None = None) -> LockInfo:
+        return ops.lock(self._db, self.id, path, ttl_ms)
+
+    def unlock(self, lock: LockId) -> None:
+        ops.unlock(self._db, self.id, lock)
+
+    def renew_lock(self, lock: LockId, ttl_ms: int | None = None) -> LockInfo:
+        return ops.renew_lock(self._db, self.id, lock, ttl_ms)
 
 
 __all__ = ["Aloelite", "Mount"]

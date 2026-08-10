@@ -482,6 +482,128 @@ def test_aborted_versions_are_reclaimed_by_prune_content(db):
     assert ops.read_all(db, m, "/f") == b"original"
 
 
+# --------------------------------------------------------------------------
+# Standalone locks — a lock with no open descriptor
+# --------------------------------------------------------------------------
+def test_a_standalone_lock_survives_the_descriptor_that_used_it(db, mount):
+    """THE POINT OF THE FEATURE. LOCK, PUT, PUT, UNLOCK arrive as four
+    separate requests in WebDAV class 2; if close() dropped the lock, the
+    resource would be unprotected between them and the second PUT could land
+    after someone else's."""
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    held = ops.lock(db, mount, "/f", ttl_ms=60_000)
+
+    with ops.open_write(db, mount, "/f", lock=held.id) as w:
+        w.write(b"first request")
+    with pytest.raises(errors.LockHeld):
+        ops.write_all(db, other, "/f", b"interloper")  # still locked after close
+
+    with ops.open_write(db, mount, "/f", lock=held.id) as w:
+        w.write(b"second request")
+    assert ops.read_all(db, mount, "/f") == b"second request"
+
+    ops.unlock(db, mount, held.id)
+    ops.write_all(db, other, "/f", b"now permitted")
+
+
+def test_a_minted_lock_is_still_released_on_close(db, mount):
+    """The default path must not change: open_write without a token owns its
+    lock and gives it back, or every FUSE write would leak one."""
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+    ops.write_all(db, other, "/f", b"permitted")
+
+
+def test_abort_leaves_a_supplied_lock_standing(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    held = ops.lock(db, mount, "/f", ttl_ms=60_000)
+    w = ops.open_write(db, mount, "/f", lock=held.id)
+    w.write(b"discarded")
+    w.abort()
+    assert ops.read_all(db, mount, "/f") == b"original"
+    with pytest.raises(errors.LockHeld):
+        ops.write_all(db, other, "/f", b"interloper")
+    ops.unlock(db, mount, held.id)
+
+
+def test_a_second_lock_on_one_node_is_refused_even_for_the_same_mount(db, mount):
+    """Self-exclusion, unlike the write paths. Two rows for one (mount, node)
+    would make unlock ambiguous about which it released."""
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f")
+    with pytest.raises(errors.LockHeld):
+        ops.lock(db, mount, "/f")
+    ops.unlock(db, mount, held.id)
+    ops.lock(db, mount, "/f")  # free again
+
+
+def test_unlock_and_renew_are_owner_scoped(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f", ttl_ms=60_000)
+    # LockHeld, not LockInvalid: the lock is live, just not this caller's.
+    with pytest.raises(errors.LockHeld):
+        ops.unlock(db, other, held.id)
+    with pytest.raises(errors.LockHeld):
+        ops.renew_lock(db, other, held.id, 60_000)
+    ops.unlock(db, mount, held.id)
+
+
+def test_unlocking_twice_is_lock_invalid(db, mount):
+    """Deliberately not idempotent: succeeding would hide a client that
+    believes it still holds a lock it does not."""
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f")
+    ops.unlock(db, mount, held.id)
+    with pytest.raises(errors.LockInvalid):
+        ops.unlock(db, mount, held.id)
+
+
+def test_renew_keeps_the_lock_id(db, mount):
+    """A stable id is what lets a client carry one token across requests."""
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f", ttl_ms=1_000)
+    renewed = ops.renew_lock(db, mount, held.id, 60_000)
+    assert renewed.id == held.id
+    assert renewed.node == held.node
+    assert renewed.expires_at > held.expires_at
+
+
+def test_an_expired_lock_stops_excluding_and_cannot_be_renewed(db, mount):
+    """ACC-9/10: validity is derived, so a client that vanishes cannot wedge a
+    node forever -- the ttl is what makes a network lock safe to hand out."""
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    held = ops.lock(db, mount, "/f", ttl_ms=120)
+    with pytest.raises(errors.LockHeld):
+        ops.write_all(db, other, "/f", b"blocked")
+    time.sleep(0.3)
+    ops.write_all(db, other, "/f", b"after expiry")  # node is free again
+    with pytest.raises(errors.LockInvalid):
+        ops.renew_lock(db, mount, held.id, 60_000)
+    assert ops.prune(db).locks_pruned >= 1
+
+
+def test_open_write_rejects_a_token_for_another_node(db, mount):
+    ops.create_entry(db, mount, "/f", b"f")
+    ops.create_entry(db, mount, "/g", b"g")
+    held = ops.lock(db, mount, "/g")
+    with pytest.raises(errors.LockInvalid):
+        ops.open_write(db, mount, "/f", lock=held.id)
+
+
+def test_open_write_rejects_another_mounts_token(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f", ttl_ms=60_000)
+    with pytest.raises(errors.LockHeld):
+        ops.open_write(db, other, "/f", lock=held.id)
+
+
 def test_open_write_creates_missing_entry(db, mount):
     # open_write(TRUNCATE) on a missing path creates the entry inside the
     # operation's own transaction (no wrapper pre-create, no TOCTOU window)

@@ -99,7 +99,7 @@ per manager lifetime. The PIN itself is never stored.
 | `MKCOL` | `create_container` | Body → 415, exists → 405, missing parent → 409. |
 | `DELETE` | `remove` / `remove_recursive` | Always recursive on a collection, per RFC. |
 | `COPY` / `MOVE` | `copy` / `move` | `Destination`, `Overwrite`. |
-| `LOCK` / `UNLOCK` | — | **405.** Class 1. See section 4. |
+| `LOCK` / `UNLOCK` | — | **405.** Class 1 at the HTTP layer, though the engine now has the lock primitives — see section 4. |
 
 ### Live properties
 
@@ -109,18 +109,16 @@ per manager lifetime. The PIN itself is never stored.
 | `getcontentlength` | `NodeInfo.size` | entries only; 404 on a collection |
 | `getlastmodified` | `NodeInfo.modified_at` | RFC 1123 (`...GMT`) |
 | `creationdate` | `NodeInfo.created_at` | ISO 8601 (`...Z`) |
-| `getetag` | `node_id` + `modified_at` | **weak** — see below |
+| `getetag` | `node_id` + `content.version` | **strong** for entries, weak for collections — see [2a](#2a-conditional-requests) |
 | `displayname` | `NodeInfo.name` | |
 | `getcontenttype` | extension | `httpd/unix-directory` for collections |
 | `supportedlock` / `lockdiscovery` | — | present and **empty** (class 1) |
 
-**ETags are weak (`W/"..."`) and that is honest, not lazy.** There is no content
-digest to use — `content.hash` is written `NULL` by every write path today — so
-the best available validator is identity plus generation. `modified_at` is
-milliseconds, so two writes inside the same millisecond alias. That is precisely
-the case a weak validator is permitted to be wrong about. A strong ETag needs
-either the hash column populated or the nanosecond timestamps that
-[HANDOFF-0.4 §4.1](/doc/HANDOFF-0.4.md) already plans.
+**ETags are strong for entries**, built from `content.version` rather than from
+`modified_at`. Why that matters — and why the weak form the first cut shipped
+would have quietly disabled `If-Match` and `If-Range` entirely — is
+[section 2a](#2a-conditional-requests). Collections have no content row and keep
+the weak `W/"..."` form.
 
 ### Dead properties
 
@@ -252,8 +250,13 @@ edits.
 
 ## 4. Class 2 locking assessment
 
-**Verdict: viable, and cheaper than it looks — because the hard part is already
-built.** The estimate is **5–8 engineer-days**, with no `SCHEMA_ERA` bump.
+**Verdict: viable, and most of it is now built.** The original estimate was
+**5–8 engineer-days** with no `SCHEMA_ERA` bump. Rungs 2 and 3b have since
+landed the engine half — standalone lock/unlock/renew, lock-aware namespace
+operations, and a descriptor abort — so what remains is **the WebDAV layer
+itself**: depth-infinity collection locks, the `If:` header, `LOCK`/`UNLOCK`
+handlers, `lockdiscovery`/`supportedlock` reporting real state, and flipping
+`_COMPLIANCE` to `"1, 2"`. Call it **2–4 days**, and no engine change.
 
 ### 4.0 The ladder between here and there
 
@@ -266,7 +269,7 @@ that are easy to conflate. Most of the cheap work makes the current frontend
 | 1 | Conditional requests (`If-Match`/`If-None-Match`/`If-Range`) | safety | ~½ day | **done** — section 2a |
 | 2 | Engine lock checks on `move`/`remove`/`set_metadata` | safety | ~1 day | **done** — ACC-11 |
 | 3a | Descriptor `abort` + scope-exit semantics | safety | ~1 day | **done** — `streaming.abort` |
-| 3b | Lock as a first-class object (no descriptor) | class 2 | ~1–2 days | open |
+| 3b | Lock as a first-class object (no descriptor) | class 2 | ~1–2 days | **done** — `locking.*` |
 | 4 | TLS | Windows | small | open |
 | 5 | Class 2 lite: exclusive, depth-0, minimal `If:` | read-write | ~3–4 days | open |
 
@@ -328,18 +331,23 @@ existing design rather than needing to be built.
 
 ### 4.2 What is genuinely missing
 
-**A lock's lifetime is welded to a descriptor.** A lock row is created in exactly
-one place — `operations.py:1108`, inside `open_write` — and deleted in exactly
-one place, `Descriptor.close()`. There is no way to hold a lock without holding
-an open write handle. A WebDAV lock is the opposite: it lives *across* requests
-with nothing open. This is the actual work.
+Two of the four items here have since been built (rungs 2 and 3b); they are
+kept, struck through, because what they cost is the useful part of the
+estimate.
 
-**Only the write paths check.** `check_lock_held` is consulted by `write_all`
-(:557), `append` (:602), `write_range` (:678), `truncate` (:756) and `open_write`
-(:1106). It is **not** consulted by `move`, `copy`, `remove`, `remove_recursive`,
-`create_container` or `set_metadata`. RFC 4918 requires a locked resource to
-answer 423 to `DELETE`, `MOVE` and `PROPPATCH` too, so those checks have to be
-added somewhere.
+~~**A lock's lifetime is welded to a descriptor.**~~ **Done.** `lock`,
+`unlock` and `renew_lock` are operations in their own right, and `open_write`
+takes an optional existing token. A supplied lock outlives the descriptor —
+`close()`/`abort()` release only a lock they minted — so `LOCK`, `PUT`, `PUT`,
+`UNLOCK` across four requests holds throughout, which is pinned by conformance.
+Renewal keeps the lock id, giving a stable WebDAV lock token, and a ttl'd lock
+that is never renewed expires and is reclaimed by `prune`, so a client that
+vanishes cannot wedge a node.
+
+~~**Only the write paths check.**~~ **Done (ACC-11).** `move`, `remove`,
+`remove_recursive` and `set_metadata` now consult the lock, with destruction
+checked transitively over the subtree. `LockHeld` already mapped to `423`, so
+`DELETE`, `MOVE` and `PROPPATCH` answer correctly today.
 
 **The check is flat.** `check_lock_held` matches one `node_id`. A depth-infinity
 lock on a collection — which is what Explorer and Finder take on a folder — needs

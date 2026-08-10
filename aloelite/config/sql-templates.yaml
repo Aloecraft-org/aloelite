@@ -351,6 +351,19 @@ resolution:
     consumed_by: ["descriptor.close (re-validate before commit, ACC-9)"]
     notes: "Empty => the lock row is gone (already released/pruned); caller treats that as invalid."
 
+  get_lock:
+    sql: |
+      SELECT lock_id, mount_id, node_id, lock_expires AS expires_at, valid
+      FROM mount_lock WHERE lock_id = :lock
+    params: { lock: "LockId" }
+    returns: "{ lock_id, mount_id, node_id, expires_at, valid: 0|1 } or empty"
+    consumed_by: [unlock, renew_lock, open_write]
+    notes: >
+      The whole lock in one read: owner, subject and computed validity. The
+      standalone lock operations need the OWNER, not just validity — a lock is
+      mount-scoped (ACC-6), so answering "may this caller release it" needs
+      mount_id, which get_lock_valid does not return.
+
 # ----------------------------------------------------------------------------
 # Mutation (write leaves)
 # ----------------------------------------------------------------------------
@@ -683,7 +696,19 @@ mutation:
       DELETE FROM lock WHERE lock_id = :lock
     params: { lock: "LockId" }
     returns: rowcount
-    consumed_by: ["write_all/close", "open_write/close"]
+    consumed_by: ["write_all/close", "open_write/close", "descriptor.abort", unlock]
+
+  renew_lock:
+    sql: |
+      UPDATE lock SET expires_at = :expires_at WHERE lock_id = :lock
+    params: { lock: "LockId", expires_at: "new ms epoch ttl, or NULL for no expiry" }
+    returns: rowcount
+    consumed_by: [renew_lock]
+    notes: >
+      ACC-10 makes lock validity purely derived — nothing actively invalidates
+      a lock, so extending one is exactly moving expires_at. A renewed lock
+      keeps its id, which is what lets a client hold a token across many
+      requests (the WebDAV class 2 shape).
 
 # ----------------------------------------------------------------------------
 # Validation (host pre-checks for typed errors; schema is the backstop)
@@ -729,6 +754,20 @@ validation:
       held = 1 => raise lock_held. Excludes the caller's own mount. Guards the
       content-write paths AND the namespace/annotation paths that would destroy
       or relocate the node out from under the lock holder.
+
+  check_any_lock:
+    sql: |
+      SELECT EXISTS (SELECT 1 FROM valid_lock WHERE node_id = :node) AS held
+    params: { node: "NodeId" }
+    returns: "{ held: 0|1 }"
+    consumed_by: [lock]
+    notes: >
+      Unlike check_lock_held this does NOT exclude the caller's own mount.
+      Taking a standalone lock must be refused even when the caller already
+      holds one on that node, or a mount could accumulate several lock rows
+      for one entry and unlock would become ambiguous about which it released.
+      The write paths keep using check_lock_held, where self-exclusion would
+      break a mount writing its own file.
 
   check_lock_held_subtree:
     sql: |

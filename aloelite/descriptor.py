@@ -68,6 +68,7 @@ class Descriptor:
         volume: VolumeId | None = None,
         chunk_size: int = 0,
         lock: LockId | None = None,
+        owns_lock: bool = True,
         # read mode
         version: int = 0,
         size: int = 0,
@@ -84,6 +85,10 @@ class Descriptor:
         self._volume = volume
         self._cs = chunk_size
         self._lock = lock
+        # False when the lock was supplied by ops.lock() rather than minted by
+        # open_write: the caller owns its lifetime, so this descriptor must
+        # leave it standing on close/abort (see operations.open_write).
+        self._owns_lock = owns_lock
         self._pos = max(0, position)
         self._closed = False
 
@@ -229,7 +234,9 @@ class Descriptor:
 
     # -- lifecycle -----------------------------------------------------------
     def abort(self) -> None:
-        """Discard this write and release the lock. Idempotent.
+        """Discard this write and release the lock if this descriptor owns it.
+
+        Idempotent.
 
         The counterpart to close(): the committed version pointer is left
         exactly where it was, so the entry keeps its previous bytes and the
@@ -247,14 +254,19 @@ class Descriptor:
         if self._closed:
             return
         try:
-            if self.writable and self._lock is not None:
+            if self.writable and self._lock is not None and self._owns_lock:
                 with self._db.txn():
                     self._db.rowcount("mutation.release_lock", {"lock": self._lock})
         finally:
             self._closed = True
 
     def close(self) -> None:
-        """Commit (writers) and release the lock. Idempotent.
+        """Commit (writers) and release the lock if this descriptor owns it.
+
+        A lock supplied to open_write by the caller (from ops.lock) is left
+        standing: its lifetime belongs to whoever took it, and dropping it here
+        would release a protocol-level lock the moment one request finished.
+        Idempotent.
 
         Stage the final (short) chunk and swap the committed-version pointer in
         one transaction, after re-validating the lock. Full chunks were already
@@ -292,7 +304,7 @@ class Descriptor:
                             "hash": None,
                         },
                     )
-                    if self._lock is not None:
+                    if self._lock is not None and self._owns_lock:
                         self._db.rowcount("mutation.release_lock", {"lock": self._lock})
             else:
                 # read descriptor holds no lock; nothing to commit

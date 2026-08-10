@@ -325,6 +325,48 @@ operations:
       flags:   { addr: both }
       raises:  [not_found, not_an_entry, mount_invalid]
 
+  # --- locking (a lock with no open descriptor) ----------------------------
+  locking:
+    note: >
+      A lock taken here is a FIRST-CLASS OBJECT: it exists with no open
+      descriptor and outlives any single operation. open_write still mints its
+      own lock when none is supplied — right for a POSIX write, where the
+      lock's whole life is the open file — but a protocol whose LOCK, PUT and
+      UNLOCK arrive as three separate requests (WebDAV class 2) needs the lock
+      durable and the descriptor transient. Exclusive only, per ACC-7.
+
+      Validity stays derived (ACC-9/10): nothing actively invalidates a lock,
+      so renewal is only moving expires_at and reclamation remains prune's job.
+      A lock with no ttl ends only with its mount.
+    lock:
+      params:  { mount: MountId, path: Path, ttl_ms: "int?" }
+      returns: LockInfo
+      flags:   { mutates: true, locks: true, addr: both }
+      raises:  [not_found, lock_held, mount_invalid]
+      note: >
+        Refused if ANY valid lock exists on the node, INCLUDING one this mount
+        already holds — unlike the write paths, which exclude the caller's own
+        mount. A second row for one (mount, node) would make unlock ambiguous
+        about which lock it released.
+    unlock:
+      params:  { mount: MountId, lock: LockId }
+      returns: void
+      flags:   { mutates: true }
+      raises:  [lock_invalid, lock_held, mount_invalid]
+      note: >
+        Not idempotent: releasing an already-gone lock raises lock_invalid,
+        since succeeding silently would hide a client that believes it still
+        holds something it does not. lock_held is the answer for a live lock
+        owned by another mount — it is held, just not by the caller.
+    renew_lock:
+      params:  { mount: MountId, lock: LockId, ttl_ms: "int?" }
+      returns: LockInfo
+      flags:   { mutates: true }
+      raises:  [lock_invalid, lock_held, mount_invalid]
+      note: >
+        Keeps the lock id, which is what lets a client carry one token across
+        many requests — the WebDAV lock-token shape.
+
   # --- streaming (descriptor lifecycle) ------------------------------------
   streaming:
     note: >
@@ -340,10 +382,17 @@ operations:
       flags:   { locks: false, addr: both }
       raises:  [not_found, not_an_entry, mount_invalid, mount_point_archived]
     open_write:
-      params:  { mount: MountId, path: Path, mode: WriteMode }
+      params:  { mount: MountId, path: Path, mode: WriteMode, lock: "LockId?" }
       returns: Descriptor
       flags:   { mutates: true, locks: true, addr: both }
-      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
+      raises:  [not_found, not_an_entry, lock_held, lock_invalid, mount_invalid]
+      note: >
+        `lock` supplies an existing lock from locking.lock instead of minting
+        one, and the difference is LIFETIME: a minted lock is owned by the
+        descriptor and released on close/abort, a supplied one outlives it and
+        goes only on unlock. Releasing a supplied lock at close would drop a
+        protocol-level lock between requests. A supplied lock must belong to
+        this mount and to this node, else lock_held / lock_invalid.
     read:
       params:  { fd: FdId, len: int }
       returns: Bytes
