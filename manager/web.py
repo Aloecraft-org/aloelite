@@ -123,7 +123,18 @@ def main() -> int:
         os.environ["ALOELITE_WEBDAV"] = "1"
     os.environ.setdefault("ALOELITE_DIRECT_ONLY", "1")
 
-    if os.geteuid() == 0 and not args.root and not os.environ.get("ALOELITE_ROOT"):
+    # os.geteuid does not exist on Windows, and this note is a POSIX-only
+    # courtesy about /root/.aloelite. Guarding it rather than calling it
+    # unconditionally is the difference between the manager starting on Windows
+    # and dying with AttributeError before it binds a socket -- which matters
+    # because Windows is precisely where the WebDAV frontend is the only way in
+    # (no FUSE) and the manager is expected to run on the same machine.
+    if (
+        hasattr(os, "geteuid")
+        and os.geteuid() == 0
+        and not args.root
+        and not os.environ.get("ALOELITE_ROOT")
+    ):
         print(
             "note: running as root — data will live in /root/.aloelite. "
             "sudo is not required for direct mode."
