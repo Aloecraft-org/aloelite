@@ -33,8 +33,9 @@ def main() -> int:
         description="Aloelite web manager — browse, upload, and download "
         "files in aloelite filesystems from a browser.",
         epilog="Environment variables ALOELITE_API_PORT, ALOELITE_API_HOST, "
-        "ALOELITE_ROOT, ALOELITE_DIRECT_ONLY, and ALOELITE_WEBDAV are honored "
-        "when the corresponding flag is absent.",
+        "ALOELITE_ROOT, ALOELITE_DIRECT_ONLY, ALOELITE_WEBDAV, "
+        "ALOELITE_TLS_CERT, ALOELITE_TLS_KEY, ALOELITE_TLS_SELF_SIGNED, and "
+        "ALOELITE_INSECURE are honored when the corresponding flag is absent.",
     )
     ap.add_argument(
         "-v",
@@ -68,9 +69,45 @@ def main() -> int:
         help="serve every volume over WebDAV at /dav/<volume-id> (RFC 4918 "
         "class 1: no locking, so macOS Finder mounts read-only). Off by "
         "default; encrypted volumes authenticate with HTTP Basic where the "
-        "password is the PIN, so bind loopback or put TLS in front.",
+        "password is the PIN, so serving this off loopback requires TLS "
+        "(--tls-self-signed or --tls-cert/--tls-key).",
+    )
+    ap.add_argument(
+        "--tls-cert",
+        metavar="PATH",
+        help="PEM certificate to serve HTTPS with (requires --tls-key). Use a "
+        "certificate your clients already trust; the Windows WebDAV "
+        "redirector refuses untrusted ones outright.",
+    )
+    ap.add_argument(
+        "--tls-key",
+        metavar="PATH",
+        help="PEM private key matching --tls-cert",
+    )
+    ap.add_argument(
+        "--tls-self-signed",
+        action="store_true",
+        help="serve HTTPS with a self-signed certificate, generated once into "
+        "<root>/tls and reused. Encrypts the PIN, but every client must be "
+        "told to trust it (the SHA-256 fingerprint is printed at startup).",
+    )
+    ap.add_argument(
+        "--insecure",
+        action="store_true",
+        help="permit WebDAV on a non-loopback address without TLS. Only for "
+        "when something in front of this terminates TLS: otherwise the "
+        "Basic-auth PIN crosses the network in cleartext on every request.",
     )
     args = ap.parse_args()
+
+    if args.tls_cert:
+        os.environ["ALOELITE_TLS_CERT"] = args.tls_cert
+    if args.tls_key:
+        os.environ["ALOELITE_TLS_KEY"] = args.tls_key
+    if args.tls_self_signed:
+        os.environ["ALOELITE_TLS_SELF_SIGNED"] = "1"
+    if args.insecure:
+        os.environ["ALOELITE_INSECURE"] = "1"
 
     if args.port is not None:
         os.environ["ALOELITE_API_PORT"] = str(args.port)

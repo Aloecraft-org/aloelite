@@ -42,6 +42,74 @@ def build(store=None, supervisor=None, registry=None):
     return store, supervisor, app
 
 
+_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def _tls_context(host: str):
+    """Resolve TLS material, or refuse to serve credentials in the clear.
+
+    Returns an ssl_context for app.run, or None for plain HTTP.
+
+    The refusal is narrow and deliberate. WebDAV authenticates with HTTP Basic
+    where the password IS the volume PIN, so serving it unencrypted on a
+    non-loopback address puts that PIN on the wire in base64 on every request
+    -- and a single directory listing is dozens of requests. That is not a
+    hardening nicety to warn about; it is handing out the key to the volume.
+    Loopback is unaffected, plain HTTP without WebDAV is unaffected (the JSON
+    API's own auth is a separate question, already warned about above), and
+    ALOELITE_INSECURE=1 exists for someone terminating TLS in a reverse proxy,
+    which is a legitimate and common deployment.
+    """
+    cert = os.environ.get("ALOELITE_TLS_CERT", "")
+    key = os.environ.get("ALOELITE_TLS_KEY", "")
+    self_signed = os.environ.get("ALOELITE_TLS_SELF_SIGNED", "") not in ("", "0")
+    webdav = os.environ.get("ALOELITE_WEBDAV", "") not in ("", "0")
+    insecure = os.environ.get("ALOELITE_INSECURE", "") not in ("", "0")
+
+    if cert or key:
+        if not (cert and key):
+            print(
+                "error: --tls-cert and --tls-key must be given together",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        for label, path in (("certificate", cert), ("private key", key)):
+            if not os.path.exists(path):
+                print(f"error: TLS {label} not found: {path}", file=sys.stderr)
+                raise SystemExit(2)
+        print(f"  tls: {cert}")
+        return (cert, key)
+
+    if self_signed:
+        from .tls import ensure_self_signed, fingerprint
+
+        cert, key = ensure_self_signed(ALOELITE_ROOT, host)
+        print(f"  tls: self-signed {cert}")
+        print(f"  sha256: {fingerprint(cert)}")
+        print(
+            "  self-signed: browsers warn, and the Windows WebDAV redirector "
+            "refuses outright until this certificate is trusted on the client "
+            "(compare the fingerprint above). See doc/WEBDAV.md."
+        )
+        return (cert, key)
+
+    if webdav and host not in _LOOPBACK and not insecure:
+        print(
+            f"error: refusing to serve WebDAV on {host} without TLS.\n"
+            "  WebDAV authenticates with HTTP Basic and the password is the "
+            "volume PIN, so this would put the PIN on the wire in cleartext "
+            "on every request.\n"
+            "  Fix by one of:\n"
+            "    --tls-self-signed          (encrypts; must be trusted per client)\n"
+            "    --tls-cert C --tls-key K   (a certificate clients already trust)\n"
+            "    --host 127.0.0.1           (keep it on loopback)\n"
+            "    --insecure                 (you terminate TLS in front of this)",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return None
+
+
 def main() -> int:
     if any(a in ("-v", "--version") for a in sys.argv[1:]):
         from manager.web import _version
@@ -81,8 +149,12 @@ def main() -> int:
             host,
         )
     port = int(os.environ.get("ALOELITE_API_PORT", "8080"))
+
+    ssl_context = _tls_context(host)
+    scheme = "https" if ssl_context else "http"
+
     display_host = "localhost" if host in ("127.0.0.1", "::1") else host
-    print(f"aloelite manager: http://{display_host}:{port}/admin")
+    print(f"aloelite manager: {scheme}://{display_host}:{port}/admin")
     print(f"  data root: {ALOELITE_ROOT}")
     if direct_only:
         print(
@@ -90,7 +162,7 @@ def main() -> int:
         )
     # threaded=True: mount/export endpoints block; serve them concurrently.
     try:
-        app.run(host=host, port=port, threaded=True)
+        app.run(host=host, port=port, threaded=True, ssl_context=ssl_context)
     finally:
         # Socket is closed by the time we get here. A second Ctrl-C during a
         # hung teardown raises KeyboardInterrupt and kills the process.

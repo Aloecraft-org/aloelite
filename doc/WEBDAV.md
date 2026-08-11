@@ -25,6 +25,7 @@ pointing Windows or macOS at this.
 ## Contents
 - [1. Running it](#1-running-it)
 - [2. What is implemented](#2-what-is-implemented)
+- [1a. TLS](#tls)
 - [2a. Conditional requests](#2a-conditional-requests)
 - [3. Client notes](#3-client-notes)
 - [4. Class 2 locking assessment](#4-class-2-locking-assessment)
@@ -53,8 +54,8 @@ sudo mount -t davfs http://127.0.0.1:8080/dav/<vid> /mnt/vault
 # rclone, anywhere (no locking needed, works fully against class 1)
 rclone mount :webdav:/ /mnt/vault --webdav-url http://127.0.0.1:8080/dav/<vid>
 
-# Windows
-net use Z: http://127.0.0.1:8080/dav/<vid>
+# Windows (TLS required off loopback; the cert must be machine-trusted)
+net use Z: https://host.example.org:8080/dav/<vid>
 
 # macOS: Finder -> Go -> Connect to Server (read-only, see section 3)
 ```
@@ -76,14 +77,62 @@ does for a browser: point a client at the URL, type the PIN, and the volume
 comes up. A later client on an already-unlocked volume gets its own engine mount
 row, so `GET /volumes/<id>/mounts` stays an honest audit of who is attached.
 
-> **Basic sends the PIN on every request.** Bind loopback (the default) or put
-> TLS in front. Windows additionally refuses Basic over plain HTTP unless
-> `BasicAuthLevel` is raised — see section 3.
+> **Basic sends the PIN on every request.** Bind loopback (the default) or
+> serve TLS — see below. Serving WebDAV on a non-loopback address without TLS
+> is **refused**, not warned about.
 
 Argon2id costs ~376 ms, so per-request PIN derivation is not viable — one Finder
 listing is dozens of requests. `_PinCache` maps a salted hash of the presented
 PIN to the engine mount token it produced, so the KDF runs once per credential
 per manager lifetime. The PIN itself is never stored.
+
+<a id="tls"></a>
+### TLS
+
+```bash
+aloelite-web --webdav --tls-self-signed              # generated once, reused
+aloelite-web --webdav --tls-cert C.pem --tls-key K.pem
+```
+
+TLS matters more here than for a typical local app, because the Basic password
+**is the volume PIN**: over plain HTTP it crosses the network in base64 on
+every request, and one Finder listing is dozens of requests.
+
+So the guard is a **refusal, not a warning**. `--webdav` on a non-loopback
+address with no TLS exits with a message listing the four ways out
+(`--tls-self-signed`, `--tls-cert`/`--tls-key`, `--host 127.0.0.1`, or
+`--insecure`). `--insecure` exists because terminating TLS in a reverse proxy
+is a legitimate and common deployment — but it has to be said out loud. Plain
+HTTP without `--webdav` is untouched; the JSON API's own exposure is a separate
+concern with its own warning.
+
+**What `--tls-self-signed` does and does not buy.** It encrypts the connection,
+which is the whole point for the PIN. It does not *authenticate* the server to
+a client that has not been told to trust it, and clients differ sharply:
+
+| Client | Reaction to a self-signed certificate |
+|---|---|
+| Browsers | interstitial, click-through |
+| rclone | works with `--no-check-certificate` |
+| Windows redirector | **refuses outright**, no override, until imported into Trusted Root |
+| macOS Finder | wants it trusted in Keychain |
+
+The certificate is generated once into `<root>/tls` and **reused** across
+restarts. Werkzeug's `ssl_context="adhoc"` mints a fresh one per start, which
+shows every client a new untrusted identity every time and makes trusting it
+once impossible. The SHA-256 fingerprint is printed at startup — that is the
+value to compare when trusting it elsewhere, and without comparing it "just
+trust it" is indistinguishable from trusting an interceptor.
+
+Two details chosen against real client limits: validity is **825 days**,
+because macOS rejects longer-lived server certificates even when manually
+trusted; and the SAN list covers `localhost`, the machine hostname, `.local`,
+`127.0.0.1`, `::1` and the bind address, because a certificate is validated
+against the name the *client* typed, not the address the server bound. A
+`0.0.0.0` bind is expanded rather than embedded — it is not a connectable name.
+Changing `--host` to something the existing certificate does not cover
+regenerates it, rather than failing later with an error naming the wrong
+problem.
 
 ---
 
@@ -234,11 +283,16 @@ Other Windows redirector limits, none of which the server can fix:
 - **`FileSizeLimitInBytes` defaults to ~50 MB** (50,000,000). Larger transfers
   fail. Raise it under the same registry key (max `0xFFFFFFFF`, 4 GB).
 - **Basic over plain HTTP is disabled by default.** Either raise `BasicAuthLevel`
-  or — much better — put TLS in front, which needs no client-side change at all.
+  or — much better — serve TLS, which needs no client-side change at all.
+  **TLS is now built in** (see [section 1](#tls)), so this one is solved
+  server-side: `--tls-cert`/`--tls-key` with a certificate the machine already
+  trusts requires nothing on the client. Note that `--tls-self-signed` does
+  **not** clear this hurdle by itself — the redirector refuses an untrusted
+  certificate outright, with no click-through, so a self-signed cert must be
+  imported into the machine's Trusted Root store first.
 
 **Least-friction Windows configuration: TLS + a machine-trusted certificate +
-class 2.** That is zero client-side configuration. Everything else is registry
-edits.
+class 2.** Two of those three now exist. Everything else is registry edits.
 
 > Evidence note: the macOS and Windows behaviours above are drawn from vendor
 > documentation and long-standing field reports, not from testing against those
@@ -270,7 +324,7 @@ that are easy to conflate. Most of the cheap work makes the current frontend
 | 2 | Engine lock checks on `move`/`remove`/`set_metadata` | safety | ~1 day | **done** — ACC-11 |
 | 3a | Descriptor `abort` + scope-exit semantics | safety | ~1 day | **done** — `streaming.abort` |
 | 3b | Lock as a first-class object (no descriptor) | class 2 | ~1–2 days | **done** — `locking.*` |
-| 4 | TLS | Windows | small | open |
+| 4 | TLS | Windows | small | **done** — [1a](#tls) |
 | 5 | Class 2 lite: exclusive, depth-0, minimal `If:` | read-write | ~3–4 days | open |
 
 Rung 1 partly substitutes for locking rather than building toward it:
