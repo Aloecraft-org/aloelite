@@ -21,16 +21,14 @@ manager runs, including Windows and macOS hosts where FUSE was never an option.
 It implements **RFC 4918 compliance class 2** — `LOCK`/`UNLOCK`, Depth 0 and
 Depth infinity, exclusive write locks. That is what makes macOS Finder mount
 read-write instead of read-only, and what stops the Windows redirector failing
-at first save. [Section 4](#4-class-2-locking-assessment) records how it is
+at first save. [Section 4](#4-class-2-locking) records how it is
 built and what was deliberately left out.
 
 ## Contents
-- [1. Running it](#1-running-it)
-- [2. What is implemented](#2-what-is-implemented)
-- [1a. TLS](#tls)
-- [2a. Conditional requests](#2a-conditional-requests)
+- [1. Running it](#1-running-it) · [1a. TLS](#tls)
+- [2. What is implemented](#2-what-is-implemented) · [2a. Conditional requests](#2a-conditional-requests)
 - [3. Client notes](#3-client-notes)
-- [4. Class 2 locking assessment](#4-class-2-locking-assessment)
+- [4. Class 2 locking](#4-class-2-locking)
 - [5. Design notes](#5-design-notes)
 
 ---

@@ -424,23 +424,26 @@ sudo mount -t davfs http://127.0.0.1:8080/dav/<volume-id> /mnt/vault
 # Anywhere, and the best experience today (no locking required)
 rclone mount :webdav:/ /mnt/vault --webdav-url http://127.0.0.1:8080/dav/<volume-id>
 
-# Windows
+# Windows (off loopback this needs TLS and a machine-trusted certificate)
 net use Z: http://127.0.0.1:8080/dav/<volume-id>
 ```
 
 Encrypted volumes authenticate with HTTP Basic where **the password is the
 PIN** — proving it also unlocks the volume. Basic sends that PIN on every
-request, so bind loopback (the default) or put TLS in front.
+request, so serving WebDAV off loopback **requires TLS** (`--tls-self-signed`,
+or `--tls-cert`/`--tls-key` for a certificate your clients already trust); the
+manager refuses rather than putting the PIN on the wire in the clear.
 
-Ranged `GET` is supported, so clients can seek and resume rather than pulling
-whole files.
+**RFC 4918 compliance class 2** — `LOCK`/`UNLOCK`, Depth 0 and infinity,
+exclusive write locks — so Finder and Explorer mount read-write rather than
+read-only or failing at first save. Ranged `GET`, `If-Match`/`If-None-Match`
+and `If-Range` are supported, so clients can seek, resume safely, and avoid
+lost updates.
 
-**This is RFC 4918 compliance class 1 — no locking — and that has real client
-consequences: macOS Finder mounts read-only, and Windows Explorer mounts
-read-write but fails on save.** `rclone` and `davfs2` are unaffected. See
-[doc/WEBDAV.md](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WEBDAV.md)
-for the per-client detail, the Windows registry workarounds, and the class 2
-assessment.
+See [doc/WEBDAV.md](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WEBDAV.md)
+for per-client detail, the TLS story, and how locking is built. Note the
+desktop-client behaviour there is derived from vendor documentation, not from
+a Windows or macOS runner in CI.
 
 ## Volume Manager and WebUI
 
@@ -462,9 +465,10 @@ aloelite-web
 
 That's the whole setup: direct mode, bound to `127.0.0.1:8080`, data in
 `~/.aloelite`. No sudo, no directories to prepare. Flags (see
-`aloelite-web --help`): `-p/--port`, `--host`, `--root`, and `--fuse` to
-run the container-grade FUSE provisioning mode instead; the matching
-`ALOELITE_*` environment variables are honored when a flag is absent.
+`aloelite-web --help`): `-p/--port`, `--host`, `--root`, `--webdav`,
+`--tls-self-signed` / `--tls-cert` + `--tls-key`, and `--fuse` to run the
+container-grade FUSE provisioning mode instead; the matching `ALOELITE_*`
+environment variables are honored when a flag is absent.
 The manager API has no authentication — keep the default loopback bind
 and put a reverse proxy with auth in front if you need remote access.
 
