@@ -136,26 +136,26 @@ def _prop(response: ET.Element, name: str):
 # --------------------------------------------------------------------------
 # Discovery
 # --------------------------------------------------------------------------
-def test_options_advertises_class_1_and_ms_author_via(client):
-    """The two headers the redirectors read: DAV tells them it is a WebDAV
-    server at all, MS-Author-Via stops Office probing FrontPage endpoints."""
+def test_options_advertises_class_2_and_ms_author_via(client):
+    """The headers the redirectors read. `DAV: 1, 2` is what makes Finder
+    mount read-write instead of read-only, and what stops the Windows
+    redirector failing at first save; MS-Author-Via stops Office probing
+    FrontPage endpoints."""
     r = client.open("/dav/v1/", method="OPTIONS")
     assert r.status_code == 200
-    assert r.headers["DAV"] == "1"
+    assert r.headers["DAV"] == "1, 2"
     assert r.headers["MS-Author-Via"] == "DAV"
     assert r.headers["Accept-Ranges"] == "bytes"
     allow = {v.strip() for v in r.headers["Allow"].split(",")}
     assert {"PROPFIND", "MKCOL", "COPY", "MOVE", "PUT", "DELETE"} <= allow
-    assert "LOCK" not in allow  # class 1: advertised nowhere
+    assert {"LOCK", "UNLOCK"} <= allow
 
 
-def test_lock_is_405_with_allow(client):
-    """A class 1 server owes a client that tries LOCK anyway a 405 and an
-    Allow header, not a 500 or a silent hang."""
+def test_bodyless_lock_without_a_token_is_412(client):
+    """A body-less LOCK is a REFRESH, so with no token to refresh there is
+    nothing to do -- it must not be read as a request for a new lock."""
     r = client.open("/dav/v1/", method="LOCK")
-    assert r.status_code == 405
-    assert "PROPFIND" in r.headers["Allow"]
-    assert r.headers["DAV"] == "1"
+    assert r.status_code == 412
 
 
 def test_options_needs_no_credentials_on_encrypted_volume(enc_client):
@@ -164,7 +164,7 @@ def test_options_needs_no_credentials_on_encrypted_volume(enc_client):
     c, _registry, _rec = enc_client
     r = c.open("/dav/e1/", method="OPTIONS")
     assert r.status_code == 200
-    assert r.headers["DAV"] == "1"
+    assert r.headers["DAV"] == "1, 2"
 
 
 # --------------------------------------------------------------------------
@@ -871,6 +871,229 @@ def test_multiple_candidate_etags_match_any(client):
     tag = _etag_of(client)
     r = _put(client, "/a.txt", b"y", headers={"If-Match": f'"other-1", {tag}'})
     assert r.status_code == 204
+
+
+# --------------------------------------------------------------------------
+# Class 2 locking
+# --------------------------------------------------------------------------
+_LOCKINFO = (
+    b'<?xml version="1.0"?><D:lockinfo xmlns:D="DAV:">'
+    b"<D:lockscope><D:exclusive/></D:lockscope>"
+    b"<D:locktype><D:write/></D:locktype>"
+    b"<D:owner><D:href>mailto:me@example.org</D:href></D:owner>"
+    b"</D:lockinfo>"
+)
+
+
+def _lock(client, path="/f.txt", depth="0", **kw):
+    return client.open(
+        f"/dav/v1{path}",
+        method="LOCK",
+        data=kw.pop("data", _LOCKINFO),
+        headers={"Depth": depth, **kw.pop("headers", {})},
+        **kw,
+    )
+
+
+def _token(resp) -> str:
+    return ET.fromstring(resp.data).find(f".//{D}locktoken/{D}href").text
+
+
+def _if(token: str) -> dict:
+    return {"If": f"(<{token}>)"}
+
+
+def test_lock_returns_a_token_and_the_activelock_a_client_needs(client):
+    _put(client, "/f.txt", b"original")
+    r = _lock(client, headers={"Timeout": "Second-300"})
+    assert r.status_code == 200
+    token = _token(r)
+    # The header is what clients actually read; the body is what they cache.
+    assert r.headers["Lock-Token"] == f"<{token}>"
+    active = ET.fromstring(r.data).find(f".//{D}activelock")
+    assert active.find(f"{D}depth").text == "0"
+    assert active.find(f"{D}timeout").text == "Second-300"
+    assert active.find(f"{D}lockroot/{D}href").text == "/dav/v1/f.txt"
+    assert active.find(f"{D}lockscope/{D}exclusive") is not None
+    # The owner is opaque to the server and must come back verbatim: it is how
+    # a human works out who is holding the thing they cannot edit.
+    assert "mailto:me@example.org" in ET.tostring(
+        active.find(f"{D}owner"), encoding="unicode"
+    )
+
+
+def test_a_lock_blocks_writes_without_the_token_and_allows_them_with_it(client):
+    _put(client, "/f.txt", b"original")
+    token = _token(_lock(client))
+    assert _put(client, "/f.txt", b"stolen").status_code == 423
+    assert client.get("/dav/v1/f.txt").data == b"original"
+    assert _put(client, "/f.txt", b"mine", headers=_if(token)).status_code == 204
+    assert client.get("/dav/v1/f.txt").data == b"mine"
+
+
+@pytest.mark.parametrize(
+    "method,kwargs",
+    [
+        ("DELETE", {}),
+        (
+            "PROPPATCH",
+            {
+                "data": b'<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:">'
+                b"<D:set><D:prop><E:p xmlns:E='urn:x'>v</E:p></D:prop>"
+                b"</D:set></D:propertyupdate>"
+            },
+        ),
+        ("MOVE", {"headers": {"Destination": "/dav/v1/moved.txt"}}),
+    ],
+)
+def test_every_mutating_method_honours_the_lock(client, method, kwargs):
+    """A lock that only stopped PUT would be trivially bypassable by deleting
+    the resource and writing a new one."""
+    _put(client, "/f.txt", b"original")
+    _lock(client)
+    assert client.open("/dav/v1/f.txt", method=method, **kwargs).status_code == 423
+
+
+def test_unlock_releases_and_is_token_scoped(client):
+    _put(client, "/f.txt", b"original")
+    token = _token(_lock(client))
+    wrong = client.open(
+        "/dav/v1/f.txt",
+        method="UNLOCK",
+        headers={"Lock-Token": "<opaquelocktoken:not-mine>"},
+    )
+    # 409, not 404: the RESOURCE exists, it is the lock that does not.
+    assert wrong.status_code == 409
+    assert _put(client, "/f.txt", b"still blocked").status_code == 423
+
+    ok = client.open(
+        "/dav/v1/f.txt", method="UNLOCK", headers={"Lock-Token": f"<{token}>"}
+    )
+    assert ok.status_code == 204
+    assert _put(client, "/f.txt", b"free").status_code == 204
+
+
+def test_a_bodyless_lock_refreshes_rather_than_taking_a_second_lock(client):
+    """RFC 4918 9.10.2. Reading a refresh as a new lock makes every Office
+    autosave leak a lock until it times out."""
+    _put(client, "/f.txt", b"original")
+    token = _token(_lock(client, headers={"Timeout": "Second-300"}))
+    r = client.open(
+        "/dav/v1/f.txt",
+        method="LOCK",
+        headers={"If": f"(<{token}>)", "Timeout": "Second-60"},
+    )
+    assert r.status_code == 200
+    assert _token(r) == token  # same lock, not a new one
+    assert ET.fromstring(r.data).find(f".//{D}timeout").text == "Second-60"
+
+
+def test_locking_an_unmapped_url_creates_an_empty_resource(client):
+    """RFC 4918 7.3 -- and it is what Explorer and Finder do on 'save as':
+    LOCK the target before any content exists."""
+    r = _lock(client, "/brand-new.txt")
+    assert r.status_code == 201
+    assert client.open("/dav/v1/brand-new.txt", method="HEAD").status_code == 200
+    assert client.get("/dav/v1/brand-new.txt").data == b""
+
+
+def test_a_depth_infinity_collection_lock_governs_the_whole_subtree(client):
+    """What Explorer and Finder take on a folder. A flat, request-URI-only
+    check passes the simple cases and leaves every descendant writable."""
+    assert client.open("/dav/v1/dir", method="MKCOL").status_code == 201
+    _put(client, "/dir/child.txt", b"c")
+    token = _token(_lock(client, "/dir", depth="infinity"))
+
+    assert _put(client, "/dir/child.txt", b"x").status_code == 423
+    assert _put(client, "/dir/child.txt", b"x", headers=_if(token)).status_code == 204
+    # A sibling outside the tree is unaffected.
+    assert _put(client, "/outside.txt", b"x").status_code == 201
+
+
+def test_a_lock_below_blocks_recursive_delete_of_the_collection(client):
+    """DELETE on a collection is Depth: infinity by definition, so a lock
+    three levels down is a lock on something the request would destroy -- the
+    same transitive rule ACC-11 applies inside the engine."""
+    client.open("/dav/v1/dir", method="MKCOL")
+    client.open("/dav/v1/dir/sub", method="MKCOL")
+    _put(client, "/dir/sub/deep.txt", b"d")
+    _lock(client, "/dir/sub/deep.txt")
+
+    assert client.open("/dav/v1/dir", method="DELETE").status_code == 423
+    assert client.get("/dav/v1/dir/sub/deep.txt").status_code == 200
+
+
+def test_conflicting_locks_are_refused_in_both_directions(client):
+    """Checking only 'is the path locked' lets a client lock a whole tree
+    while another holds a file inside it -- two holders each believing they
+    have exclusive rights to the same bytes."""
+    client.open("/dav/v1/dir", method="MKCOL")
+    _put(client, "/dir/child.txt", b"c")
+
+    _lock(client, "/dir/child.txt")
+    # downward: an infinity lock above an existing lock
+    assert _lock(client, "/dir", depth="infinity").status_code == 423
+
+    client.open("/dav/v1/other", method="MKCOL")
+    _put(client, "/other/child.txt", b"c")
+    _lock(client, "/other", depth="infinity")
+    # upward: a lock beneath an existing infinity lock
+    assert _lock(client, "/other/child.txt").status_code == 423
+
+
+def test_shared_locks_are_refused_rather_than_faked(client):
+    """ACC-7: the engine is exclusive-only and read_count/write_count are
+    recorded-not-enforced on purpose. Granting a shared lock would promise
+    something nothing underneath can keep."""
+    _put(client, "/f.txt", b"x")
+    body = _LOCKINFO.replace(b"<D:exclusive/>", b"<D:shared/>")
+    assert _lock(client, data=body).status_code == 409
+
+
+def test_lockdiscovery_reports_real_state_and_empty_when_unlocked(client):
+    _put(client, "/f.txt", b"x")
+    before = _responses(_propfind(client, "/f.txt", depth="0"))["/dav/v1/f.txt"]
+    # Empty is a real answer meaning "not locked", not an omission.
+    assert _prop(before, "lockdiscovery") is not None
+    assert list(_prop(before, "lockdiscovery")) == []
+
+    token = _token(_lock(client))
+    after = _responses(_propfind(client, "/f.txt", depth="0"))["/dav/v1/f.txt"]
+    found = _prop(after, "lockdiscovery")
+    assert found.find(f"{D}activelock/{D}locktoken/{D}href").text == token
+
+
+def test_supportedlock_advertises_exclusive_write_only(client):
+    _put(client, "/f.txt", b"x")
+    entry = _responses(_propfind(client, "/f.txt", depth="0"))["/dav/v1/f.txt"]
+    supported = _prop(entry, "supportedlock")
+    entries = supported.findall(f"{D}lockentry")
+    assert len(entries) == 1
+    assert entries[0].find(f"{D}lockscope/{D}exclusive") is not None
+    assert entries[0].find(f"{D}lockscope/{D}shared") is None
+
+
+def test_an_expired_lock_stops_blocking(client, monkeypatch):
+    """The safety valve: a client that vanishes must not wedge a resource
+    forever, and the timeout is the only thing that guarantees it."""
+    import manager.davlock as davlock
+
+    _put(client, "/f.txt", b"original")
+    _lock(client, headers={"Timeout": "Second-1"})
+    assert _put(client, "/f.txt", b"x").status_code == 423
+
+    real = davlock.time.monotonic
+    monkeypatch.setattr(davlock.time, "monotonic", lambda: real() + 3600)
+    assert _put(client, "/f.txt", b"x").status_code == 204
+
+
+def test_a_locked_file_is_still_readable(client):
+    """A write lock is not a read lock; GET and PROPFIND must not need the
+    token or every listing of a locked folder would fail."""
+    _put(client, "/f.txt", b"visible")
+    _lock(client)
+    assert client.get("/dav/v1/f.txt").data == b"visible"
+    assert _propfind(client, "/", depth="1").status_code == 207
 
 
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>

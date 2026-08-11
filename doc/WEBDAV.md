@@ -18,9 +18,11 @@ through the same `DirectSessionRegistry` the browser UI uses. So it needs no
 kernel mount, no `fuse3`, no `libfuse3-dev`, and no root — it runs anywhere the
 manager runs, including Windows and macOS hosts where FUSE was never an option.
 
-It implements **RFC 4918 compliance class 1**. What that costs, and what class 2
-would take, is [section 4](#4-class-2-locking-assessment) — read it before
-pointing Windows or macOS at this.
+It implements **RFC 4918 compliance class 2** — `LOCK`/`UNLOCK`, Depth 0 and
+Depth infinity, exclusive write locks. That is what makes macOS Finder mount
+read-write instead of read-only, and what stops the Windows redirector failing
+at first save. [Section 4](#4-class-2-locking-assessment) records how it is
+built and what was deliberately left out.
 
 ## Contents
 - [1. Running it](#1-running-it)
@@ -43,6 +45,8 @@ to bind past loopback, so it does not appear by accident.
 aloelite-web --webdav                 # or ALOELITE_WEBDAV=1
 ```
 
+`DAV: 1, 2` is advertised, so Finder and Explorer mount read-write.
+
 The URL space is `/dav/<volume-id>/<path>`, one DAV collection per volume,
 addressed by volume id like every other manager route. `GET /volumes` lists the
 ids.
@@ -51,13 +55,13 @@ ids.
 # Linux
 sudo mount -t davfs http://127.0.0.1:8080/dav/<vid> /mnt/vault
 
-# rclone, anywhere (no locking needed, works fully against class 1)
+# rclone, anywhere (ignores locking entirely; fine either way)
 rclone mount :webdav:/ /mnt/vault --webdav-url http://127.0.0.1:8080/dav/<vid>
 
 # Windows (TLS required off loopback; the cert must be machine-trusted)
 net use Z: https://host.example.org:8080/dav/<vid>
 
-# macOS: Finder -> Go -> Connect to Server (read-only, see section 3)
+# macOS: Finder -> Go -> Connect to Server
 ```
 
 ### Authentication
@@ -148,7 +152,7 @@ problem.
 | `MKCOL` | `create_container` | Body → 415, exists → 405, missing parent → 409. |
 | `DELETE` | `remove` / `remove_recursive` | Always recursive on a collection, per RFC. |
 | `COPY` / `MOVE` | `copy` / `move` | `Destination`, `Overwrite`. |
-| `LOCK` / `UNLOCK` | — | **405.** Class 1 at the HTTP layer, though the engine now has the lock primitives — see section 4. |
+| `LOCK` / `UNLOCK` | `lock` / `unlock` + `davlock` | Exclusive write, Depth 0 and infinity. Refresh via body-less `LOCK`. Shared → 409. |
 
 ### Live properties
 
@@ -161,7 +165,7 @@ problem.
 | `getetag` | `node_id` + `content.version` | **strong** for entries, weak for collections — see [2a](#2a-conditional-requests) |
 | `displayname` | `NodeInfo.name` | |
 | `getcontenttype` | extension | `httpd/unix-directory` for collections |
-| `supportedlock` / `lockdiscovery` | — | present and **empty** (class 1) |
+| `supportedlock` / `lockdiscovery` | `davlock` registry | real state; empty `lockdiscovery` = not locked |
 
 **ETags are strong for entries**, built from `content.version` rather than from
 `modified_at`. Why that matters — and why the weak form the first cut shipped
@@ -248,7 +252,7 @@ destination already gone. Both are pinned by tests.
 | **Windows Explorer** | Mounts, browses, reads. **Writes fail.** See below. |
 | **macOS Finder** | Mounts **read-only**. No workaround. See below. |
 
-### macOS — read-only, and there is no way around it
+### macOS — read-only under class 1, which is why class 2 was built
 
 Apple's `webdavfs` takes a `LOCK` whenever a file is opened for write, and it
 decides the mount's writability from the advertised compliance class. Apple's
@@ -256,10 +260,11 @@ own description of the behaviour is unambiguous: class 1 servers are mounted as
 read-only volumes, class 2 servers as read-write. Unlike Windows there is **no
 client-side switch** to disable this.
 
-If macOS read-write matters, class 2 is not optional. Until then, point macOS
-users at rclone or Cyberduck/Mountain Duck.
+Class 2 is now advertised, so Finder should mount read-write. That inference is
+from Apple's documented rule rather than from a Mac in CI — see the evidence
+note at the end of this section.
 
-### Windows — mounts, then fails on save
+### Windows — the save-time failure class 2 removes
 
 The redirector issues `LOCK` before `PUT` when a handle is opened for write, so
 the failure is at *save time*, not mount time: the drive maps, browsing works,
@@ -292,7 +297,10 @@ Other Windows redirector limits, none of which the server can fix:
   imported into the machine's Trusted Root store first.
 
 **Least-friction Windows configuration: TLS + a machine-trusted certificate +
-class 2.** Two of those three now exist. Everything else is registry edits.
+class 2.** All three now exist — TLS ([1a](#tls)), class 2 ([4](#4-class-2-locking)),
+and a trusted certificate is the one piece that is site-specific. `SupportLocking=0`
+should no longer be needed, since the `LOCK` the redirector issues before `PUT`
+is now answered. The 50 MB `FileSizeLimitInBytes` cap is unrelated and remains.
 
 > Evidence note: the macOS and Windows behaviours above are drawn from vendor
 > documentation and long-standing field reports, not from testing against those
@@ -302,15 +310,57 @@ class 2.** Two of those three now exist. Everything else is registry edits.
 
 ---
 
-## 4. Class 2 locking assessment
+## 4. Class 2 locking
 
-**Verdict: viable, and most of it is now built.** The original estimate was
-**5–8 engineer-days** with no `SCHEMA_ERA` bump. Rungs 2 and 3b have since
-landed the engine half — standalone lock/unlock/renew, lock-aware namespace
-operations, and a descriptor abort — so what remains is **the WebDAV layer
-itself**: depth-infinity collection locks, the `If:` header, `LOCK`/`UNLOCK`
-handlers, `lockdiscovery`/`supportedlock` reporting real state, and flipping
-`_COMPLIANCE` to `"1, 2"`. Call it **2–4 days**, and no engine change.
+**Built.** The original estimate was 5-8 engineer-days with no `SCHEMA_ERA`
+bump; it landed across five increments (the ladder below) and needed no era
+bump, as predicted.
+
+### 4.a How it is actually built: locks live in two places
+
+This is the one thing to understand before changing any of it, and it corrects
+an assumption in the original assessment.
+
+That assessment said `direct.py`'s one-mount-row-per-client design would make
+cross-client exclusion work for free. **That is wrong for the DAV path.** Every
+DAV client on a volume shares ONE engine mount: an unencrypted volume serves
+them all from the primary mount, and an encrypted one caches the engine mount
+token against *the PIN*, not the client, so two Windows machines with the same
+PIN are one mount as far as the engine is concerned. Since `check_lock_held`
+excludes the caller's own mount, **engine locks give zero DAV-vs-DAV
+exclusion**. Relying on them alone would have produced a lock that looks
+correct and silently permits the exact conflict it was taken to prevent.
+
+So the hybrid the assessment recommended is not merely preferable, it is
+required:
+
+| Layer | Excludes | Holds |
+|---|---|---|
+| `manager/davlock.py` | DAV vs DAV | token, `<owner>`, Depth, timeout |
+| `ops.lock` (engine) | DAV vs FUSE vs browser UI | the engine lock row |
+
+The manager registry is authoritative for DAV; the engine lock is taken
+alongside it and released with it. If the engine refuses, the `LOCK` fails too
+— that is a real cross-frontend conflict, not an implementation detail.
+
+**Locks are in memory and die with the process.** RFC 4918 6.2 permits exactly
+that, clients already handle a lock vanishing, and the alternative is a
+`lock.owner` column and a schema era bump for state whose natural lifetime is
+minutes. The timeout does the same job across a restart.
+
+### 4.b What was deliberately left out
+
+- **Shared locks → 409.** ACC-7 makes the engine exclusive-only and
+  `read_count`/`write_count` are recorded-not-enforced *on purpose*. Granting a
+  shared lock would promise what nothing underneath can keep, and would force
+  the multi-reader policy decision that binds the Rust and Kotlin ports.
+- **Lock-null resources.** `LOCK` on an unmapped URL creates an empty resource
+  (RFC 4918 7.3) rather than a lock-null resource, which is what the RFC
+  prefers and what clients expect from `save as`.
+- **`If:` header evaluation is used for lock authorisation and precondition
+  matching, but tagged lists are resolved against the request-URI's state**
+  rather than fetching each tagged resource. Every real client tags with the
+  request-URI or omits the tag.
 
 ### 4.0 The ladder between here and there
 
@@ -325,7 +375,7 @@ that are easy to conflate. Most of the cheap work makes the current frontend
 | 3a | Descriptor `abort` + scope-exit semantics | safety | ~1 day | **done** — `streaming.abort` |
 | 3b | Lock as a first-class object (no descriptor) | class 2 | ~1–2 days | **done** — `locking.*` |
 | 4 | TLS | Windows | small | **done** — [1a](#tls) |
-| 5 | Class 2 lite: exclusive, depth-0, minimal `If:` | read-write | ~3–4 days | open |
+| 5 | Class 2: exclusive locks, Depth 0 + infinity, `If:` | read-write | ~2–4 days | **done** — [4.a](#4a-how-it-is-actually-built-locks-live-in-two-places) |
 
 Rung 1 partly substitutes for locking rather than building toward it:
 optimistic concurrency is what most people are really after when they ask for

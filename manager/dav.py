@@ -1,7 +1,7 @@
 # ./manager/dav.py
 # License: Apache-2.0 (disclaimer at bottom of file)
 """
-manager.dav — the WebDAV frontend (RFC 4918 compliance class 1).
+manager.dav — the WebDAV frontend (RFC 4918 compliance class 2).
 
 A PEER of the FUSE frontend, not a layer on it. Of aloelite's frontends only
 FUSE consumes POSIX syscalls; this one consumes the ops API through the same
@@ -15,27 +15,34 @@ mount, no fuse3, and no root -- it works anywhere the manager runs.
 URL space is /dav/<volume-id>/<path>, one DAV collection per volume. The
 volume id (not its name) addresses it, matching every other manager route.
 
-WHY CLASS 1, AND WHAT IT COSTS
-------------------------------
-Class 1 is "no locking": OPTIONS answers `DAV: 1` and LOCK/UNLOCK are 405. It
-is a fully conformant profile (RFC 4918 makes locking optional) and it is what
-rclone, davfs2 (use_locks=0), gvfs and curl want anyway. It is deliberately
-the first step, not the destination, because the two clients people actually
-ask for both degrade without class 2:
+LOCKING (CLASS 2)
+-----------------
+OPTIONS answers `DAV: 1, 2`, which is the header the desktop clients gate on:
+macOS Finder mounts a class-1 share READ-ONLY by design, and the Windows
+redirector issues LOCK before PUT and fails at first save without it. Class 1
+was the first cut, not the destination.
 
-  * macOS Finder mounts a class-1 share READ-ONLY, by design, with no client-
-    side override. Apple's webdavfs takes a LOCK whenever a file is opened for
-    write, so no locking means no writing.
-  * Windows Explorer mounts read-write and then fails at the moment of the
-    first save, because the redirector issues LOCK before PUT. Unlike macOS it
-    has an escape hatch -- SupportLocking=0 under
-    HKLM\\SYSTEM\\CurrentControlSet\\Services\\WebClient\\Parameters -- but that
-    is a per-machine registry edit, which is not a thing you can ask users for.
+Locks live in TWO places, because neither alone is sufficient (manager/davlock.py
+has the long version):
 
-So class 2 is tracked as the next step and this module is shaped for it: the
-property machinery already emits `supportedlock`/`lockdiscovery` (empty), the
-verb table has the two holes punched, and `_COMPLIANCE` is the one constant
-that changes. See doc/WEBDAV.md for the class 2 design.
+  * manager/davlock.py -- DAV-vs-DAV exclusion, plus the protocol state the
+    engine has no column for: token, <owner>, Depth 0 vs infinity, timeout.
+    This is authoritative for DAV, and it exists because every DAV client on a
+    volume shares ONE engine mount (an unencrypted volume serves them all from
+    the primary mount; an encrypted one caches the mount token against the PIN,
+    not the client). Since the engine's check excludes the caller's own mount,
+    engine locks give ZERO DAV-vs-DAV exclusion on their own.
+  * ops.lock -- CROSS-FRONTEND exclusion. FUSE and the browser UI really are
+    different mount rows, so the engine lock is what stops them writing under a
+    DAV lock holder. Taken alongside the DAV lock, released with it.
+
+Shared locks are refused (409) rather than faked: ACC-7 makes the engine
+exclusive-only and read_count/write_count are recorded-not-enforced on purpose,
+so granting one would promise what nothing underneath can keep.
+
+Locks are IN-MEMORY and die with the process. RFC 4918 6.2 permits exactly
+that, clients already handle a lock vanishing, and the alternative is a schema
+era bump for state whose natural lifetime is minutes.
 
 AUTH
 ----
@@ -101,18 +108,19 @@ from xml.sax.saxutils import quoteattr
 from flask import Blueprint, Response, request
 
 from . import errors as merr
+from .davlock import MAX_TIMEOUT, LockConflict, LockRegistry, parse_if
 from .direct import FRONTEND_DIRECT, DirectSessionRegistry
 from .store import VolumeRecord, VolumeStore
 
 DAV_NS = "DAV:"
 
-# The compliance classes advertised on OPTIONS. Class 2 adds "2" here AND
-# needs LOCK/UNLOCK wired into _dispatch; nothing else in this module is
-# class-dependent.
-_COMPLIANCE = "1"
+# Compliance classes advertised on OPTIONS. Class 2 = LOCK/UNLOCK supported.
+_COMPLIANCE = "1, 2"
 
 _METHODS = (
     "OPTIONS",
+    "LOCK",
+    "UNLOCK",
     "HEAD",
     "GET",
     "PUT",
@@ -507,6 +515,7 @@ def create_dav_blueprint(
     """
     bp = Blueprint("dav", __name__)
     pins = _PinCache()
+    locks = LockRegistry()
 
     # -- auth ---------------------------------------------------------------
     def _unauthorized() -> Response:
@@ -578,7 +587,9 @@ def create_dav_blueprint(
         return rec
 
     # -- properties ---------------------------------------------------------
-    def _propstat(info, is_dir: bool, wanted, names_only: bool) -> str:
+    def _propstat(
+        info, is_dir: bool, wanted, names_only: bool, lock=None, href: str = ""
+    ) -> str:
         """The <propstat> pair for one resource: found properties with 200,
         requested-but-absent ones with 404, per RFC 4918 9.1."""
         found: list[str] = []
@@ -631,12 +642,22 @@ def create_dav_blueprint(
                 else:
                     emit(name, _content_type(info.name))
             elif name == "supportedlock":
-                # Class 1: the element exists and is EMPTY. Saying nothing at
-                # all reads to some clients as "unknown"; an empty
-                # supportedlock is the unambiguous "no lock types offered".
-                found.append("<D:supportedlock/>")
+                # Class 2, exclusive write only -- ACC-7. Advertising shared
+                # here would promise something the engine cannot keep.
+                found.append(
+                    "<D:supportedlock><D:lockentry>"
+                    "<D:lockscope><D:exclusive/></D:lockscope>"
+                    "<D:locktype><D:write/></D:locktype>"
+                    "</D:lockentry></D:supportedlock>"
+                )
             elif name == "lockdiscovery":
-                found.append("<D:lockdiscovery/>")
+                # An EMPTY lockdiscovery means "not locked", which is a real
+                # answer a client acts on -- it is not the same as omitting it.
+                found.append(
+                    _lockdiscovery(lock, href)
+                    if lock is not None
+                    else "<D:lockdiscovery/>"
+                )
             elif name in _LIVE:
                 missing.append(f"<D:{name}/>")
 
@@ -673,6 +694,9 @@ def create_dav_blueprint(
         import mimetypes
 
         return mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+    def _xml(body: str) -> bytes:
+        return ('<?xml version="1.0" encoding="utf-8"?>\n' + body).encode()
 
     def _multistatus(parts: list[str]) -> Response:
         body = (
@@ -733,7 +757,14 @@ def create_dav_blueprint(
             "<D:response><D:href>"
             + xml_escape(_href(url_prefix, rec.id, path, is_dir))
             + "</D:href>"
-            + _propstat(info, is_dir, wanted, names_only)
+            + _propstat(
+                info,
+                is_dir,
+                wanted,
+                names_only,
+                locks.find(rec.id, path),
+                _href(url_prefix, rec.id, path, is_dir),
+            )
             + "</D:response>"
         ]
         if depth == "1" and is_dir:
@@ -750,7 +781,14 @@ def create_dav_blueprint(
                     "<D:response><D:href>"
                     + xml_escape(_href(url_prefix, rec.id, child_path, child_dir))
                     + "</D:href>"
-                    + _propstat(child, child_dir, wanted, names_only)
+                    + _propstat(
+                        child,
+                        child_dir,
+                        wanted,
+                        names_only,
+                        locks.find(rec.id, child_path),
+                        _href(url_prefix, rec.id, child_path, child_dir),
+                    )
                     + "</D:response>"
                 )
         return _multistatus(parts)
@@ -764,6 +802,7 @@ def create_dav_blueprint(
             raise DavFault(400, "body must be a DAV:propertyupdate")
 
         info = m.stat(path)
+        _require_unlocked(rec, path)
         _check_preconditions(_etag(info), exists=True, is_read=False)
         # set_metadata is a WHOLESALE REPLACE (NODE-6), so start from what is
         # there and keep every non-DAV key: 'mode' and 'symlink' belong to the
@@ -986,6 +1025,7 @@ def create_dav_blueprint(
             existing = None
         if existing is not None and existing.type.value == "container":
             raise DavFault(405, "cannot PUT over a collection")
+        _require_unlocked(rec, path)
         # Checked BEFORE open_write, which would otherwise truncate the very
         # content the precondition exists to protect.
         _check_preconditions(
@@ -1042,6 +1082,7 @@ def create_dav_blueprint(
             pass
         else:
             raise DavFault(405, "already exists")
+        _require_unlocked(rec, path)
         try:
             m.create_container(path)
         except aerr.NotFound as e:
@@ -1052,6 +1093,7 @@ def create_dav_blueprint(
         if path == "/":
             raise DavFault(403, "cannot DELETE the volume root")
         info = m.stat(path)
+        _require_unlocked(rec, path, depth_infinity=info.type.value == "container")
         _check_preconditions(_etag(info), exists=True, is_read=False)
         if info.type.value == "container":
             # DELETE on a collection is Depth: infinity by definition
@@ -1095,6 +1137,14 @@ def create_dav_blueprint(
             if src_info.type.value == "container":
                 raise DavFault(400, "Depth: 0 COPY of a collection is not supported")
 
+        # A MOVE removes the source, so it needs the source's lock (and, for
+        # a collection, every lock beneath it). A COPY leaves the source
+        # untouched and needs only the destination's.
+        if move:
+            src_is_dir = m.stat(path).type.value == "container"
+            _require_unlocked(rec, path, depth_infinity=src_is_dir)
+        _require_unlocked(rec, dst)
+
         # Preconditions gate the SOURCE (the request-URI), and are evaluated
         # before the destination is cleared below: a failed precondition must
         # not leave the destination already deleted.
@@ -1127,8 +1177,171 @@ def create_dav_blueprint(
         return Response(b"", status=204 if dst_info is not None else 201)
 
     # -- dispatch -----------------------------------------------------------
+    # -- class 2 -----------------------------------------------------------
+    def _submitted_tokens() -> set[str]:
+        return parse_if(request.headers.get("If", "")).tokens()
+
+    def _require_unlocked(rec, path: str, *, depth_infinity: bool = False) -> None:
+        """423 unless the client submitted the token for every lock it would
+        disturb.
+
+        `depth_infinity` covers DELETE and MOVE on a collection, which affect
+        the whole subtree: a lock held on any descendant blocks them even
+        though the request-URI itself is free. Checking only the request-URI
+        would let a recursive delete destroy resources another client holds
+        locked, which is the same transitive-destruction rule ACC-11 applies
+        in the engine.
+        """
+        submitted = _submitted_tokens()
+        held = locks.find(rec.id, path)
+        if held is not None and held.token not in submitted:
+            raise DavFault(423, f"locked by {held.path}")
+        if depth_infinity:
+            for other in locks.covered_by_subtree(rec.id, path):
+                if other.token not in submitted:
+                    raise DavFault(423, f"locked by {other.path}")
+
+    def _lock_timeout() -> int | None:
+        """Parse the Timeout header. 'Infinite' is honoured as our maximum
+        rather than literally: RFC 4918 10.7 lets a server pick, and an
+        unbounded lock from a client that then vanishes is exactly the state
+        the timeout exists to prevent."""
+        raw = request.headers.get("Timeout", "")
+        for part in raw.split(","):
+            part = part.strip().lower()
+            if part.startswith("second-"):
+                try:
+                    return int(part[7:])
+                except ValueError:
+                    continue
+            if part == "infinite":
+                return MAX_TIMEOUT
+        return None
+
+    def _lockdiscovery(lock, href: str) -> str:
+        owner = f"<D:owner>{lock.owner_xml}</D:owner>" if lock.owner_xml else ""
+        return (
+            "<D:lockdiscovery><D:activelock>"
+            "<D:locktype><D:write/></D:locktype>"
+            "<D:lockscope><D:exclusive/></D:lockscope>"
+            f"<D:depth>{lock.depth}</D:depth>"
+            f"{owner}"
+            f"<D:timeout>Second-{lock.timeout}</D:timeout>"
+            f"<D:locktoken><D:href>{xml_escape(lock.token)}</D:href></D:locktoken>"
+            f"<D:lockroot><D:href>{xml_escape(href)}</D:href></D:lockroot>"
+            "</D:activelock></D:lockdiscovery>"
+        )
+
+    def _do_lock(rec, m, path, stack) -> Response:
+        from aloelite import errors as aerr
+
+        raw = request.get_data(cache=False)
+        depth = "infinity" if _depth() != "0" else "0"
+        timeout = _lock_timeout()
+
+        # A body-less LOCK is a REFRESH of the token in the If: header, not a
+        # new lock (RFC 4918 9.10.2). Treating it as a new one makes every
+        # Office autosave leak a lock until it times out.
+        if not raw.strip():
+            for token in _submitted_tokens():
+                existing = locks.get(token)
+                if existing is not None and existing.volume == rec.id:
+                    existing.refresh(timeout)
+                    href = _href(url_prefix, rec.id, existing.path, False)
+                    discovery = _lockdiscovery(existing, href)
+                    return Response(
+                        _xml(f'<D:prop xmlns:D="DAV:">{discovery}</D:prop>'),
+                        status=200,
+                        mimetype="application/xml",
+                        headers={"Lock-Token": f"<{existing.token}>"},
+                    )
+            raise DavFault(412, "no lock token to refresh")
+
+        root = _parse_xml(raw)
+        if _local(root.tag)[1] != "lockinfo":
+            raise DavFault(400, "body must be a DAV:lockinfo")
+        scope = root.find(f"{{{DAV_NS}}}lockscope")
+        if scope is not None and scope.find(f"{{{DAV_NS}}}shared") is not None:
+            # ACC-7: the engine is exclusive-only, and read_count/write_count
+            # are recorded-not-enforced on purpose. Advertising shared locks
+            # would be a promise nothing below can keep.
+            raise DavFault(409, "only exclusive locks are supported")
+        owner_el = root.find(f"{{{DAV_NS}}}owner")
+        owner_xml = ""
+        if owner_el is not None:
+            owner_xml = "".join(
+                ET.tostring(child, encoding="unicode") for child in owner_el
+            ) or xml_escape(owner_el.text or "")
+
+        # RFC 4918 7.3: LOCK on an unmapped URL creates an empty resource, so
+        # a client can lock a file before writing it -- which is exactly what
+        # Explorer and Finder do on 'save as'.
+        created = False
+        try:
+            info = m.stat(path)
+            is_dir = info.type.value == "container"
+        except (aerr.NotFound, aerr.NotAContainer, aerr.NotAnEntry):
+            if path == "/":
+                raise
+            try:
+                m.create_entry(path, b"")
+            except aerr.NotFound as e:
+                raise DavFault(409, "parent collection does not exist") from e
+            created = True
+            is_dir = False
+
+        try:
+            lock = locks.acquire(
+                rec.id, path, depth=depth, owner_xml=owner_xml, timeout=timeout
+            )
+        except LockConflict as conflict:
+            raise DavFault(423, str(conflict)) from conflict
+
+        # The engine lock is what excludes the OTHER frontends (FUSE, the
+        # browser UI); the manager registry above is what excludes other DAV
+        # clients, which all share one engine mount. Best-effort: a volume
+        # busy at the engine level is a real conflict and fails the LOCK, but
+        # a plain container lock has no engine counterpart to take.
+        if not is_dir:
+            try:
+                lock.engine_lock = m.lock(path, ttl_ms=lock.timeout * 1000).id
+            except aerr.LockHeld as e:
+                locks.release(lock.token)
+                raise DavFault(423, "locked by another frontend") from e
+
+        href = _href(url_prefix, rec.id, path, is_dir)
+        return Response(
+            _xml(f'<D:prop xmlns:D="DAV:">{_lockdiscovery(lock, href)}</D:prop>'),
+            status=201 if created else 200,
+            mimetype="application/xml",
+            headers={"Lock-Token": f"<{lock.token}>"},
+        )
+
+    def _do_unlock(rec, m, path, stack) -> Response:
+        raw = request.headers.get("Lock-Token", "").strip()
+        token = raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw
+        if not token:
+            raise DavFault(400, "UNLOCK requires a Lock-Token header")
+        existing = locks.get(token)
+        if existing is None or existing.volume != rec.id:
+            # 409, not 404: the RESOURCE exists, it is the lock that does not.
+            raise DavFault(409, "no such lock on this resource")
+        locks.release(token)
+        if existing.engine_lock:
+            from aloelite import errors as aerr
+
+            try:
+                m.unlock(existing.engine_lock)
+            except (aerr.LockInvalid, aerr.LockHeld):
+                # Already expired or reclaimed by prune; the DAV lock is gone
+                # either way, and failing UNLOCK here would strand the client.
+                pass
+        return Response(b"", status=204)
+
     _HANDLERS = {
         "OPTIONS": _do_options,
+        "LOCK": _do_lock,
+        "UNLOCK": _do_unlock,
         "PROPFIND": _do_propfind,
         "PROPPATCH": _do_proppatch,
         "GET": lambda rec, m, p, s: _do_get(rec, m, p, s, body=True),
