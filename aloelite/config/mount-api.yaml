@@ -115,6 +115,8 @@ errors:
   unsupported:          "operation not available in this build/target"
   container_exists:     "container already exists while attempting to create a new one"
   already_exists:       "something already exists at the target path (link/mknod, EEXIST)"
+  read_only:            "a mutating operation arrived through a ro mount (D-4, EROFS)"
+  mount_conflict:       "an rw mount already covers this subtree; allow_overlap stacks deliberately (D-4)"
   bad_key:              "the supplied PIN/token did not unlock the volume (AEAD tag mismatch, ENC-2)"
   encryption_required:  "an encrypted volume was mounted without a PIN, or vice versa (ENC-3)"
 
@@ -147,11 +149,20 @@ operations:
       params:  { fs: FsHandle }
       returns: [VolumeInfo]
     mount:
-      params:  { fs: FsHandle, volume: VolumeId, at: "Path?", ttl_ms: "int?" }
+      params:  { fs: FsHandle, volume: VolumeId, at: "Path?", ttl_ms: "int?",
+                 access: "string?", principal: "string?", allow_overlap: "bool?" }
       returns: MountId
       flags:   { mutates: true, atomic: true, locks: false }
-      raises:  [not_found]
-      note:    "`at` defaults to the volume root; ttl per ACC-3"
+      raises:  [not_found, mount_conflict]
+      note: >
+        `at` defaults to the volume root; ttl per ACC-3. Era 2 (D-4): access
+        is 'rw' (default) or 'ro'; principal is an optional tenant/user
+        identity for policy. Admission default is at most ONE rw mount per
+        subtree — a new rw mount whose point equals, contains, or is
+        contained by a valid rw mount's point raises mount_conflict unless
+        allow_overlap is passed. Overlap is authorization policy only: id
+        correctness never depends on it (D-1/D-2) and entry write locks
+        arbitrate write-write conflicts.
     unmount:
       params:  { mount: MountId }
       returns: void

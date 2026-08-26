@@ -116,7 +116,9 @@ def test_watermark_covers_committed_ids_and_fences_next_session(tmp_path):
     # a fresh session fences above the mark even with a slow clock: force the
     # fence path by minting with a regressed clock immediately after attach
     fs2 = Aloelite(ref)
-    fs2.mount(vol)
+    # the first session's ttl-less mount row is still valid; this test is
+    # about the fence, not admission (D-4), so stack deliberately
+    fs2.mount(vol, allow_overlap=True)
     mint = fs2.db._mint_for(vol)
     regressed = mint.mint(now_ms=0)
     assert regressed[:19] > stored_top[:19] or regressed[:19] == format_uuid7(

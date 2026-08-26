@@ -306,7 +306,7 @@ resolution:
   get_valid_mount:
     sql: |
       SELECT vm.mount_id, vm.volume_id, vm.mount_point, vm.state, vm.expires_at,
-             v.enc_mode
+             vm.access, v.enc_mode
       FROM valid_mount vm JOIN volume v ON v.volume_id = vm.volume_id
       WHERE vm.mount_id = :mount
     params: { mount: "MountId" }
@@ -764,6 +764,32 @@ mutation:
 # Validation (host pre-checks for typed errors; schema is the backstop)
 # ----------------------------------------------------------------------------
 validation:
+
+  check_rw_overlap:
+    sql: |
+      SELECT vm.mount_id
+      FROM valid_mount vm
+      WHERE vm.volume_id = :volume AND vm.access = 'rw'
+        AND ( vm.mount_point = :anchor
+              OR EXISTS (SELECT 1 FROM node_ancestor a
+                         WHERE a.node_id = :anchor
+                           AND a.ancestor_id = vm.mount_point)
+              OR EXISTS (SELECT 1 FROM node_ancestor a
+                         WHERE a.node_id = vm.mount_point
+                           AND a.ancestor_id = :anchor) )
+      LIMIT 1
+    params:
+      volume: "VolumeId being mounted"
+      anchor: "NodeId of the proposed mount point"
+    returns: "{ mount_id } of a conflicting rw mount, or empty"
+    consumed_by: [mount]
+    notes: >
+      D-4 admission policy: the default is at most one rw mount per subtree,
+      so a new rw mount conflicts with any valid rw mount whose point is the
+      same node, an ancestor, or a descendant of the proposed anchor.
+      Overlapping rw mounts are an explicit opt-in (allow_overlap) -- id
+      correctness never depends on this (D-1/D-2); entry write locks
+      arbitrate actual write-write conflicts. ro mounts never conflict.
 
   check_cycle:
     sql: |

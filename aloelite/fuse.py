@@ -184,6 +184,8 @@ _ERRNO = {
     "ContainerExists": errno.EEXIST,
     "Nameless": errno.EINVAL,
     "LockHeld": errno.EAGAIN,
+    "ReadOnlyMount": errno.EROFS,
+    "MountConflict": errno.EBUSY,
     "WouldCycle": errno.EINVAL,
     "VolumeMismatch": errno.EXDEV,
     "MountInvalid": errno.EIO,
@@ -851,6 +853,23 @@ async def _watch_stop(stop_event, interval: float = 0.2) -> None:
     pyfuse3.terminate()
 
 
+# The daemon's engine mount carries a ttl and renews it while alive (ACC-3),
+# so a crashed daemon's mount row EXPIRES instead of blocking the volume's
+# rw-per-subtree admission (D-4) forever. Same trio loop as the handlers, so
+# the shared connection is never used concurrently.
+_MOUNT_TTL_MS = 300_000
+_RENEW_EVERY_S = 60.0
+
+
+async def _renew_mount(mount, interval: float = _RENEW_EVERY_S) -> None:
+    while True:
+        await trio.sleep(interval)
+        try:
+            mount.renew(_MOUNT_TTL_MS)
+        except Exception:
+            pass  # transient (db busy, teardown race); next tick retries
+
+
 async def fuse_main(
     sqlite_path: str,
     volume_name: str,
@@ -861,6 +880,7 @@ async def fuse_main(
     allow_other: bool = True,
     debug: bool = False,
     create: bool = False,
+    access: str = "rw",
 ) -> None:
     """Mount one Aloelite volume at `mountpoint` and serve FUSE until the mount
     is torn down (external `fusermount3 -uz`, or `stop_event` being set).
@@ -876,11 +896,17 @@ async def fuse_main(
     fs = Aloelite(sqlite_path)
     try:
         vol_id = _find_or_create_volume(fs, volume_name, pin=pin, create=create)
-        mount = fs.mount(vol_id, pin=pin).__enter__()
+        mount = fs.mount(
+            vol_id, pin=pin, access=access, ttl_ms=_MOUNT_TTL_MS
+        ).__enter__()
         try:
             ops = AloeFuse(mount)
             opts = set(pyfuse3.default_options)
             opts.add("fsname=aloefuse")
+            if access == "ro":
+                # both belts: the kernel refuses writes at the VFS, and the
+                # engine's D-4 gate refuses anything that slips past (EROFS)
+                opts.add("ro")
             if allow_other:
                 # consumer containers run as other UIDs; without this they can't
                 # read the mount (the single most common silent failure here).
@@ -889,13 +915,12 @@ async def fuse_main(
                 opts.add("debug")
             pyfuse3.init(ops, mountpoint, opts)
             try:
-                if stop_event is not None:
-                    async with trio.open_nursery() as nursery:
+                async with trio.open_nursery() as nursery:
+                    nursery.start_soon(_renew_mount, mount)
+                    if stop_event is not None:
                         nursery.start_soon(_watch_stop, stop_event)
-                        await pyfuse3.main()
-                        nursery.cancel_scope.cancel()  # main returned: stop watcher
-                else:
                     await pyfuse3.main()
+                    nursery.cancel_scope.cancel()  # main returned: stop helpers
             finally:
                 pyfuse3.close(unmount=True)
         finally:
@@ -953,6 +978,11 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         help="create the volume if it does not exist (off by default)",
     )
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument(
+        "--ro",
+        action="store_true",
+        help="mount read-only (a D-4 'ro' engine mount; kernel ro option too)",
+    )
     ap.add_argument(
         "--allow-other",
         action="store_true",
@@ -1017,6 +1047,7 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         allow_other=args.allow_other,
         debug=args.debug,
         create=args.create,
+        access="ro" if args.ro else "rw",
     )
     try:
         trio.run(runner)

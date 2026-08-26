@@ -106,7 +106,7 @@ class DirectSessionRegistry:
                 raise AlreadyMounted(f"volume {record.id} already unlocked")
         fs = self._fs_factory(sqlite_path)
         try:
-            mount = fs.mount(record.name, pin=pin, create=True)
+            mount = fs.mount(record.name, pin=pin, create=True, allow_overlap=True)
         except BaseException as e:
             fs.close()
             name = type(e).__name__
@@ -147,7 +147,7 @@ class DirectSessionRegistry:
                 if self._sessions.get(record.id) is not entry:
                     raise NotMounted(f"volume {record.id} is not unlocked")
             try:
-                mount = entry.fs.mount(record.name, pin=pin)
+                mount = entry.fs.mount(record.name, pin=pin, allow_overlap=True)
             except BaseException as e:
                 name = type(e).__name__
                 if name == "BadKey":

@@ -138,6 +138,10 @@ class Aloelite:
         ttl_ms: int | None = None,
         pin: bytes | None = None,
         create: bool = False,
+        *,
+        access: str = "rw",
+        principal: str | None = None,
+        allow_overlap: bool = False,
     ) -> "Mount":
         """Open a mount on a volume, addressed by id or by name.
 
@@ -161,7 +165,16 @@ class Aloelite:
                     f"no volume named or identified by {volume!r} "
                     "(pass create=True to bootstrap one)"
                 )
-        mid = ops.mount(self._db, resolved, at, ttl_ms, pin)
+        mid = ops.mount(
+            self._db,
+            resolved,
+            at,
+            ttl_ms,
+            pin,
+            access=access,
+            principal=principal,
+            allow_overlap=allow_overlap,
+        )
         sess = self._db.active_session
         token = sess["token"] if sess and sess.get("mount_id") == mid else None
         return Mount(self._db, mid, token=token)

@@ -286,7 +286,7 @@ def test_stream_read_and_seek(db, mount):
 def test_write_lock_blocks_other_mount(db, mount):
     # second session on the same volume
     vol = ops.mount_info(db, mount).volume
-    other = ops.mount(db, vol, "/", ttl_ms=60_000)
+    other = ops.mount(db, vol, "/", ttl_ms=60_000, allow_overlap=True)
     ops.create_entry(db, mount, "/f", b"")
     with ops.open_write(db, mount, "/f") as w:
         w.write(b"x")
@@ -401,7 +401,7 @@ def test_prune_collects_unmounted_locks(db, mount):
 
 def test_list_mounts_filters_unmounted(db, mount):
     vol = ops.mount_info(db, mount).volume
-    m2 = ops.mount(db, vol, "/", ttl_ms=60_000)
+    m2 = ops.mount(db, vol, "/", ttl_ms=60_000, allow_overlap=True)
     assert {i.id for i in ops.list_mounts(db)} >= {mount, m2}
     ops.unmount(db, m2)
     ids = {i.id for i in ops.list_mounts(db)}
@@ -416,7 +416,7 @@ def test_list_mounts_filters_unmounted(db, mount):
 def test_list_mounts_tolerates_lost_anchor(db, mount):
     vol = ops.mount_info(db, mount).volume
     ops.create_container(db, mount, "/d")
-    m2 = ops.mount(db, vol, "/d", ttl_ms=60_000)
+    m2 = ops.mount(db, vol, "/d", ttl_ms=60_000, allow_overlap=True)
     ops.remove_recursive(db, mount, "/d")  # archive the anchor (ACC-5)
     infos = {i.id: i for i in ops.list_mounts(db)}  # must not raise
     assert infos[m2].mount_path is None  # unresolvable => None, not an abort
@@ -566,7 +566,7 @@ def test_write_range_empty_and_lock(db, chunky):
     ops.create_entry(db, chunky, "/f", b"abcd")
     assert ops.write_range(db, chunky, "/f", 0, b"") == 4  # no-op returns size
     vol = ops.mount_info(db, chunky).volume
-    other = ops.mount(db, vol, "/")
+    other = ops.mount(db, vol, "/", allow_overlap=True)
     with ops.open_write(db, chunky, "/f") as w:
         w.write(b"x")
         with pytest.raises(errors.LockHeld):

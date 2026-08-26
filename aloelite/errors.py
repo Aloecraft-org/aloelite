@@ -69,6 +69,18 @@ class ContainerExists(FsError):
     code = "container_exists"
 
 
+class ReadOnlyMount(FsError):
+    """a mutating operation arrived through a read-only mount (D-4, EROFS)"""
+
+    code = "read_only"
+
+
+class MountConflict(FsError):
+    """an rw mount already covers this subtree; pass allow_overlap to stack (D-4)"""
+
+    code = "mount_conflict"
+
+
 class AlreadyExists(FsError):
     """something already exists at the target path (link/mknod EEXIST)"""
 
@@ -155,6 +167,8 @@ __all__ = [
     "VolumeMismatch",
     "ContainerExists",
     "AlreadyExists",
+    "ReadOnlyMount",
+    "MountConflict",
     "NotEmpty",
     "MountInvalid",
     "MountPointArchived",

@@ -222,7 +222,11 @@ def _h_two_mounts_one_volume(
     second = _open(path)
     return (
         first,
-        {"first": ops.mount(first, volume.id), "second": ops.mount(second, volume.id)},
+        {
+            "first": ops.mount(first, volume.id),
+            # overlapping rw is what these scenarios TEST (allow_overlap, D-4)
+            "second": ops.mount(second, volume.id, allow_overlap=True),
+        },
         [second],
     )
 

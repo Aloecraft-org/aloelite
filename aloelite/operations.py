@@ -36,11 +36,13 @@ from .errors import (
     Corrupt,
     EncryptionRequired,
     LockHeld,
+    MountConflict,
     MountInvalid,
     NotAContainer,
     NotAnEntry,
     NotEmpty,
     NotFound,
+    ReadOnlyMount,
     Unsupported,
     WouldCycle,
 )
@@ -89,7 +91,7 @@ class _Mount:
         self.enc_mode = enc_mode
 
 
-def _require_mount(db: Db, mount: MountId) -> _Mount:
+def _require_mount(db: Db, mount: MountId, *, write: bool = False) -> _Mount:
     """Resolve a mount to its anchor + volume, or raise MountInvalid.
 
     A mount is untrusted-until-validated (or revalidated-per-access): it may
@@ -119,6 +121,8 @@ def _require_mount(db: Db, mount: MountId) -> _Mount:
             volume=row["volume_id"],
             enc_mode=enc_mode,
         )
+    if write and row["access"] == "ro":
+        raise ReadOnlyMount(mount=mount)
     return _Mount(
         mount, NodeId(row["mount_point"]), VolumeId(row["volume_id"]), enc_mode
     )
@@ -309,6 +313,7 @@ def mount(
     *,
     access: str = "rw",
     principal: str | None = None,
+    allow_overlap: bool = False,
 ) -> MountId:
     """Open a mount on a volume, anchored at `at` (relative to the
     volume root). Returns the durable MountId.
@@ -327,6 +332,22 @@ def mount(
             raise NotFound("volume or its root not found", volume=volume)
         root = NodeId(crow["root_node_id"])
         anchor = resolve(db, root, at).node  # mount point within the volume
+        # D-4 admission policy: at most one rw mount per subtree by default.
+        # This is authorization, not correctness -- ids are safe under
+        # arbitrary overlap (D-1/D-2) and entry write locks arbitrate write
+        # conflicts -- so overlap (admin over tenant subtrees, per-client
+        # manager sessions) is a deliberate opt-in, not a workaround.
+        if access == "rw" and not allow_overlap:
+            clash = db.one(
+                "validation.check_rw_overlap", {"volume": volume, "anchor": anchor}
+            )
+            if clash is not None:
+                raise MountConflict(
+                    "an rw mount already covers this subtree "
+                    "(pass allow_overlap=True to mount anyway)",
+                    volume=volume,
+                    conflicting_mount=clash["mount_id"],
+                )
         expires = _now_ns() + ttl_ms * 1_000_000 if ttl_ms is not None else None
         mid = db.gen_id()
         n_m = crypto.new_mount_nonce()
@@ -525,7 +546,7 @@ def path_of(db: Db, mount: MountId, node: NodeId) -> str:
 # ===========================================================================
 def create_container(db: Db, mount: MountId, path: str) -> NodeId:
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         parent, name = resolve_parent(db, m.mount_point, path)
         _require_name(name)
         node = _new_node(db, m, type=NodeType.CONTAINER, name=name)
@@ -536,7 +557,7 @@ def create_container(db: Db, mount: MountId, path: str) -> NodeId:
 def _create_entry_internal(
     db: Db, mount: MountId, path: str, data: bytes | None = None
 ) -> NodeId:
-    m = _require_mount(db, mount)
+    m = _require_mount(db, mount, write=True)
     parent, name = resolve_parent(db, m.mount_point, path)
     _require_name(name)
     node = _new_node(db, m, type=NodeType.ENTRY, name=name)
@@ -558,7 +579,7 @@ def create_entry(
 
 def write_all(db: Db, mount: MountId, path: str, data: bytes) -> None:
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
@@ -596,14 +617,14 @@ def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
     on hot append files to bound manifest growth.
     """
     if not data:
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
         meta = db.read_content_meta(found.node)
         return meta[1] if meta is not None else 0
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
@@ -672,14 +693,14 @@ def write_range(db: Db, mount: MountId, path: str, offset: int, data: bytes) -> 
     if offset < 0:
         raise ValueError("negative offset")
     if not data:
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
         meta = db.read_content_meta(found.node)
         return meta[1] if meta is not None else 0
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
@@ -757,7 +778,7 @@ def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
     if size < 0:
         raise ValueError("negative size")
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
@@ -825,7 +846,7 @@ def set_mtime(db: Db, mount: MountId, node: NodeId, ts_ns: int) -> None:
     """Explicitly set a node's modified_at in ns (utimens; archive/rsync
     timestamp restoration). Id-addressed like stat_by_id."""
     with db.txn():
-        _require_mount(db, mount)
+        _require_mount(db, mount, write=True)
         db.rowcount("mutation.set_modified_at", {"node": node, "ts": ts_ns})
 
 
@@ -834,7 +855,7 @@ def rename(db: Db, mount: MountId, path: str, name: str) -> None:
     renames only that directory entry; the node's own name follows along only
     while it has a single placement (the era-1-identical common case)."""
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         _require_name(name)
         parent, old_name = resolve_parent(db, m.mount_point, path)
         node = resolve(db, m.mount_point, path).node
@@ -852,7 +873,7 @@ def link(db: Db, mount: MountId, src: str, dst: str) -> None:
     forbids directory hardlinks for the same reason); an existing dst is
     refused with AlreadyExists (EEXIST)."""
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, src)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
@@ -874,7 +895,7 @@ def create_special(
     if type in (NodeType.CONTAINER, NodeType.ENTRY):
         raise Unsupported(f"create_special is for special types, not {type.value}")
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         parent, name = resolve_parent(db, m.mount_point, path)
         _require_name(name)
         node = _new_node(db, m, type=type, name=name)
@@ -895,7 +916,7 @@ def set_owner(
     """chown/chmod (era 2): set any of uid/gid/mode; None leaves a field
     unchanged. Bumps ctime (via trigger), never modified_at."""
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         node = resolve(db, m.mount_point, path).node
         db.rowcount(
             "mutation.set_owner",
@@ -911,13 +932,13 @@ def set_owner(
 def set_atime(db: Db, mount: MountId, node: NodeId, ts_ns: int) -> None:
     """utimens' atime half; the only atime writer (noatime semantics)."""
     with db.txn():
-        _require_mount(db, mount)
+        _require_mount(db, mount, write=True)
         db.rowcount("mutation.set_atime", {"node": node, "ts": ts_ns})
 
 
 def set_xattr(db: Db, mount: MountId, path: str, name: str, value: bytes) -> None:
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         node = resolve(db, m.mount_point, path).node
         db.rowcount("mutation.xattr_set", {"node": node, "name": name, "value": value})
 
@@ -939,7 +960,7 @@ def list_xattrs(db: Db, mount: MountId, path: str) -> "builtins.list[str]":
 def remove_xattr(db: Db, mount: MountId, path: str, name: str) -> bool:
     """True if removed; False if the attribute did not exist (ENODATA)."""
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         node = resolve(db, m.mount_point, path).node
         return bool(
             db.rowcount("mutation.xattr_remove", {"node": node, "name": name})
@@ -952,7 +973,7 @@ def set_metadata(db: Db, mount: MountId, path: str, metadata: dict[str, str]) ->
     content). Pass {} to clear.
     """
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         node = resolve(db, m.mount_point, path).node
         db.rowcount(
             "mutation.set_metadata",
@@ -966,7 +987,7 @@ def move(db: Db, mount: MountId, src: str, dst: str) -> None:
     final name differs).
     """
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, src)
         node, ntype = found.node, found.type
         src_parent, src_name = resolve_parent(db, m.mount_point, src)
@@ -1000,7 +1021,7 @@ def remove(db: Db, mount: MountId, path: str) -> None:
     """Detach a leaf or empty container (archive its active edge). Refuses a
     non-empty container with NotEmpty (use remove_recursive)."""
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
             if db.scalar("validation.check_empty", {"container": found.node}):
@@ -1020,7 +1041,7 @@ def remove(db: Db, mount: MountId, path: str) -> None:
 def remove_recursive(db: Db, mount: MountId, path: str) -> None:
     """Archive a whole active subtree in one statement (set-based)."""
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         node = resolve(db, m.mount_point, path).node
         db.rowcount("recursive.archive_subtree", {"root": node})
 
@@ -1037,7 +1058,7 @@ def remove_recursive(db: Db, mount: MountId, path: str) -> None:
 # ---------------------------------------------------------------------------
 def copy(db: Db, mount: MountId, src: str, dst: str) -> NodeId:
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         src_node = resolve(db, m.mount_point, src).node
         dst_parent, dst_name = resolve_parent(db, m.mount_point, dst)
         _require_name(dst_name)
@@ -1109,7 +1130,7 @@ def pack(db: Db, mount: MountId, path: str) -> NodeId:
     """Consolidate a container's subtree into a single packed entry that
     supersedes the original placement (OP-6)."""
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is not NodeType.CONTAINER:
             raise NotAContainer(node=found.node)
@@ -1161,7 +1182,7 @@ def pack(db: Db, mount: MountId, path: str) -> NodeId:
 def unpack(db: Db, mount: MountId, path: str) -> None:
     """Restore a packed entry's subtree, superseding the packed entry (OP-7)."""
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
@@ -1224,7 +1245,7 @@ def open_write(
     db: Db, mount: MountId, path: str, mode: WriteMode = WriteMode.TRUNCATE
 ) -> Descriptor:
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         try:
             # Atomic resolution check inside the isolated transaction boundary
             found = resolve(db, m.mount_point, path)
@@ -1299,7 +1320,7 @@ def set_retention(db: Db, mount: MountId, path: str, keep: int | None) -> None:
     versions. Enforced only by prune_content, never by the write path.
     """
     with db.txn():
-        m = _require_mount(db, mount)
+        m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)

@@ -121,6 +121,79 @@ def test_set_owner_and_ctime(m):
     assert (st.uid, st.gid, st.mode) == (1000, 1000, 0o600)
 
 
+# -- mount policy (D-4) ------------------------------------------------------
+@pytest.fixture
+def fs():
+    handle = Aloelite()
+    yield handle
+    handle.close()
+
+
+def _vol(fs):
+    return fs.create_volume("v", enc_mode="none").id
+
+
+def test_ro_mount_refuses_every_mutation(fs):
+    vol = _vol(fs)
+    rw = fs.mount(vol)
+    rw.create_container("/d")
+    rw.create_entry("/d/f", b"x")
+    ro = fs.mount(vol, access="ro")  # ro never conflicts with rw
+    assert ro.read_all("/d/f") == b"x"  # reads flow
+    assert [e.name for e in ro.list("/d")] == ["f"]
+    for attempt in [
+        lambda: ro.create_entry("/g", b"y"),
+        lambda: ro.write_all("/d/f", b"y"),
+        lambda: ro.remove("/d/f"),
+        lambda: ro.rename("/d/f", "g"),
+        lambda: ro.hardlink("/d/f", "/g"),
+        lambda: ro.set_owner("/d/f", mode=0o600),
+        lambda: ro.set_xattr("/d/f", "user.a", b"v"),
+        lambda: ro.open_write("/d/f"),
+    ]:
+        with pytest.raises(errors.ReadOnlyMount):
+            attempt()
+
+
+def test_one_rw_mount_per_subtree_is_the_default(fs):
+    vol = _vol(fs)
+    fs.mount(vol)  # rw at the root
+    with pytest.raises(errors.MountConflict):
+        fs.mount(vol)  # same point
+    m = fs.mount(vol, allow_overlap=True)  # explicit opt-in stacks
+    m.unmount()
+
+
+def test_rw_conflict_spans_ancestors_and_descendants(fs):
+    vol = _vol(fs)
+    boot = fs.mount(vol)
+    boot.create_container("/tenants")
+    boot.create_container("/tenants/alice")
+    boot.unmount()
+
+    tenant = fs.mount(vol, at="/tenants/alice")
+    with pytest.raises(errors.MountConflict):
+        fs.mount(vol)  # root would contain the tenant's rw mount
+    with pytest.raises(errors.MountConflict):
+        fs.mount(vol, at="/tenants/alice")  # same subtree
+    # the admin-over-tenants deployment is the documented opt-in
+    admin = fs.mount(vol, allow_overlap=True, principal="admin")
+    assert admin.read_all is not None
+    tenant.create_entry("/f", b"tenant writes fine")
+
+
+def test_disjoint_subtrees_do_not_conflict(fs):
+    vol = _vol(fs)
+    boot = fs.mount(vol)
+    boot.create_container("/a")
+    boot.create_container("/b")
+    boot.unmount()  # unmounted rows never conflict
+    ma = fs.mount(vol, at="/a")
+    mb = fs.mount(vol, at="/b")  # sibling subtree: no conflict
+    ma.create_entry("/f", b"1")
+    mb.create_entry("/f", b"2")
+
+
 # -- xattrs ------------------------------------------------------------------
 def test_xattr_roundtrip(m):
     m.create_entry("/f", b"x")
