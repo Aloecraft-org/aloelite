@@ -95,6 +95,36 @@ def test_fence_is_monotonic_and_binding():
     assert (m.ts, m.seq) >= (10_000, 43)
 
 
+def test_conformance_id_vectors():
+    """Run conformance/vectors/ids-v1.json — the same file a Rust or Kotlin
+    runner reads, so every port provably mints identically (D-1)."""
+    import json
+    from pathlib import Path
+
+    vecs = json.loads(
+        (
+            Path(__file__).resolve().parent.parent
+            / "conformance"
+            / "vectors"
+            / "ids-v1.json"
+        ).read_text()
+    )
+    for case in vecs["prefix"]:
+        assert format_uuid7(case["ts_ms"], case["seq"]).startswith(case["prefix"])
+    for seq_case in vecs["mint_sequences"]:
+        m = MonotonicMint()
+        for step in seq_case["steps"]:
+            if "fence" in step:
+                m.fence(*step["fence"])
+                continue
+            if "repeat_mint_at_ms" in step:
+                for _ in range(step["times"]):
+                    m.mint(now_ms=step["repeat_mint_at_ms"])
+            else:
+                m.mint(now_ms=step["mint_at_ms"])
+            assert [m.ts, m.seq] == step["state"], (seq_case["name"], step)
+
+
 def test_watermark_covers_committed_ids_and_fences_next_session(tmp_path):
     from aloelite.aloelite import Aloelite
 
