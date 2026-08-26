@@ -87,6 +87,43 @@ Why the fence (vs. pure stateless):
   needs nothing extra; a future logical replication inherits the same
   guarantee.
 
+## D-3: NODE-2 widens to fifo and socket; device nodes are refused
+
+**Decided 2026-08-26.**
+
+Schema era 2 widens the NODE-2 type vocabulary (a `node_guard_type` trigger
+rewrite, by design) to add `fifo` and `socket`, and promotes symlink from the
+NODE-6 metadata convention to a first-class type. Device nodes (block/char)
+are refused: a device node on a data filesystem is a security surface with no
+identified use case — CUDA/DMA devices live in `/dev` via devtmpfs/udev, and
+container runtimes bind-mount `/dev` rather than storing nodes on a rootfs.
+This stops short rather than closing the door: a future era adds `device` by
+widening the same trigger, with no table migration.
+
+## D-4: POSIX locks are per-mount; the compatibility table says so; mount policy guards the gap
+
+**Decided 2026-08-26.**
+
+fcntl byte-range locks and flock ship as kernel-arbitrated per mount (pinned
+by `tests/test_posix_surface.py`). pyfuse3 exposes no lock handlers, so
+cross-mount lock coherence is structurally out of reach for the Python
+engine; schema-backed `getlk`/`setlk` (ACC-8 already forward-provisions the
+columns) is the Rust engine's cross-mount upgrade, not a Python feature.
+
+Two facts keep this safe rather than surprising:
+
+- POSIX locks are advisory everywhere; they coordinate cooperating
+  processes only, and processes on different mounts are not in the same
+  cooperation domain (exactly as with NFS clients absent lockd).
+- aloelite's own atomicity is cross-mount regardless: CV-3 version
+  advancement under the schema-backed entry write lock serializes content
+  commits between mounts. Overlapping writers cannot corrupt an entry; what
+  they lose is only advisory signaling between their applications.
+
+Accordingly, the 4.3 default mount policy is **one rw mount per subtree**;
+overlapping rw mounts are an explicit admin opt-in. The compatibility table
+states the per-mount lock scope plainly.
+
 ## Consequence for mount policy (HANDOFF-0.4 §4.3)
 
 With D-1 + D-2, id correctness no longer depends on writer exclusivity.
