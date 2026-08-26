@@ -223,6 +223,46 @@ def test_sqlite_database_on_mount(mnt: Path, mode: str):
     conn.close()
 
 
+def test_aloelite_nested_on_its_own_mount(mnt: Path):
+    """An aloelite volume file living ON an aloelite mount. This is the case
+    db.py's WAL->PERSIST fallback was written for; it now negotiates WAL
+    (the mount serves the -shm mapping), so the fallback is unused here —
+    the assertion below is what would catch a regression back to PERSIST."""
+    from aloelite.aloelite import Aloelite
+
+    nested = mnt / "inner.fs"
+    fs = Aloelite(nested)
+    try:
+        assert fs.db.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        vol = fs.create_volume("inner", enc_mode="none").id
+        m = fs.mount(vol)
+        m.create_entry("/f", b"nested payload")
+
+        # a second connection to the same nested file — what WAL is for
+        other = Aloelite(nested)
+        try:
+            assert [v.name for v in other.list_volumes()] == ["inner"]
+            assert (
+                other.db.connection.execute("PRAGMA integrity_check").fetchone()[0]
+                == "ok"
+            )
+        finally:
+            other.close()
+
+        m.create_entry("/g", b"after the concurrent open")
+    finally:
+        fs.close()
+
+    reopened = Aloelite(nested)  # durability across the mount
+    try:
+        vol = reopened.resolve_volume_name("inner")
+        m = reopened.mount(vol, allow_overlap=True)
+        assert m.read_all("/f") == b"nested payload"
+        assert m.read_all("/g") == b"after the concurrent open"
+    finally:
+        reopened.close()
+
+
 def test_sqlite_wal_concurrent_second_process(mnt: Path):
     """A second process reads a WAL database while the first still holds it
     open — the cross-process shared-memory coordination sqlite WAL needs."""

@@ -31,6 +31,7 @@ engine's charter (doc/DECISIONS.md D-4).
 | **git** (active repo: init, add, commit; push into a bare repo on the mount through `index-pack`, `fsck --strict` clean) | ✅ | `test_git_push_pack_over_unpack_limit` — exercises git's `link()`-based object finalization and read-back-while-writing |
 | **sqlite** database on a mount, rollback journal | ✅ | `test_sqlite_database_on_mount[delete]` |
 | **sqlite** database on a mount, **WAL**, including a second process reading concurrently (the `-shm` shared-memory path) | ✅ | `test_sqlite_database_on_mount[wal]`, `test_sqlite_wal_concurrent_second_process` |
+| **aloelite nested on aloelite** — a volume file living on a mount, two connections, durable across reopen (negotiates WAL; the historical PERSIST downgrade no longer applies) | ✅ | `test_aloelite_nested_on_its_own_mount` |
 | Editors / tools using write-temp-then-rename atomicity | ✅ | git ref updates in the test above; `rename` is atomic in one engine transaction |
 
 ## Syscall surface

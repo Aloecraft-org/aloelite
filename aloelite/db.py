@@ -188,13 +188,24 @@ class Db:
         self._conn.execute("PRAGMA foreign_keys = ON")
         # Multi-connection model (mount is a row, not a connection): WAL lets
         # readers and the single writer coexist; busy_timeout makes a second
-        # writer wait briefly rather than fail instantly. (No-op on :memory:.)
+        # writer wait briefly rather than fail instantly.
+        #
+        # PROBE THE RESULT, do not trust an exception. `PRAGMA journal_mode`
+        # RETURNS the resulting mode; a request it cannot honor comes back as
+        # the unchanged mode with no error raised (':memory:' answers
+        # 'memory'). The same silent-failure shape as unixepoch('subsec'), and
+        # the reason the old try/except never fired on the case it named.
+        #
+        # WAL needs a shared-memory file (mmap MAP_SHARED). An aloelite FUSE
+        # mount now serves that (tests/test_posix_surface.py runs sqlite in WAL
+        # there, two processes), so nesting no longer forces the fallback --
+        # but network filesystems still refuse it, so the fallback stays.
+        # PERSIST avoids journal unlink churn.
         try:
-            self._conn.execute("PRAGMA journal_mode = WAL")
+            mode = self._conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
         except sqlite3.OperationalError:
-            # WAL needs a shared-memory file (mmap); filesystems without it
-            # (notably an aloelite FUSE mount) can still run in a rollback
-            # journal mode. PERSIST avoids journal unlink churn.
+            mode = "refused"
+        if str(mode).lower() not in ("wal", "memory"):
             self._conn.execute("PRAGMA journal_mode = PERSIST")
         self._conn.execute("PRAGMA busy_timeout = 5000")
         # We manage transactions explicitly via txn(); disable the driver's
