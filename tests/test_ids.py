@@ -151,9 +151,10 @@ def test_watermark_covers_committed_ids_and_fences_next_session(tmp_path):
     fs2.mount(vol, allow_overlap=True)
     mint = fs2.db._mint_for(vol)
     regressed = mint.mint(now_ms=0)
-    assert regressed[:19] > stored_top[:19] or regressed[:19] == format_uuid7(
-        wm["wm_ts"], wm["wm_seq"] + 1
-    )[:19]
+    assert (
+        regressed[:19] > stored_top[:19]
+        or regressed[:19] == format_uuid7(wm["wm_ts"], wm["wm_seq"] + 1)[:19]
+    )
     assert regressed > stored_top
     fs2.close()
 

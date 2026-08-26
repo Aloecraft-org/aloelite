@@ -962,9 +962,7 @@ def remove_xattr(db: Db, mount: MountId, path: str, name: str) -> bool:
     with db.txn():
         m = _require_mount(db, mount, write=True)
         node = resolve(db, m.mount_point, path).node
-        return bool(
-            db.rowcount("mutation.xattr_remove", {"node": node, "name": name})
-        )
+        return bool(db.rowcount("mutation.xattr_remove", {"node": node, "name": name}))
 
 
 def set_metadata(db: Db, mount: MountId, path: str, metadata: dict[str, str]) -> None:
