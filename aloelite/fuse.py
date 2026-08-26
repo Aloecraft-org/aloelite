@@ -52,7 +52,7 @@ import trio
 
 import aloelite.errors as aloe_errors
 from aloelite.aloelite import Aloelite
-from aloelite.types import Whence, WriteMode
+from aloelite.types import NodeType, Whence, WriteMode
 
 
 def _version() -> str:
@@ -180,6 +180,8 @@ _ERRNO = {
     "NotAContainer": errno.ENOTDIR,
     "NotAnEntry": errno.EISDIR,
     "NotEmpty": errno.ENOTEMPTY,
+    "AlreadyExists": errno.EEXIST,
+    "ContainerExists": errno.EEXIST,
     "Nameless": errno.EINVAL,
     "LockHeld": errno.EAGAIN,
     "WouldCycle": errno.EINVAL,
@@ -420,7 +422,7 @@ class AloeFuse(pyfuse3.Operations):
             node = self.m.create_entry(path, b"")
             perms = mode & 0o7777
             if perms and perms != 0o666:
-                self.m.set_metadata(path, {"mode": format(perms, "o")})
+                self.m.set_owner(path, mode=perms)
             ino = self._remember(node)
             fh = self._next_fh()
             acc = flags & os.O_ACCMODE
@@ -457,14 +459,93 @@ class AloeFuse(pyfuse3.Operations):
         base = self._path(parent_inode).rstrip("/")
         path = f"{base}/{os.fsdecode(name)}"
         try:
-            # Convention (no schema change): an ordinary entry whose content is
-            # the target path, flagged via NODE-6 metadata. Round-trips through
-            # copy/pack/unpack for free.
-            node = self.m.create_entry(path, os.fsencode(os.fsdecode(target)))
-            self.m.set_metadata(path, {"symlink": "1"})
+            # era 2: first-class symlink type; the content is the target.
+            # (Era-1 files used an entry + NODE-6 'symlink' metadata flag,
+            # which _attr still honors on read.)
+            node = self.m.create_special(
+                path, NodeType.SYMLINK, os.fsencode(os.fsdecode(target))
+            )
             return self._attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
+
+    async def link(self, inode, new_parent_inode, new_name, ctx):
+        """Hardlink (era 2 / D-5): a second active placement of the node."""
+        base = self._path(new_parent_inode).rstrip("/")
+        try:
+            self.m.hardlink(self._path(inode), f"{base}/{os.fsdecode(new_name)}")
+            return self._attr(inode, self.m.stat_by_id(self._n[inode]))
+        except Exception as e:
+            raise _wrap(e)
+
+    async def mknod(self, parent_inode, name, mode, rdev, ctx):
+        """FIFOs and sockets only. Device nodes are refused by decision (D-3):
+        a data filesystem storing device nodes is a security surface with no
+        identified use case."""
+        if st_mod.S_ISBLK(mode) or st_mod.S_ISCHR(mode):
+            raise pyfuse3.FUSEError(errno.EPERM)
+        base = self._path(parent_inode).rstrip("/")
+        path = f"{base}/{os.fsdecode(name)}"
+        try:
+            if st_mod.S_ISFIFO(mode):
+                node = self.m.create_special(path, NodeType.FIFO)
+            elif st_mod.S_ISSOCK(mode):
+                node = self.m.create_special(path, NodeType.SOCKET)
+            else:  # S_IFREG (or unspecified): mknod can make regular files
+                node = self.m.create_entry(path, b"")
+            perms = mode & 0o7777
+            if perms:
+                self.m.set_owner(path, mode=perms)
+            return self._attr(self._remember(node), self.m.stat_by_id(node))
+        except Exception as e:
+            raise _wrap(e)
+
+    # -- xattrs (era 2). user.* only: security./trusted./system. namespaces
+    # carry kernel-enforced semantics this filesystem does not implement, so
+    # storing them would be a lie the kernel acts on. ENOTSUP per convention.
+    def _xattr_name(self, name) -> str:
+        decoded = os.fsdecode(name)
+        if not decoded.startswith("user."):
+            raise pyfuse3.FUSEError(errno.ENOTSUP)
+        return decoded
+
+    async def setxattr(self, inode, name, value, ctx):
+        try:
+            self.m.set_xattr(self._path(inode), self._xattr_name(name), bytes(value))
+        except pyfuse3.FUSEError:
+            raise
+        except Exception as e:
+            raise _wrap(e)
+
+    async def getxattr(self, inode, name, ctx):
+        decoded = self._xattr_name(name)
+        try:
+            value = self.m.get_xattr(self._path(inode), decoded)
+        except pyfuse3.FUSEError:
+            raise
+        except Exception as e:
+            raise _wrap(e)
+        if value is None:
+            raise pyfuse3.FUSEError(errno.ENODATA)
+        return value
+
+    async def listxattr(self, inode, ctx):
+        try:
+            names = self.m.list_xattrs(self._path(inode))
+        except Exception as e:
+            raise _wrap(e)
+        return [os.fsencode(n) for n in names]
+
+    async def removexattr(self, inode, name, ctx):
+        decoded = self._xattr_name(name)
+        try:
+            removed = self.m.remove_xattr(self._path(inode), decoded)
+        except pyfuse3.FUSEError:
+            raise
+        except Exception as e:
+            raise _wrap(e)
+        if not removed:
+            raise pyfuse3.FUSEError(errno.ENODATA)
 
     async def readlink(self, inode, ctx):
         try:
@@ -619,18 +700,25 @@ class AloeFuse(pyfuse3.Operations):
             raise _wrap(e)
 
     async def setattr(self, inode, attr, fields, fh, ctx):
-        # size, mtime, and mode are honored; uid/gid accepted silently
-        if fields.update_mode:
+        # era 2: size, mode, uid, gid, mtime, atime all land in real columns
+        if fields.update_mode or fields.update_uid or fields.update_gid:
             try:
-                info = self.m.stat_by_id(self._n[inode])
-                meta = dict(info.metadata)  # merge: preserve symlink & friends
-                meta["mode"] = format(attr.st_mode & 0o7777, "o")
-                self.m.set_metadata(self._path(inode), meta)
+                self.m.set_owner(
+                    self._path(inode),
+                    mode=(attr.st_mode & 0o7777) if fields.update_mode else None,
+                    uid=attr.st_uid if fields.update_uid else None,
+                    gid=attr.st_gid if fields.update_gid else None,
+                )
             except Exception as e:
                 raise _wrap(e)
         if fields.update_mtime:
             try:
                 self.m.set_mtime(self._n[inode], attr.st_mtime_ns)
+            except Exception as e:
+                raise _wrap(e)
+        if fields.update_atime:
+            try:
+                self.m.set_atime(self._n[inode], attr.st_atime_ns)
             except Exception as e:
                 raise _wrap(e)
         if fields.update_size:

@@ -50,6 +50,13 @@ Timestamp = NewType("Timestamp", int)
 class NodeType(str, Enum):
     CONTAINER = "container"
     ENTRY = "entry"
+    # era 2 (D-3): first-class leaf types. All place like entries (leaves
+    # under a container) and carry a content row — the symlink's content is
+    # its target; fifo/socket content is empty (they are rendezvous objects;
+    # the kernel owns their semantics). Devices are refused by decision.
+    SYMLINK = "symlink"
+    FIFO = "fifo"
+    SOCKET = "socket"
 
 
 class MountState(str, Enum):

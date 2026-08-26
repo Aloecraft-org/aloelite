@@ -43,13 +43,13 @@ scalars:
   DbRef:     { base: opaque, note: "platform db reference: path, OPFS handle, etc." }
   Path:      { base: string, note: "mount-relative, slash-separated" }
   Bytes:     { base: binary }
-  Timestamp: { base: int,    note: "unix epoch milliseconds" }
+  Timestamp: { base: int,    note: "unix epoch nanoseconds (era 2; era 1 was milliseconds)" }
 
 # ----------------------------------------------------------------------------
 # Enums — all closed
 # ----------------------------------------------------------------------------
 enums:
-  NodeType: [container, entry]
+  NodeType: [container, entry, symlink, fifo, socket]   # era 2 (D-3): specials place like entries; devices refused
   MountState: [new, active, unmounted]   # new = under construction; active = in use; unmounted = terminal/invalid
   Whence: [set, cur, end]
   WriteMode:
@@ -114,6 +114,7 @@ errors:
   corrupt:              "an invariant the schema cannot enforce was found violated"
   unsupported:          "operation not available in this build/target"
   container_exists:     "container already exists while attempting to create a new one"
+  already_exists:       "something already exists at the target path (link/mknod, EEXIST)"
   bad_key:              "the supplied PIN/token did not unlock the volume (AEAD tag mismatch, ENC-2)"
   encryption_required:  "an encrypted volume was mounted without a PIN, or vice versa (ENC-3)"
 
@@ -216,6 +217,66 @@ operations:
         in-place overwrite of [offset, offset+len), zero-filling any gap past
         EOF; returns the new size. Chunk alignment is preserved (an overwrite
         never shifts bytes), so untouched chunks either side carry by reference.
+    link:
+      params:  { mount: MountId, src: Path, dst: Path }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_an_entry, nameless, already_exists, mount_invalid]
+      note: >
+        hardlink (era 2, D-5): an additional active placement of the node src
+        resolves to, under dst's parent, named by dst's final segment (stored
+        as the edge's placement-name override when it differs from the node's
+        own name). Containers refused -- PI-1 keeps the container graph a
+        tree. nlink is the derived count of active placements.
+    create_special:
+      params:  { mount: MountId, path: Path, type: NodeType, data: bytes }
+      returns: NodeId
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, nameless, unsupported, mount_invalid]
+      note: >
+        create a symlink (data = target bytes), fifo, or socket leaf (era 2,
+        D-3). container/entry are refused -- use create_container /
+        create_entry. fifo/socket carry an empty content row; the kernel owns
+        their rendezvous semantics.
+    set_owner:
+      params:  { mount: MountId, path: Path, uid: "int?", gid: "int?", mode: "int?" }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: >
+        chown/chmod (era 2): set any of uid/gid/mode, null leaves a field
+        unchanged; mode is masked to 07777. Bumps ctime, never modified_at.
+    set_atime:
+      params:  { mount: MountId, node: NodeId, ts_ns: Timestamp }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: id }
+      raises:  [mount_invalid]
+      note: >
+        utimens' atime half, and the ONLY atime writer -- there is
+        deliberately no per-read atime update anywhere (noatime semantics).
+    set_xattr:
+      params:  { mount: MountId, path: Path, name: string, value: bytes }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: "upsert one extended attribute (era 2). Namespace policy (user.* only) is enforced at the FUSE boundary, not here."
+    get_xattr:
+      params:  { mount: MountId, path: Path, name: string }
+      returns: "bytes?"
+      flags:   { mutates: false, atomic: false, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: "the attribute's bytes, or null if unset (host maps to ENODATA)."
+    list_xattrs:
+      params:  { mount: MountId, path: Path }
+      returns: "[string]"
+      flags:   { mutates: false, atomic: false, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+    remove_xattr:
+      params:  { mount: MountId, path: Path, name: string }
+      returns: bool
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: "false = the attribute did not exist (ENODATA)."
     set_metadata:
       params:  { mount: MountId, path: Path, metadata: "{string:string}" }
       returns: void
@@ -225,7 +286,7 @@ operations:
         replace the NODE-6 map wholesale on a container or an entry; empty
         clears it. Does NOT bump modified_at — annotation is not content.
     set_mtime:
-      params:  { mount: MountId, node: NodeId, ts_ms: Timestamp }
+      params:  { mount: MountId, node: NodeId, ts_ns: Timestamp }
       returns: void
       flags:   { mutates: true, atomic: true, locks: false, addr: id }
       raises:  [mount_invalid]

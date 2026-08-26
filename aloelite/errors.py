@@ -69,6 +69,12 @@ class ContainerExists(FsError):
     code = "container_exists"
 
 
+class AlreadyExists(FsError):
+    """something already exists at the target path (link/mknod EEXIST)"""
+
+    code = "already_exists"
+
+
 class NotEmpty(FsError):
     """container is non-empty; use remove_recursive (caller policy)"""
 
@@ -148,6 +154,7 @@ __all__ = [
     "WouldCycle",
     "VolumeMismatch",
     "ContainerExists",
+    "AlreadyExists",
     "NotEmpty",
     "MountInvalid",
     "MountPointArchived",

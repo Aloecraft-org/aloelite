@@ -284,19 +284,84 @@ def test_posix_fallocate_extends_via_glibc_fallback(mnt: Path):
         os.close(fd)
 
 
-def test_unsupported_surface_fails_loudly_not_silently(mnt: Path):
-    """The declined syscalls return clean errnos, not corruption or hangs.
-    When one of these starts passing, the feature landed — move it up into
-    a real test and update the compatibility table."""
-    f = mnt / "plain"
-    f.write_bytes(b"x")
+def test_hardlinks(mnt: Path):
+    """Era 2: link(2) makes a second placement. Content is shared both ways,
+    st_nlink counts placements, inode numbers match, and unlinking one name
+    leaves the other fully alive."""
+    a = mnt / "a"
+    b = mnt / "b"
+    a.write_bytes(b"original")
+    os.link(a, b)
+    assert os.stat(a).st_ino == os.stat(b).st_ino
+    assert os.stat(a).st_nlink == 2
+    assert b.read_bytes() == b"original"
 
-    with pytest.raises(OSError):  # ENOSYS: mknod not implemented in fuse.py
-        os.mkfifo(mnt / "fifo")
-    with pytest.raises(OSError):  # EOPNOTSUPP: no xattr storage yet
-        os.setxattr(f, "user.test", b"v")
-    with pytest.raises(OSError):  # EPERM: PI-1 forbids a second placement
-        os.link(f, mnt / "hardlink")
+    b.write_bytes(b"rewritten through b")
+    fd = os.open(a, os.O_RDONLY)
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        assert os.read(fd, 64) == b"rewritten through b"
+    finally:
+        os.close(fd)
+
+    a.unlink()
+    assert not a.exists()
+    assert b.read_bytes() == b"rewritten through b"
+    assert os.stat(b).st_nlink == 1
+
+    with pytest.raises(OSError):  # EEXIST: link over an existing name
+        os.link(b, mnt / "b")
+    d = mnt / "dir"
+    d.mkdir()
+    with pytest.raises(OSError):  # EPERM: no directory hardlinks (PI-1)
+        os.link(d, mnt / "dirlink")
+
+
+def test_mkfifo_and_device_refusal(mnt: Path):
+    """Era 2: fifos are first-class; device nodes are refused (D-3)."""
+    fifo = mnt / "fifo"
+    os.mkfifo(fifo, 0o640)
+    st = os.stat(fifo)
+    import stat as st_mod
+
+    assert st_mod.S_ISFIFO(st.st_mode)
+    assert st_mod.S_IMODE(st.st_mode) == 0o640
+    with pytest.raises(PermissionError):
+        os.mknod(mnt / "dev", 0o600 | st_mod.S_IFBLK, os.makedev(1, 3))
+
+
+def test_xattrs(mnt: Path):
+    """Era 2: user.* xattrs round-trip; other namespaces are ENOTSUP."""
+    f = mnt / "xf"
+    f.write_bytes(b"x")
+    os.setxattr(f, "user.test", b"value")
+    os.setxattr(f, "user.other", b"\x00\xffbinary")
+    assert os.getxattr(f, "user.test") == b"value"
+    assert sorted(os.listxattr(f)) == ["user.other", "user.test"]
+    os.setxattr(f, "user.test", b"replaced")
+    assert os.getxattr(f, "user.test") == b"replaced"
+    os.removexattr(f, "user.test")
+    assert os.listxattr(f) == ["user.other"]
+    with pytest.raises(OSError):  # ENODATA
+        os.getxattr(f, "user.test")
+    with pytest.raises(OSError):  # ENOTSUP: non-user namespace
+        os.setxattr(f, "trusted.evil", b"x")
+
+
+def test_ownership_and_times_are_real_columns(mnt: Path):
+    """Era 2: chmod/chown persist to columns; utimens keeps ns precision."""
+    f = mnt / "of"
+    f.write_bytes(b"x")
+    os.chmod(f, 0o751)
+    assert (os.stat(f).st_mode & 0o7777) == 0o751
+    os.chown(f, os.getuid(), os.getgid())  # no-op values, but exercises the path
+    st = os.stat(f)
+    assert st.st_uid == os.getuid() and st.st_gid == os.getgid()
+
+    os.utime(f, ns=(1_234_567_890_123_456_789, 1_555_555_555_123_456_789))
+    st = os.stat(f)
+    assert st.st_atime_ns == 1_234_567_890_123_456_789
+    assert st.st_mtime_ns == 1_555_555_555_123_456_789
 
 
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>

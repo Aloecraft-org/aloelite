@@ -248,17 +248,29 @@ resolution:
   path_of:
     sql: |
       WITH RECURSIVE up (node_id, name, parent_id, depth, is_root) AS (
-        SELECT n.node_id, n.name, np.parent_id, 0,
+        SELECT n.node_id,
+               coalesce((SELECT ae.name FROM active_edge ae
+                         WHERE ae.to_id = n.node_id
+                         ORDER BY ae.edge_id DESC LIMIT 1), n.name),
+               (SELECT ae.from_id FROM active_edge ae
+                WHERE ae.to_id = n.node_id
+                ORDER BY ae.edge_id DESC LIMIT 1),
+               0,
                EXISTS (SELECT 1 FROM volume v WHERE v.root_node_id = n.node_id)
         FROM node n
-        LEFT JOIN node_parent np ON np.node_id = n.node_id
         WHERE n.node_id = :node
         UNION ALL
-        SELECT p.node_id, p.name, np.parent_id, up.depth + 1,
+        SELECT p.node_id,
+               coalesce((SELECT ae.name FROM active_edge ae
+                         WHERE ae.to_id = p.node_id
+                         ORDER BY ae.edge_id DESC LIMIT 1), p.name),
+               (SELECT ae.from_id FROM active_edge ae
+                WHERE ae.to_id = p.node_id
+                ORDER BY ae.edge_id DESC LIMIT 1),
+               up.depth + 1,
                EXISTS (SELECT 1 FROM volume v WHERE v.root_node_id = p.node_id)
         FROM up
         JOIN node p ON p.node_id = up.parent_id
-        LEFT JOIN node_parent np ON np.node_id = p.node_id
         WHERE up.is_root = 0 AND up.depth < 256
       )
       SELECT node_id, name, depth, is_root, parent_id
@@ -269,12 +281,17 @@ resolution:
     consumed_by: [path_of, "mount_path (MountInfo)"]
     notes: >
       The ancestor chain from :node up toward its volume root. Host assembles the
-      path by reversing names (root -> node). TERMINATION CHECK (required): the
-      last row must have is_root = 1. If the walk stopped because depth hit 256
-      (last row is_root = 0, depth = 256) OR a row has parent_id NULL with
-      is_root = 0, the chain does NOT reach a root -> map to `corrupt`, do not
-      return a truncated path. The depth < 256 bound is the cycle guard. For a
-      mount-relative path_of, the host trims the chain at the mount point; for
+      path by reversing names (root -> node). D-5: each level reports its
+      EFFECTIVE name (placement override, else node name), and a multi-placement
+      (hardlinked) node reports its NEWEST placement (max edge_id) — one path of
+      several, chosen deterministically, exactly as a path-per-inode FUSE layer
+      needs. Containers have a single placement (PI-1), so only the leaf level
+      can face the choice. TERMINATION CHECK (required): the last row must have
+      is_root = 1. If the walk stopped because depth hit 256 (last row is_root
+      = 0, depth = 256) OR a row has parent_id NULL with is_root = 0, the chain
+      does NOT reach a root -> map to `corrupt`, do not return a truncated
+      path. The depth < 256 bound is the cycle guard. For a mount-relative
+      path_of, the host trims the chain at the mount point; for
       MountInfo.mount_path it keeps the full chain to root.
 
   get_mount:
@@ -547,6 +564,60 @@ mutation:
       (UPDATE OF version) -> bumps modified_at. The chunks of :version must
       already be staged in the pool + manifest before this runs; this single
       UPDATE is the atomic make-visible step (IO-2r1).
+
+  set_owner:
+    sql: |
+      UPDATE node SET
+        uid  = coalesce(:uid,  uid),
+        gid  = coalesce(:gid,  gid),
+        mode = coalesce(:mode, mode)
+      WHERE node_id = :node
+    params:
+      node: "NodeId"
+      uid:  "numeric uid, or NULL to leave unchanged"
+      gid:  "numeric gid, or NULL to leave unchanged"
+      mode: "permission bits (07777 masked by the host), or NULL to leave unchanged"
+    returns: rowcount
+    consumed_by: [set_owner]
+    notes: "chown/chmod (era 2). Fires node_touch_owner -> bumps ctime, never modified_at (a status change, not a content change)."
+
+  set_atime:
+    sql: |
+      UPDATE node SET atime = :ts WHERE node_id = :node
+    params: { node: "NodeId", ts: "ns epoch to set as atime" }
+    returns: rowcount
+    consumed_by: [set_atime]
+    notes: "utimens' atime half. There is deliberately NO per-read atime update anywhere (noatime semantics); this explicit set is the only writer."
+
+  xattr_set:
+    sql: |
+      INSERT INTO xattr (node_id, name, value) VALUES (:node, :name, :value)
+      ON CONFLICT (node_id, name) DO UPDATE SET value = excluded.value
+    params: { node: "NodeId", name: "attribute name (host enforces the user.* namespace at the FUSE boundary)", value: "attribute bytes" }
+    returns: rowcount
+    consumed_by: [set_xattr]
+
+  xattr_get:
+    sql: |
+      SELECT value FROM xattr WHERE node_id = :node AND name = :name
+    params: { node: "NodeId", name: "attribute name" }
+    returns: "{ value } or empty"
+    consumed_by: [get_xattr]
+
+  xattr_list:
+    sql: |
+      SELECT name FROM xattr WHERE node_id = :node ORDER BY name
+    params: { node: "NodeId" }
+    returns: "[{ name }]"
+    consumed_by: [list_xattrs]
+
+  xattr_remove:
+    sql: |
+      DELETE FROM xattr WHERE node_id = :node AND name = :name
+    params: { node: "NodeId", name: "attribute name" }
+    returns: rowcount
+    consumed_by: [remove_xattr]
+    notes: "rowcount 0 => the attribute did not exist (host maps to ENODATA)."
 
   set_modified_at:
     sql: |

@@ -43,7 +43,7 @@ from .models import (
     PruneReport,
     VolumeInfo,
 )
-from .types import MountId, NodeId, VolumeId, WriteMode
+from .types import MountId, NodeId, NodeType, VolumeId, WriteMode
 
 if TYPE_CHECKING:
     # Runtime import lives inside Mount.path() to break the aloelite <-> path
@@ -318,6 +318,40 @@ class Mount:
 
     def set_mtime(self, node: NodeId, ts_ns: int) -> None:
         return ops.set_mtime(self._db, self.id, node, ts_ns)
+
+    def set_atime(self, node: NodeId, ts_ns: int) -> None:
+        return ops.set_atime(self._db, self.id, node, ts_ns)
+
+    def hardlink(self, src: str, dst: str) -> None:
+        """An additional placement of src at dst (era 2 / D-5). Entries and
+        special leaves only — containers are refused."""
+        ops.link(self._db, self.id, src, dst)
+
+    def create_special(self, path: str, type: NodeType, data: bytes = b"") -> NodeId:
+        """A symlink (data = target), fifo, or socket leaf (era 2 / D-3)."""
+        return ops.create_special(self._db, self.id, path, type, data)
+
+    def set_owner(
+        self,
+        path: str,
+        *,
+        uid: int | None = None,
+        gid: int | None = None,
+        mode: int | None = None,
+    ) -> None:
+        ops.set_owner(self._db, self.id, path, uid=uid, gid=gid, mode=mode)
+
+    def set_xattr(self, path: str, name: str, value: bytes) -> None:
+        ops.set_xattr(self._db, self.id, path, name, value)
+
+    def get_xattr(self, path: str, name: str) -> bytes | None:
+        return ops.get_xattr(self._db, self.id, path, name)
+
+    def list_xattrs(self, path: str) -> builtins.list[str]:
+        return ops.list_xattrs(self._db, self.id, path)
+
+    def remove_xattr(self, path: str, name: str) -> bool:
+        return ops.remove_xattr(self._db, self.id, path, name)
 
     def set_metadata(self, path: str, metadata: dict[str, str]) -> None:
         ops.set_metadata(self._db, self.id, path, metadata)
