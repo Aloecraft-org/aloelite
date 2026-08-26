@@ -1,4 +1,4 @@
-# ./manager/test_supervisor.py
+# ./manager/engine/test_supervisor.py
 # License: Apache-2.0 (disclaimer at bottom of file)
 """
 Lifecycle tests for manager.supervisor.MountSupervisor using a fake FUSE
@@ -15,8 +15,8 @@ import threading
 import time
 
 from manager import errors as merr
-from manager.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
-from manager.supervisor import MountSupervisor
+from manager.engine.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
+from manager.engine.supervisor import MountSupervisor
 
 
 class FakeBackend:
@@ -211,7 +211,7 @@ def test_auto_mount_missing_pin_env_skips(tmp_path):
 
 
 def test_recover_stale_direct(tmp_path):
-    from manager.preflight import recover_stale_mounts
+    from manager.engine.preflight import recover_stale_mounts
 
     store, fb, sup, rec = _mk(tmp_path, "ok")
     rec.mounted = True

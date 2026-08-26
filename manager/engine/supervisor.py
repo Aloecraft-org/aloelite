@@ -1,7 +1,7 @@
-# ./manager/supervisor.py
+# ./manager/engine/supervisor.py
 # License: Apache-2.0 (disclaimer at bottom of file)
 """
-manager.supervisor — mount supervisor and per-mount FUSE thread lifecycle.
+manager.engine.supervisor — mount supervisor and per-mount FUSE thread lifecycle.
 
 One daemon thread per active FUSE mount, each running its own trio.run() over
 aloelite.fuse.fuse_main(...). A threading.Event is the stop signal; readiness is
@@ -24,7 +24,7 @@ import os
 import threading
 import time
 
-from .errors import (
+from ..errors import (
     AlreadyMounted,
     BadPin,
     EncryptionMismatch,
@@ -35,7 +35,7 @@ from .errors import (
 from .preflight import _is_fuse_active, _lazy_unmount
 from .store import VolumeRecord, VolumeStore
 
-_LOG = logging.getLogger("manager.supervisor")
+_LOG = logging.getLogger("manager.engine.supervisor")
 
 
 def _default_fuse_runner(

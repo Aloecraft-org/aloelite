@@ -44,8 +44,8 @@ from flask import (
 from aloelite._sqlite import sqlite3
 
 from . import errors as merr
-from .direct import FRONTEND_DIRECT, DirectSessionRegistry
-from .store import FilesystemRecord, VolumeRecord, VolumeStore
+from .engine.direct import FRONTEND_DIRECT, DirectSessionRegistry
+from .engine.store import FilesystemRecord, VolumeRecord, VolumeStore
 
 
 def _default_root() -> str:
@@ -131,7 +131,16 @@ def create_app(
     host_mnt_prefix: str = HOST_MNT_PREFIX,
     auth_mode: str | None = None,
 ) -> Flask:
-    app = Flask(__name__)
+    from .ui import STATIC_DIR, TEMPLATES_DIR
+
+    # The UI is a self-contained bundle (manager.ui) served verbatim; the
+    # Flask wiring here is this implementation's way of doing what any
+    # other language's server does with the same directory.
+    app = Flask(
+        __name__,
+        template_folder=str(TEMPLATES_DIR),
+        static_folder=str(STATIC_DIR),
+    )
     registry = registry or DirectSessionRegistry()
     app.config["DIRECT_REGISTRY"] = registry  # reachable for shutdown/tests
     # "cookie" (default): the auth gate IS encryption. An unencrypted volume
@@ -1035,7 +1044,7 @@ def create_app(
         """Liveness + minimal readiness.
 
         This used to return 200 unconditionally, which meant a wheel missing
-        manager/templates/ reported healthy while every page 500'd. Anything
+        manager/ui/templates/ reported healthy while every page 500'd. Anything
         checked here must be something whose absence makes the app useless:
         the admin template (packaging), and any fatal preflight result.
         Jinja caches templates, so the get_template call is cheap after the

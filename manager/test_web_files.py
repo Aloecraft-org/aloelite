@@ -15,8 +15,8 @@ from io import BytesIO
 import pytest
 
 from manager.api import create_app
-from manager.direct import FRONTEND_DIRECT, DirectSessionRegistry
-from manager.store import JsonVolumeStore, VolumeRecord
+from manager.engine.direct import FRONTEND_DIRECT, DirectSessionRegistry
+from manager.engine.store import JsonVolumeStore, VolumeRecord
 
 
 @pytest.fixture

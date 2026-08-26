@@ -1,7 +1,7 @@
-# ./manager/direct.py
+# ./manager/engine/direct.py
 # License: Apache-2.0 (disclaimer at bottom of file)
 """
-manager.direct — held Mount sessions: the FUSE-less ("direct") frontend.
+manager.engine.direct — held Mount sessions: the FUSE-less ("direct") frontend.
 
 One DirectSession per unlocked volume: an Aloelite handle (owning the sqlite
 connection, cipher installed at unlock) plus one engine Mount PER CLIENT —
@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from .errors import (
+from ..errors import (
     AlreadyMounted,
     BadPin,
     EncryptionMismatch,
