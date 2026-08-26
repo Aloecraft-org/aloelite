@@ -1,0 +1,273 @@
+# ============================================================================
+# Manager HTTP API — language-agnostic interface definition
+#
+# What mount-api.yaml is for the engine, this is for the manager: the surface
+# a second-language manager must reproduce so that manager/ui/ — shipped
+# verbatim — cannot tell which implementation is answering.
+#
+# Scope note. The engine spec is a CONTRACT the schema enforces; this one is
+# a DESCRIPTION of manager/api.py, which remains the reference. Where the two
+# disagree, api.py is right and this file has drifted — which
+# tests/test_manager_api_spec.py exists to prevent: it asserts the route
+# table here and the Flask url_map agree, both directions.
+#
+# Conventions
+#   * Paths use <name> for a path parameter, matching Flask/Werkzeug.
+#   * `auth: gated` means the route requires a per-client session when the
+#     volume is encrypted AND the server runs auth_mode=cookie (the default).
+#     Unencrypted volumes and auth_mode=off never gate. See `auth` below.
+#   * Error bodies are always {"error": "<human sentence>"}; success bodies
+#     are described per route. Status codes listed are those the handler
+#     itself returns.
+#   * Anything not listed here (Flask's /static/<path>, the framework's own
+#     404/405) is not part of the contract.
+# ============================================================================
+
+meta:
+  interface: manager_http
+  version: 1
+  serves: manager/ui
+  reference_implementation: manager/api.py
+  notes: >
+    Two frontends sit behind these routes: 'direct' (held in-process engine
+    mounts; the files/* surface reads and writes through the engine) and
+    'fuse' (a kernel mountpoint the manager supervises; the files/* surface
+    is ordinary filesystem I/O under the mountpoint). Route shapes are
+    identical either way — which frontend a volume uses is a mount-time
+    choice, not a different API.
+
+# ----------------------------------------------------------------------------
+# Authentication
+# ----------------------------------------------------------------------------
+auth:
+  modes:
+    cookie: >
+      Default. The auth gate IS encryption: an unencrypted volume is open to
+      any client that can reach the manager, exactly as before. An ENCRYPTED
+      volume is per-client — each browser/device proves the PIN once and gets
+      its own engine mount row, so lock attribution and the mounts listing
+      read as an audit of who is attached.
+    "off": >
+      Legacy. Once anyone unlocks a volume, any client that can reach the
+      manager may use it.
+  credential:
+    header: X-Aloelite-Token
+    cookie: aloe_m_<volume_id>
+    note: >
+      Bearer header first, cookie second. The header is the UI's path
+      (explicit, immune to browser cookie policy, and the shape ENCRYPTION.md
+      describes: the client holds only T). The cookie is the compatibility
+      duplicate for curl-with-jar and older clients; it is HttpOnly,
+      SameSite=Lax, and scoped to /volumes so the listing endpoint can answer
+      "attached" truthfully per client.
+  csrf:
+    header: "X-Aloelite: 1"
+    applies_to: "any non-GET request that presents no X-Aloelite-Token"
+    note: >
+      Cookie auth resurrects CSRF (bearer-in-JS never had it). SameSite=Lax
+      covers modern browsers; requiring a custom header the same-origin UI
+      always sends closes the rest — a cross-site form cannot set one. A
+      request carrying an explicit bearer token skips the check: there is no
+      ambient credential to ride.
+  gating: >
+    Routes marked `auth: gated` answer 401 {"error": "unlock required ..."}
+    when the volume is encrypted, the server is in cookie mode, and the
+    request holds no valid session. Mounting/unlocking itself is NEVER gated:
+    the PIN, not reachability, is what admits a device.
+
+# ----------------------------------------------------------------------------
+# Routes
+# ----------------------------------------------------------------------------
+routes:
+
+  # --- volumes --------------------------------------------------------------
+  - path: /volumes
+    method: GET
+    summary: every volume this manager knows, with per-client attach state
+    responses: {200: "[VolumeItem]"}
+
+  - path: /volumes
+    method: POST
+    summary: create a volume (and a filesystem file, unless fs_id is given)
+    body:
+      name: "string, required"
+      encrypted: "bool, default false"
+      pin: "string, required iff encrypted; rejected otherwise"
+      fs_id: "string, optional — place this volume in an existing filesystem"
+    responses:
+      201: "{id, name, encrypted, mounted}"
+      400: "name missing, or pin/encrypted disagree"
+      404: "fs_id names no filesystem"
+      409: "a volume with that name already exists in that filesystem"
+
+  - path: /volumes/<vid>
+    method: DELETE
+    summary: forget a volume (and delete its filesystem file when it was the last)
+    responses: {200: "{deleted: true}", 404: "no such volume", 409: "still mounted"}
+
+  # --- mount lifecycle ------------------------------------------------------
+  - path: /volumes/<vid>/mount
+    method: POST
+    summary: unlock/mount a volume; for an encrypted volume this is where a client proves the PIN
+    body:
+      pin: "string, required for an encrypted volume"
+      mode: "'direct' | 'fuse' — frontend to use"
+      persist: "bool, remember the mount across manager restarts"
+      mount_name: "string, mountpoint name (fuse mode)"
+      pin_env: "string, read the PIN from this environment variable (fuse mode)"
+      pin_file: "string, read the PIN from this file (fuse mode)"
+    responses:
+      200: "{mounted: true, ...} — sets the session cookie for a gated volume"
+      400: "missing/!invalid pin, or a bad mode/persist/pin_env/pin_file combination"
+      409: "already mounted, or mount_name is taken"
+      500: "the mount attempt failed"
+      503: "FUSE is unavailable on this deployment"
+    auth: open
+    note: >
+      Deliberately ungated: this route is how a client BECOMES authorized.
+      A wrong PIN leaves any existing session untouched.
+
+  - path: /volumes/<vid>/mount
+    method: DELETE
+    summary: unmount — this client's session by default, or every session with ?all=1
+    query: {all: "'1' to drop all sessions, not just the caller's"}
+    responses:
+      200: "{mounted: false}"
+      401: "gated volume, no session for this client"
+      403: "?all=1 refused for a non-owning client"
+      404: "no such volume"
+    auth: gated
+
+  - path: /volumes/<vid>/mount
+    method: GET
+    summary: mount state as this client sees it
+    responses: {200: "{mounted, mountpoint, attached, ...}", 404: "no such volume"}
+
+  - path: /volumes/<vid>/mounts
+    method: GET
+    summary: the engine mount rows for this volume — the audit of who is attached
+    query: {all: "'1' to include unmounted (historical) rows"}
+    responses: {200: "[MountInfo]", 401: "gated, no session", 404: "no such volume"}
+    auth: gated
+
+  - path: /volumes/<vid>/stat
+    method: GET
+    summary: volume statistics (node/chunk counts, sizes)
+    responses: {200: "{...}", 404: "no such volume", 500: "engine error"}
+
+  # --- whole-file surfaces --------------------------------------------------
+  - path: /volumes/<vid>/checkpoint
+    method: POST
+    summary: WAL checkpoint (TRUNCATE) so the backing file is self-contained for copying
+    responses: {200: "{checkpointed, frames, pages}", 404: "no such volume"}
+    auth: gated
+
+  - path: /volumes/<vid>/export
+    method: GET
+    summary: download the whole backing filesystem file
+    responses: {200: "the .sqlite file as a stream", 404: "no such volume"}
+    auth: gated
+
+  # --- files (identical shapes on both frontends) ---------------------------
+  - path: /volumes/<vid>/files
+    method: GET
+    summary: list a directory inside the volume
+    query: {path: "directory, relative to the volume root; default root"}
+    responses:
+      200: "[{name, type, size, mtime}]"
+      400: "bad path (escape attempt or malformed)"
+      401: "gated, no session"
+      404: "no such volume, or not a directory"
+      409: "volume is not mounted"
+    auth: gated
+
+  - path: /volumes/<vid>/files/download
+    method: GET
+    summary: download one file
+    query:
+      path: "file, relative to the volume root"
+      inline: "'1' to serve inline (preview) instead of as an attachment"
+    responses:
+      200: "the file bytes; Cache-Control: no-store"
+      400: "bad path"
+      401: "gated, no session"
+      404: "no such volume, or not a file"
+      409: "volume is not mounted"
+    auth: gated
+    note: >
+      No Accept-Ranges today — the whole file streams with a fixed
+      Content-Length, which is why the UI buffers media into a blob: URL
+      before playing. Range support is doc/ROADMAP.md item 1.
+
+  - path: /volumes/<vid>/files/upload
+    method: POST
+    summary: upload a file into a directory (multipart form field 'file')
+    query: {path: "target directory"}
+    responses: {201: "{uploaded, name}", 400: "bad path or no file part", 401: "gated", 409: "not mounted"}
+    auth: gated
+
+  - path: /volumes/<vid>/files/mkdir
+    method: POST
+    summary: create a directory
+    query: {path: "parent directory"}
+    body: {name: "string, required"}
+    responses: {201: "{created, name}", 400: "bad path or name", 409: "already exists / not mounted"}
+    auth: gated
+
+  - path: /volumes/<vid>/files
+    method: DELETE
+    summary: delete a file or directory
+    query: {path: "target"}
+    responses: {200: "{deleted}", 400: "bad path", 404: "no such target", 409: "not mounted"}
+    auth: gated
+
+  - path: /volumes/<vid>/files/transfer
+    method: POST
+    summary: move or copy within the volume
+    body:
+      op: "'move' | 'copy'"
+      src: "source path"
+      dst: "destination path"
+    responses: {200: "{ok: true}", 400: "bad op or paths", 404: "source missing", 409: "destination exists / not mounted"}
+    auth: gated
+
+  # --- filesystems (the files volumes live in) ------------------------------
+  - path: /filesystems
+    method: GET
+    summary: every filesystem file, with the volumes inside it
+    responses: {200: "[FilesystemItem]"}
+
+  - path: /filesystems/<fid>
+    method: PATCH
+    summary: rename a filesystem's display name
+    body: {display_name: "string, required"}
+    responses: {200: "{...}", 400: "display_name missing", 404: "no such filesystem"}
+
+  - path: /filesystems/<fid>/export
+    method: GET
+    summary: download a filesystem file whole
+    responses: {200: "the .sqlite file as a stream", 404: "no such filesystem"}
+
+  - path: /filesystems/import
+    method: POST
+    summary: import an uploaded .sqlite as a new filesystem, registering its volumes
+    responses: {201: "{id, volumes: [...]}", 400: "no file part, or not an aloelite filesystem"}
+
+  # --- service --------------------------------------------------------------
+  - path: /health
+    method: GET
+    summary: liveness plus a real render of the admin template
+    responses: {200: "{status: 'ok', ...}", 503: "degraded — template or store unreadable"}
+    note: >
+      Renders the template rather than just answering 200: a missing
+      manager/ui/templates/ once reported healthy while every page 500'd.
+
+  - path: /
+    method: GET
+    summary: redirect to /admin
+    responses: {302: "-> /admin"}
+
+  - path: /admin
+    method: GET
+    summary: the HTML manager (manager/ui)
+    responses: {200: "text/html"}

@@ -8,7 +8,8 @@ reimplements versus what it inherits verbatim**.
 
 ```
 manager/
-  api.py        the HTTP contract — REIMPLEMENTED per language
+  api-spec.yaml the HTTP contract, as data — the port's checklist
+  api.py        the reference implementation of that contract
   ui/           the HTML manager  — INHERITED verbatim (asset bundle)
   engine/       the Python-engine adapters — REPLACED per language
   errors.py     shared error vocabulary (api <-> engine)
@@ -18,14 +19,20 @@ manager/
 
 ## The pieces
 
-**`api.py` — the HTTP surface.** Routes, request/response shapes, auth
-(bearer token + cookie compat), and the streaming download path. This file
-*is* the cross-language contract for the manager, the way
-`aloelite/config/mount-api.yaml` is for the engine: a Rust manager
-re-exposes these routes over its own engine and serves the same `ui/`
-bundle, and the browser cannot tell the difference. (`doc/api_testing.md`
-documents the surface; a future step is extracting the route inventory
-into a spec file the way mount-api.yaml did it.)
+**`api-spec.yaml` + `api.py` — the HTTP surface.** The spec is the
+cross-language contract for the manager, the way
+`aloelite/config/mount-api.yaml` is for the engine: every route with its
+params, status codes, and auth gating, plus the credential and CSRF header
+names a port must reproduce byte-for-byte. A Rust manager implements that
+spec over its own engine, serves the same `ui/` bundle, and the browser
+cannot tell the difference.
+
+`api.py` remains the reference implementation, and where the two disagree
+api.py is right — `manager/test_api_spec.py` projects the spec onto the
+live Flask url_map and fails in BOTH directions (a route added without a
+spec entry, or a spec entry for a route that no longer exists), so the
+contract cannot quietly rot. `doc/api_testing.md` documents exercising the
+surface by hand.
 
 **`ui/` — the HTML manager.** Templates plus vendored static assets
 (Bootstrap, Alpine, marked, Prism, signature_pad — see
