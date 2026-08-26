@@ -71,6 +71,16 @@ class NodeInfo(_Record):
     size: Optional[int]
     # NODE-6: shallow {string:string} annotation map; {} when unset
     metadata: dict[str, str]
+    # era 2: ownership + POSIX metadata. uid/gid/mode are None until set
+    # (hosts fall back to process defaults); atime/ctime coalesce to
+    # modified/created in SQL so they are always present. nlink is DERIVED
+    # (count of active placements — >1 means the entry is hardlinked).
+    uid: Optional[int] = None
+    gid: Optional[int] = None
+    mode: Optional[int] = None
+    atime: Optional[Timestamp] = None
+    ctime: Optional[Timestamp] = None
+    nlink: int = 1
 
     @classmethod
     def from_row(cls, r: Mapping[str, Any]) -> "NodeInfo":
@@ -80,6 +90,11 @@ class NodeInfo(_Record):
         # get_node returns metadata as a JSON string via json(); NULL => empty map.
         raw_meta = r["metadata"]
         metadata = json.loads(raw_meta) if raw_meta is not None else {}
+        keys = r.keys()
+
+        def _opt(col: str) -> Any:
+            return r[col] if col in keys else None
+
         return cls(
             id=NodeId(r["node_id"]),
             type=NodeType(r["type"]),
@@ -89,6 +104,12 @@ class NodeInfo(_Record):
             volume=VolumeId(r["volume_id"]) if r["volume_id"] is not None else None,
             size=r["size"],
             metadata=metadata,
+            uid=_opt("uid"),
+            gid=_opt("gid"),
+            mode=_opt("mode"),
+            atime=_opt("atime"),
+            ctime=_opt("ctime"),
+            nlink=_opt("nlink") or 1,
         )
 
 

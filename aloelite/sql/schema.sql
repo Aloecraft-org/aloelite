@@ -7,18 +7,24 @@
 -- reparent ancestor check, ACC-5 mount-point interpretation, VOL-2 no-edge-to-
 -- root) are deliberately absent here and belong to the Mount API.
 --
--- ID GENERATION. SQLite BEFORE triggers cannot modify NEW, and DEFAULT cannot
--- do a cross-table read-modify-write, so auto-id generation uses the
--- insert-view idiom: INSERT INTO <x>_new (...) fires an INSTEAD OF INSERT
--- trigger that mints the id and writes the base table. Direct INSERT INTO <x>
--- (...) with an explicit id is the import/recovery path and bypasses
--- generation entirely.
+-- ID GENERATION (era 2, doc/DECISIONS.md D-1/D-2). Ids are HOST-MINTED; every
+-- INSERT arrives with an explicit id. The era-1 insert-view/trigger minting
+-- idiom is retired (the era refresh removes those derived objects from old
+-- files). Triggers still DEFEND invariants; they no longer generate.
 --
---   * node / edge ids are monotonic within their volume, drawn from the
---     volume's (wm_ts, wm_seq) watermark. 12-bit counter in uuid7 rand_a
---     (4096 ids/ms/volume); on overflow the timestamp borrows 1ms forward
---     (spin is not expressible in a trigger).
---   * volume / mount / lock ids are stateless uuid7 (no ordering requirement).
+--   * node / edge ids are uuid7s minted by a per-volume MonotonicMint in the
+--     host (strictly increasing per mount session; 12-bit counter in rand_a,
+--     1ms borrow on overflow). volume.wm_ts/wm_seq is the volume's HIGH-WATER
+--     MARK: hosts fence their mint at attach (max of clock and mark) and
+--     advance the mark inside each write transaction, so no session can mint
+--     at or below anything the volume has recorded — clock regression and
+--     failover skew included. Ordering contract: strict within a mount,
+--     strict across mounts beyond the coordination window, arbitrary within
+--     it (concurrent unlocked writers have no defined "later").
+--   * volume / mount / lock ids are stateless uuid7 (no ordering promise).
+--
+-- TIMESTAMPS are INTEGER nanoseconds since the unix epoch (era 2; era 1
+-- stored milliseconds — the era-2 migration multiplies stored values by 1e6).
 -- ============================================================================
 
 PRAGMA foreign_keys = ON;
@@ -40,12 +46,23 @@ CREATE TABLE IF NOT EXISTS node (
   -- open updates it in place, so new types are a trigger change, never a
   -- table migration.
   type       TEXT    NOT NULL,                                          -- NODE-2
-  name       TEXT    NOT NULL,                                          -- NODE-3
-  created_at INTEGER NOT NULL,                                          -- NODE-4
+  name       TEXT    NOT NULL,                                          -- NODE-3 (a placement may override it: edge.name)
+  created_at INTEGER NOT NULL,                                          -- NODE-4 (ns)
   modified_at INTEGER,                                                  -- own content/metadata change, NOT placement; null => never tracked (read as created_at)
   volume_id  TEXT    REFERENCES volume (volume_id),
-  metadata   BLOB                                                       -- NODE-6: shallow {string:string} as JSONB; NULL == empty map
+  metadata   BLOB,                                                      -- NODE-6: shallow {string:string} as JSONB; NULL == empty map
+  -- era 2: ownership + POSIX metadata (all nullable; hosts fall back to
+  -- process defaults when NULL, so imported/era-1 nodes need no backfill).
+  -- These same columns serve POSIX ownership and multitenant ownership.
+  uid        INTEGER,
+  gid        INTEGER,
+  mode       INTEGER,                                                   -- permission bits (07777); type lives in `type`, never here
+  atime      INTEGER,                                                   -- ns; set via setattr only (noatime semantics), NULL => read as modified
+  ctime      INTEGER                                                    -- ns; inode-change time, bumped by the touch triggers below
 ) STRICT;
+-- nlink is deliberately DERIVED (count of active edges for entries; 2+subdirs
+-- for containers), never a stored column: a maintained counter can drift, a
+-- count over edge_to_active cannot.
 
 -- Payload, split from metadata so traversal never touches blobs. IO-1, IO-6.
 -- content_hash is reserved for the future Merkle leaf (EXT-2); unused for now.
@@ -95,7 +112,9 @@ CREATE TABLE IF NOT EXISTS content_version (
 CREATE INDEX IF NOT EXISTS content_version_chunk ON content_version (chunk_hash);
 
 -- Origin. VOL-1..4. root_node_id nullable for bootstrapping; UNIQUE so a node
--- roots at most one volume. wm_ts/wm_seq are this volume's id watermark.
+-- roots at most one volume. wm_ts/wm_seq are this volume's id HIGH-WATER MARK
+-- (D-2): the highest (ms, seq) any session has recorded. Hosts fence their
+-- mint here at attach and advance it (monotonically) per write transaction.
 -- ENC-3: enc_mode reserves the encryption strategy (none/convergent/random for chunks).
 -- Defaults to 'convergent' (dedup + equality leakage). 'random' sacrifices dedup
 -- for zero equality leakage; 'none' for unencrypted (debugging only).
@@ -125,7 +144,13 @@ CREATE TABLE IF NOT EXISTS edge (
   from_id   TEXT    NOT NULL REFERENCES node (node_id),                 -- EDGE-4 (container check is procedural)
   to_id     TEXT    NOT NULL REFERENCES node (node_id),
   volume_id TEXT    NOT NULL REFERENCES volume (volume_id),
-  archived  INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1))
+  archived  INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+  -- era 2 (D-5): per-placement name override for multi-placement (hardlinked)
+  -- entries. NULL => the node's own name. Resolution and listings match on
+  -- coalesce(edge.name, node.name). Rename is a placement operation in POSIX
+  -- (it edits a directory entry, not the inode): it sets THIS, and refreshes
+  -- node.name too only when this is the node's sole active placement.
+  name      TEXT
 ) STRICT;
 
 -- Guard triggers: refuse-only enforcement for invariants the schema cannot
@@ -137,14 +162,19 @@ CREATE TABLE IF NOT EXISTS edge (
 -- NODE-2: the node-type vocabulary lives here (not in a table CHECK) so the
 -- era refresh can widen it without a table rebuild. Refuse-only, like every
 -- guard: it rejects, it never does work.
+-- era 2 (D-3): the vocabulary widens to symlink/fifo/socket. Device nodes are
+-- REFUSED by decision, not omission — a data filesystem storing device nodes
+-- is a security surface with no identified use case; a future era can widen
+-- this same trigger if that changes. symlink/fifo/socket place like entries
+-- (they are leaves; EDGE-4 still requires from_id to be a container).
 CREATE TRIGGER IF NOT EXISTS node_guard_type BEFORE INSERT ON node
-WHEN NEW.type NOT IN ('container', 'entry')
+WHEN NEW.type NOT IN ('container', 'entry', 'symlink', 'fifo', 'socket')
 BEGIN
   SELECT RAISE(ABORT, 'NODE-2: unknown node type');
 END;
 
 CREATE TRIGGER IF NOT EXISTS node_guard_type_upd BEFORE UPDATE OF type ON node
-WHEN NEW.type NOT IN ('container', 'entry')
+WHEN NEW.type NOT IN ('container', 'entry', 'symlink', 'fifo', 'socket')
 BEGIN
   SELECT RAISE(ABORT, 'NODE-2: unknown node type');
 END;
@@ -153,6 +183,30 @@ CREATE TRIGGER IF NOT EXISTS edge_guard_from_type BEFORE INSERT ON edge
 WHEN (SELECT type FROM node WHERE node_id = NEW.from_id) <> 'container'   -- EDGE-4
 BEGIN
   SELECT RAISE(ABORT, 'EDGE-4: edge.from_id must reference a container');
+END;
+
+-- era 2: PI-1 narrows to CONTAINERS (single active parent => the container
+-- graph stays a tree and PI-4's cycle argument holds). Entries may hold
+-- multiple active placements — hardlinks (EXT-1's reserved relaxation).
+-- Refuse-only triggers replace the era-1 partial unique index, which could
+-- not consult node.type; the era-2 migration drops that index.
+CREATE TRIGGER IF NOT EXISTS edge_guard_single_parent BEFORE INSERT ON edge
+WHEN NEW.archived = 0
+  AND (SELECT type FROM node WHERE node_id = NEW.to_id) = 'container'
+  AND EXISTS (SELECT 1 FROM edge WHERE to_id = NEW.to_id AND archived = 0)
+BEGIN
+  SELECT RAISE(ABORT, 'PI-1: container already has an active placement');
+END;
+
+CREATE TRIGGER IF NOT EXISTS edge_guard_single_parent_upd
+BEFORE UPDATE OF archived ON edge
+WHEN NEW.archived = 0 AND OLD.archived = 1
+  AND (SELECT type FROM node WHERE node_id = NEW.to_id) = 'container'
+  AND EXISTS (SELECT 1 FROM edge
+              WHERE to_id = NEW.to_id AND archived = 0
+                AND edge_id <> NEW.edge_id)
+BEGIN
+  SELECT RAISE(ABORT, 'PI-1: container already has an active placement');
 END;
 
 CREATE TRIGGER IF NOT EXISTS edge_guard_volume BEFORE INSERT ON edge        -- PI-6
@@ -176,7 +230,8 @@ END;
 CREATE TRIGGER IF NOT EXISTS node_touch_content
 AFTER UPDATE OF version, content_hash ON content
 BEGIN
-  UPDATE node SET modified_at = cast(unixepoch('subsec') * 1000 AS INTEGER)
+  UPDATE node SET modified_at = cast(unixepoch('subsec') * 1000000000 AS INTEGER),
+                  ctime       = cast(unixepoch('subsec') * 1000000000 AS INTEGER)
   WHERE node_id = NEW.node_id;
 END;
 
@@ -184,8 +239,36 @@ CREATE TRIGGER IF NOT EXISTS node_touch_name
 AFTER UPDATE OF name ON node
 WHEN NEW.name <> OLD.name                       -- skip no-op renames
 BEGIN
-  UPDATE node SET modified_at = cast(unixepoch('subsec') * 1000 AS INTEGER)
+  UPDATE node SET modified_at = cast(unixepoch('subsec') * 1000000000 AS INTEGER),
+                  ctime       = cast(unixepoch('subsec') * 1000000000 AS INTEGER)
   WHERE node_id = NEW.node_id;                  -- UPDATE OF modified_at, not name: no recursion
+END;
+
+-- era 2: ctime (inode-change time) bumps. Ownership/permission changes touch
+-- ctime but NOT modified_at (POSIX: chmod is a status change, not a content
+-- change); link-count changes (a placement appearing, archiving, or
+-- unarchiving) do the same. UPDATE OF ctime never refires these.
+CREATE TRIGGER IF NOT EXISTS node_touch_owner
+AFTER UPDATE OF uid, gid, mode ON node
+BEGIN
+  UPDATE node SET ctime = cast(unixepoch('subsec') * 1000000000 AS INTEGER)
+  WHERE node_id = NEW.node_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS edge_touch_ctime
+AFTER INSERT ON edge
+WHEN NEW.archived = 0
+BEGIN
+  UPDATE node SET ctime = cast(unixepoch('subsec') * 1000000000 AS INTEGER)
+  WHERE node_id = NEW.to_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS edge_touch_ctime_arch
+AFTER UPDATE OF archived ON edge
+WHEN NEW.archived <> OLD.archived
+BEGIN
+  UPDATE node SET ctime = cast(unixepoch('subsec') * 1000000000 AS INTEGER)
+  WHERE node_id = NEW.to_id;
 END;
 
 -- NODE-6: there is intentionally NO node_touch_metadata trigger. Metadata is
@@ -201,9 +284,13 @@ CREATE TABLE IF NOT EXISTS mount (
   mount_point TEXT    NOT NULL REFERENCES node (node_id),               -- ACC-2
   state       TEXT    NOT NULL DEFAULT 'new'
                       CHECK (state IN ('new', 'active', 'unmounted')), -- ACC-4
-  expires_at  INTEGER,                                                  -- ACC-3 (ttl as absolute instant)
-  created_at  INTEGER NOT NULL,
-  N_m         BLOB    NOT NULL                                          -- ENC-1: ephemeral mount nonce (16 bytes)
+  expires_at  INTEGER,                                                  -- ACC-3 (ttl as absolute instant, ns)
+  created_at  INTEGER NOT NULL,                                         -- ns
+  N_m         BLOB    NOT NULL,                                         -- ENC-1: ephemeral mount nonce (16 bytes)
+  -- era 2 (D-4 / HANDOFF-0.4 §4.3): mount policy. access vocabulary lives in
+  -- mount_guard_access (a trigger, like NODE-2) so a future era can widen it.
+  access      TEXT    NOT NULL DEFAULT 'rw',                            -- 'ro' | 'rw'
+  principal   TEXT                                                      -- tenant/user identity for policy + future ACLs; NULL = unattributed
 ) STRICT;
 
 -- Locks. ACC-6..9. Scoped to one mount; cascade is a dangle-safety net, not
@@ -214,19 +301,42 @@ CREATE TABLE IF NOT EXISTS lock (
   node_id     TEXT    NOT NULL REFERENCES node (node_id),
   read_count  INTEGER NOT NULL DEFAULT 0,                               -- ACC-8 (recorded, not yet enforced)
   write_count INTEGER NOT NULL DEFAULT 0,
-  expires_at  INTEGER,
-  created_at  INTEGER NOT NULL
+  expires_at  INTEGER,                                                  -- ns
+  created_at  INTEGER NOT NULL                                          -- ns
+) STRICT;
+
+-- era 2 (D-4): mount access vocabulary, guard-trigger style like NODE-2.
+CREATE TRIGGER IF NOT EXISTS mount_guard_access BEFORE INSERT ON mount
+WHEN NEW.access NOT IN ('ro', 'rw')
+BEGIN
+  SELECT RAISE(ABORT, 'ACC: unknown mount access mode');
+END;
+
+CREATE TRIGGER IF NOT EXISTS mount_guard_access_upd BEFORE UPDATE OF access ON mount
+WHEN NEW.access NOT IN ('ro', 'rw')
+BEGIN
+  SELECT RAISE(ABORT, 'ACC: unknown mount access mode');
+END;
+
+-- era 2: extended attributes (user.* namespace through FUSE). A separate
+-- table, not NODE-6 metadata: xattr values are binary and can be large, and
+-- NODE-6 is a shallow {string:string} map by contract. Deleting a node
+-- cascades its xattrs.
+CREATE TABLE IF NOT EXISTS xattr (
+  node_id TEXT NOT NULL REFERENCES node (node_id) ON DELETE CASCADE,
+  name    TEXT NOT NULL,
+  value   BLOB NOT NULL,
+  PRIMARY KEY (node_id, name)
 ) STRICT;
 
 -- ----------------------------------------------------------------------------
 -- Indexes
 -- ----------------------------------------------------------------------------
 
--- PI-1: at most one ACTIVE incoming edge per node per volume. Partial unique,
--- not plain UNIQUE, so an archived old placement and a new active one coexist
--- during a move.
-CREATE UNIQUE INDEX IF NOT EXISTS edge_active_placement
-  ON edge (volume_id, to_id) WHERE archived = 0;
+-- PI-1 (era 2): enforcement moved to the edge_guard_single_parent triggers
+-- above, scoped to containers so entries can hold multiple placements
+-- (hardlinks). The era-1 partial unique index edge_active_placement is
+-- dropped by the era-2 migration; lookups are covered by edge_to_active.
 
 CREATE INDEX IF NOT EXISTS edge_from_active ON edge (from_id) WHERE archived = 0; -- child enumeration
 CREATE INDEX IF NOT EXISTS edge_to_active   ON edge (to_id)   WHERE archived = 0; -- active parent / path walk
@@ -278,18 +388,21 @@ CREATE VIEW IF NOT EXISTS subtree AS
   ORDER BY root_id, depth, edge_id, node_id;
 
 -- Children of a container, with NODE-5 visibility resolved (greatest node_id
--- per name is visible). Ordered per EXT-3 (edge_id, then node_id).
+-- per EFFECTIVE name is visible). Ordered per EXT-3 (edge_id, then node_id).
+-- era 2 (D-5): the effective name is coalesce(edge.name, node.name) — a
+-- hardlinked entry may carry a different name per placement.
 CREATE VIEW IF NOT EXISTS directory_listing AS
   SELECT
     ae.from_id AS container_id,
     n.node_id,
-    n.name,
+    coalesce(ae.name, n.name) AS name,
     n.type,
     ae.edge_id,
     (n.node_id = (
        SELECT max(n2.node_id)
        FROM active_edge ae2 JOIN node n2 ON n2.node_id = ae2.to_id
-       WHERE ae2.from_id = ae.from_id AND n2.name = n.name
+       WHERE ae2.from_id = ae.from_id
+         AND coalesce(ae2.name, n2.name) = coalesce(ae.name, n.name)
     )) AS visible
   FROM active_edge ae JOIN node n ON n.node_id = ae.to_id
   ORDER BY ae.from_id, ae.edge_id, n.node_id;
@@ -350,13 +463,13 @@ CREATE VIEW IF NOT EXISTS retained_version AS
 CREATE VIEW IF NOT EXISTS valid_mount AS
   SELECT * FROM mount
   WHERE state <> 'unmounted'
-    AND (expires_at IS NULL OR expires_at > cast(unixepoch('subsec') * 1000 AS INTEGER));
+    AND (expires_at IS NULL OR expires_at > cast(unixepoch('subsec') * 1000000000 AS INTEGER));
 
 -- ACC-9: valid only while its mount is valid and its own ttl holds.
 CREATE VIEW IF NOT EXISTS valid_lock AS
   SELECT l.*
   FROM lock l JOIN valid_mount vm ON vm.mount_id = l.mount_id
-  WHERE l.expires_at IS NULL OR l.expires_at > cast(unixepoch('subsec') * 1000 AS INTEGER);
+  WHERE l.expires_at IS NULL OR l.expires_at > cast(unixepoch('subsec') * 1000000000 AS INTEGER);
 
 -- Lock-side input to prune (ACC-10): everything not currently valid.
 CREATE VIEW IF NOT EXISTS prunable_lock AS
@@ -372,8 +485,8 @@ CREATE VIEW IF NOT EXISTS mount_lock AS
     m.state      AS mount_state,
     m.expires_at AS mount_expires,
     (m.state <> 'unmounted'
-     AND (m.expires_at IS NULL OR m.expires_at > cast(unixepoch('subsec') * 1000 AS INTEGER))
-     AND (l.expires_at IS NULL OR l.expires_at > cast(unixepoch('subsec') * 1000 AS INTEGER))
+     AND (m.expires_at IS NULL OR m.expires_at > cast(unixepoch('subsec') * 1000000000 AS INTEGER))
+     AND (l.expires_at IS NULL OR l.expires_at > cast(unixepoch('subsec') * 1000000000 AS INTEGER))
     ) AS valid
   FROM lock l JOIN mount m ON m.mount_id = l.mount_id;
 
@@ -409,156 +522,3 @@ CREATE VIEW IF NOT EXISTS health_anomaly AS
   FROM node_ancestor a
   WHERE a.node_id = a.ancestor_id;
 
--- ----------------------------------------------------------------------------
--- Insert-views + INSTEAD OF triggers (id + created_at generation)
--- ----------------------------------------------------------------------------
-
--- Stateless uuid7 is inlined per-trigger rather than via the uuid7 view, so
--- generation is one statement. The monotonic node/edge path computes the id
--- from the volume's freshly-advanced watermark instead.
-
--- VOLUME ---------------------------------------------------------------------
-CREATE VIEW IF NOT EXISTS volume_new AS
-  SELECT volume_id, root_node_id, name, created_at, api_version, chunk_size, enc_mode FROM volume WHERE 0;
-
-CREATE TRIGGER IF NOT EXISTS volume_new_ins INSTEAD OF INSERT ON volume_new
-BEGIN
-  INSERT INTO volume (volume_id, root_node_id, name, created_at, api_version, chunk_size, wm_ts, wm_seq, enc_mode)
-  VALUES (
-    coalesce(NEW.volume_id, lower(printf('%s-%s-7%s-%s-%s',
-      substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 1, 8),
-      substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 9, 4),
-      substr(lower(hex(randomblob(2))), 2, 3),
-      substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2, 3),
-      lower(hex(randomblob(6)))))),
-    NEW.root_node_id, NEW.name,
-    coalesce(NEW.created_at, cast(unixepoch('subsec') * 1000 AS INTEGER)),
-    coalesce(NEW.api_version, 1),
-    coalesce(NEW.chunk_size, 1048576),
-    0, 0,
-    coalesce(NEW.enc_mode, 'none'));
-END;
-
--- NODE -----------------------------------------------------------------------
-CREATE VIEW IF NOT EXISTS node_new AS
-  SELECT node_id, type, name, created_at, modified_at, volume_id, metadata FROM node WHERE 0;
-
--- With a volume: monotonic id from the volume watermark.
-CREATE TRIGGER IF NOT EXISTS node_new_ins_vol INSTEAD OF INSERT ON node_new
-WHEN NEW.volume_id IS NOT NULL
-BEGIN
-  -- advance the watermark once (borrow 1ms on 12-bit counter overflow)
-  UPDATE volume SET wm_ts = c.nts, wm_seq = c.nseq
-  FROM (
-    WITH n (now) AS (SELECT cast(unixepoch('subsec') * 1000 AS INTEGER)),
-         cur AS (SELECT wm_ts AS t, wm_seq AS s FROM volume WHERE volume_id = NEW.volume_id)
-    SELECT
-      CASE WHEN max(n.now, cur.t) = cur.t AND cur.s + 1 >= 4096
-           THEN cur.t + 1 ELSE max(n.now, cur.t) END AS nts,
-      CASE WHEN max(n.now, cur.t) = cur.t
-           THEN (CASE WHEN cur.s + 1 >= 4096 THEN 0 ELSE cur.s + 1 END)
-           ELSE 0 END AS nseq
-    FROM n, cur
-  ) AS c
-  WHERE volume_id = NEW.volume_id;
-
-  -- mint id from the just-advanced watermark
-  INSERT INTO node (node_id, type, name, created_at, modified_at, volume_id, metadata)
-  SELECT
-    lower(printf('%s-%s-7%s-%s-%s',
-      substr(v.t, 1, 8), substr(v.t, 9, 4), printf('%03x', v.s),
-      substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2, 3),
-      lower(hex(randomblob(6))))),
-    NEW.type, NEW.name,
-    coalesce(NEW.created_at, cast(unixepoch('subsec') * 1000 AS INTEGER)),
-    coalesce(NEW.modified_at, NEW.created_at, cast(unixepoch('subsec') * 1000 AS INTEGER)),
-    NEW.volume_id, NEW.metadata
-  FROM (SELECT printf('%012x', wm_ts) AS t, wm_seq AS s FROM volume WHERE volume_id = NEW.volume_id) v;
-END;
-
--- Without a volume (import/recovery): stateless, non-monotonic; honors an
--- explicit node_id if supplied.
-CREATE TRIGGER IF NOT EXISTS node_new_ins_novol INSTEAD OF INSERT ON node_new
-WHEN NEW.volume_id IS NULL
-BEGIN
-  INSERT INTO node (node_id, type, name, created_at, modified_at, volume_id, metadata)
-  VALUES (
-    coalesce(NEW.node_id, lower(printf('%s-%s-7%s-%s-%s',
-      substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 1, 8),
-      substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 9, 4),
-      substr(lower(hex(randomblob(2))), 2, 3),
-      substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2, 3),
-      lower(hex(randomblob(6)))))),
-    NEW.type, NEW.name,
-    coalesce(NEW.created_at, cast(unixepoch('subsec') * 1000 AS INTEGER)),
-    coalesce(NEW.modified_at, NEW.created_at, cast(unixepoch('subsec') * 1000 AS INTEGER)),
-    NULL, NEW.metadata);
-END;
-
--- EDGE -----------------------------------------------------------------------
-CREATE VIEW IF NOT EXISTS edge_new AS
-  SELECT edge_id, from_id, to_id, volume_id, archived FROM edge WHERE 0;
-
-CREATE TRIGGER IF NOT EXISTS edge_new_ins INSTEAD OF INSERT ON edge_new
-BEGIN
-  UPDATE volume SET wm_ts = c.nts, wm_seq = c.nseq
-  FROM (
-    WITH n (now) AS (SELECT cast(unixepoch('subsec') * 1000 AS INTEGER)),
-         cur AS (SELECT wm_ts AS t, wm_seq AS s FROM volume WHERE volume_id = NEW.volume_id)
-    SELECT
-      CASE WHEN max(n.now, cur.t) = cur.t AND cur.s + 1 >= 4096
-           THEN cur.t + 1 ELSE max(n.now, cur.t) END AS nts,
-      CASE WHEN max(n.now, cur.t) = cur.t
-           THEN (CASE WHEN cur.s + 1 >= 4096 THEN 0 ELSE cur.s + 1 END)
-           ELSE 0 END AS nseq
-    FROM n, cur
-  ) AS c
-  WHERE volume_id = NEW.volume_id;
-
-  INSERT INTO edge (edge_id, from_id, to_id, volume_id, archived)
-  SELECT
-    lower(printf('%s-%s-7%s-%s-%s',
-      substr(v.t, 1, 8), substr(v.t, 9, 4), printf('%03x', v.s),
-      substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2, 3),
-      lower(hex(randomblob(6))))),
-    NEW.from_id, NEW.to_id, NEW.volume_id, coalesce(NEW.archived, 0)
-  FROM (SELECT printf('%012x', wm_ts) AS t, wm_seq AS s FROM volume WHERE volume_id = NEW.volume_id) v;
-END;
-
--- MOUNT ----------------------------------------------------------------------
-CREATE VIEW IF NOT EXISTS mount_new AS
-  SELECT mount_id, volume_id, mount_point, state, expires_at, created_at, N_m FROM mount WHERE 0;
-
-CREATE TRIGGER IF NOT EXISTS mount_new_ins INSTEAD OF INSERT ON mount_new
-BEGIN
-  INSERT INTO mount (mount_id, volume_id, mount_point, state, expires_at, created_at, N_m)
-  VALUES (
-    coalesce(NEW.mount_id, lower(printf('%s-%s-7%s-%s-%s',
-      substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 1, 8),
-      substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 9, 4),
-      substr(lower(hex(randomblob(2))), 2, 3),
-      substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2, 3),
-      lower(hex(randomblob(6)))))),
-    NEW.volume_id, NEW.mount_point, coalesce(NEW.state, 'new'), NEW.expires_at,
-    coalesce(NEW.created_at, cast(unixepoch('subsec') * 1000 AS INTEGER)),
-    coalesce(NEW.N_m, randomblob(16)));
-END;
-
--- LOCK -----------------------------------------------------------------------
-CREATE VIEW IF NOT EXISTS lock_new AS
-  SELECT lock_id, mount_id, node_id, read_count, write_count, expires_at, created_at FROM lock WHERE 0;
-
-CREATE TRIGGER IF NOT EXISTS lock_new_ins INSTEAD OF INSERT ON lock_new
-BEGIN
-  INSERT INTO lock (lock_id, mount_id, node_id, read_count, write_count, expires_at, created_at)
-  VALUES (
-    coalesce(NEW.lock_id, lower(printf('%s-%s-7%s-%s-%s',
-      substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 1, 8),
-      substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 9, 4),
-      substr(lower(hex(randomblob(2))), 2, 3),
-      substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2, 3),
-      lower(hex(randomblob(6)))))),
-    NEW.mount_id, NEW.node_id,
-    coalesce(NEW.read_count, 0), coalesce(NEW.write_count, 0),
-    NEW.expires_at, coalesce(NEW.created_at, cast(unixepoch('subsec') * 1000 AS INTEGER)));
-END;

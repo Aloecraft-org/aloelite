@@ -68,7 +68,7 @@ def mount(db):
 # --------------------------------------------------------------------------
 def test_create_volume_bootstraps_root(db):
     vol = ops.create_volume(db, "v")
-    assert vol.api_version == 1
+    assert vol.api_version == 2
     assert vol.root is not None
     # root is a container named '/'
     row = db.one("resolution.get_node", {"node": vol.root})

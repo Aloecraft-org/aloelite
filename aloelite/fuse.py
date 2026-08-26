@@ -151,10 +151,12 @@ class _OpenFile:
         # Idempotent: a second flush (another fh's RELEASE) is a no-op.
 
 
-def _perm_bits(info, default: int) -> int:
-    """Permission bits for a node: the octal string under the 'mode' metadata
-    key (NODE-6 convention, like symlink), else `default`. Masked to 0o7777 so
-    a malformed value can never smuggle in file-type bits."""
+def _mode_bits(info, default: int) -> int:
+    """Permission bits for a node: the era-2 mode column when set, else the
+    era-1 octal-string metadata convention, else `default`. Masked to 0o7777
+    so a malformed value can never smuggle in file-type bits."""
+    if info.mode is not None:
+        return info.mode & 0o7777
     raw = info.metadata.get("mode")
     if raw:
         try:
@@ -309,20 +311,27 @@ class AloeFuse(pyfuse3.Operations):
     def _attr(self, inode: int, info) -> pyfuse3.EntryAttributes:
         a = pyfuse3.EntryAttributes()
         a.st_ino = inode
-        is_dir = info.type.value == "container"
+        kind = info.type.value
+        is_dir = kind == "container"
         if is_dir:
-            a.st_mode = st_mod.S_IFDIR | _perm_bits(info, 0o777)
-        elif info.metadata.get("symlink"):
+            a.st_mode = st_mod.S_IFDIR | _mode_bits(info, 0o777)
+        elif kind == "symlink" or info.metadata.get("symlink"):
+            # era-2 first-class type; the metadata flag is the era-1 legacy
             a.st_mode = st_mod.S_IFLNK | 0o777
+        elif kind == "fifo":
+            a.st_mode = st_mod.S_IFIFO | _mode_bits(info, 0o666)
+        elif kind == "socket":
+            a.st_mode = st_mod.S_IFSOCK | _mode_bits(info, 0o666)
         else:
-            a.st_mode = st_mod.S_IFREG | _perm_bits(info, 0o666)
-        a.st_nlink = 2 if is_dir else 1
+            a.st_mode = st_mod.S_IFREG | _mode_bits(info, 0o666)
+        a.st_nlink = 2 if is_dir else max(info.nlink, 1)
         a.st_size = 0 if is_dir else info.size
-        a.st_uid = os.getuid()
-        a.st_gid = os.getgid()
-        a.st_mtime_ns = info.modified_at * 1_000_000
-        a.st_ctime_ns = info.created_at * 1_000_000
-        a.st_atime_ns = a.st_mtime_ns
+        a.st_uid = info.uid if info.uid is not None else os.getuid()
+        a.st_gid = info.gid if info.gid is not None else os.getgid()
+        # era 2: timestamps are stored in ns — no scaling, no precision loss
+        a.st_mtime_ns = info.modified_at
+        a.st_ctime_ns = info.ctime if info.ctime is not None else info.modified_at
+        a.st_atime_ns = info.atime if info.atime is not None else a.st_mtime_ns
         a.st_blksize = 512
         a.st_blocks = (a.st_size + 511) // 512
         # Stone 2: kernel caching on. 1s TTL bounds staleness from writers
@@ -621,7 +630,7 @@ class AloeFuse(pyfuse3.Operations):
                 raise _wrap(e)
         if fields.update_mtime:
             try:
-                self.m.set_mtime(self._n[inode], attr.st_mtime_ns // 1_000_000)
+                self.m.set_mtime(self._n[inode], attr.st_mtime_ns)
             except Exception as e:
                 raise _wrap(e)
         if fields.update_size:

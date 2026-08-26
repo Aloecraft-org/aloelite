@@ -37,7 +37,7 @@
 
 meta:
   templates_for: mount_api
-  version: 2             # 2: hosts supply created_at to every create_* (no SQL-side now)
+  version: 3             # 3: era-2 — host-minted :id on every create, ns timestamps, placement names
   bind_style: named            # ":name"
 
 # ----------------------------------------------------------------------------
@@ -50,7 +50,7 @@ resolution:
       SELECT n.node_id, n.type
       FROM active_edge ae
       JOIN node n ON n.node_id = ae.to_id
-      WHERE ae.from_id = :container AND n.name = :name
+      WHERE ae.from_id = :container AND coalesce(ae.name, n.name) = :name
       ORDER BY n.node_id DESC
       LIMIT 1
     params:
@@ -86,7 +86,7 @@ resolution:
           FROM active_edge ae
           JOIN node n ON n.node_id = ae.to_id
           WHERE ae.from_id = w.node_id
-            AND n.name = substr(w.rest, 1, instr(w.rest, '/') - 1)
+            AND coalesce(ae.name, n.name) = substr(w.rest, 1, instr(w.rest, '/') - 1)
         )
         WHERE w.rest <> '' AND w.node_id IS NOT NULL AND w.node_type = 'container'
       )
@@ -133,7 +133,11 @@ resolution:
     sql: |
       SELECT n.node_id, n.type, n.name, n.created_at,
              coalesce(n.modified_at, n.created_at) AS modified_at, n.volume_id,
-             c.size as size, json(n.metadata) AS metadata
+             c.size as size, json(n.metadata) AS metadata,
+             n.uid, n.gid, n.mode,
+             coalesce(n.atime, n.modified_at, n.created_at) AS atime,
+             coalesce(n.ctime, n.modified_at, n.created_at) AS ctime,
+             (SELECT count(*) FROM active_edge ae WHERE ae.to_id = n.node_id) AS nlink
       FROM node n
       LEFT JOIN content c ON c.node_id = n.node_id
       WHERE n.node_id = :node
@@ -363,8 +367,8 @@ mutation:
       id:          "NodeId minted by the host (D-1: MonotonicMint for in-volume, stateless for import)"
       type:        "'container' | 'entry'"
       name:        "node name"
-      created_at:  "ms epoch, supplied by the host (NODE-4: copy passes the source value; see create_mount note)"
-      modified_at: "ms epoch, or NULL to default to created_at"
+      created_at:  "ns epoch, supplied by the host (NODE-4: copy passes the source value; see create_mount note)"
+      modified_at: "ns epoch, or NULL to default to created_at"
       volume:      "VolumeId, or NULL for import/recovery"
       metadata:    "JSON string of a shallow {string:string} map, or NULL for empty (NODE-6)"
     returns: none
@@ -485,13 +489,14 @@ mutation:
 
   create_edge:
     sql: |
-      INSERT INTO edge (edge_id, from_id, to_id, volume_id)
-      VALUES (:id, :from_id, :to_id, :volume)
+      INSERT INTO edge (edge_id, from_id, to_id, volume_id, name)
+      VALUES (:id, :from_id, :to_id, :volume, :name)
     params:
       id:      "EdgeId minted by the host (D-1: same per-volume MonotonicMint as nodes)"
       from_id: "container NodeId (parent)"
       to_id:   "child NodeId"
       volume:  "VolumeId"
+      name:    "placement name override (D-5, hardlinks), or NULL to use the node's own name"
     returns: none
     consumed_by: [create_container, create_entry, move, copy, unpack]
     notes: >
@@ -500,6 +505,23 @@ mutation:
       rejects a second ACTIVE placement. Host should pre-check (check_type,
       check_cycle) for typed errors; the triggers/index are the backstop. The
       id is host-minted (doc/DECISIONS.md D-1); the caller already holds it.
+
+  archive_placement:
+    sql: |
+      UPDATE edge SET archived = 1
+      WHERE from_id = :parent AND to_id = :node AND archived = 0
+        AND coalesce(name, (SELECT name FROM node WHERE node_id = :node)) = :name
+    params:
+      parent: "container NodeId the path resolved through"
+      node:   "NodeId being detached"
+      name:   "the effective name the path walked"
+    returns: rowcount
+    consumed_by: [move, remove]
+    notes: >
+      D-5: detach ONE placement, identified the way the caller found it —
+      (parent, node, effective name) — so operating on one path of a
+      hardlinked node never touches its other placements. Retained for
+      recovery like archive_edge (PI-7).
 
   archive_edge:
     sql: |
@@ -529,7 +551,7 @@ mutation:
   set_modified_at:
     sql: |
       UPDATE node SET modified_at = :ts WHERE node_id = :node
-    params: { node: "NodeId", ts: "ms epoch to set as modified_at" }
+    params: { node: "NodeId", ts: "ns epoch to set as modified_at" }
     returns: rowcount
     consumed_by: [set_mtime]
     notes: >
@@ -538,13 +560,36 @@ mutation:
       directly — the triggers fire on name/version updates, not on
       modified_at itself, so no recursion.
 
-  rename_node:
+  rename_placement:
     sql: |
-      UPDATE node SET name = :name WHERE node_id = :node
+      UPDATE edge SET name = :name
+      WHERE from_id = :parent AND to_id = :node AND archived = 0
+        AND coalesce(name, (SELECT name FROM node WHERE node_id = :node)) = :old_name
+    params:
+      parent:   "container NodeId the path resolved through"
+      node:     "NodeId"
+      old_name: "the effective name the path walked (resolve_parent's final segment)"
+      name:     "new name"
+    returns: rowcount
+    consumed_by: [rename]
+    notes: >
+      D-5: rename is a placement operation (a directory entry edit, POSIX-style),
+      so it names THE EDGE the path walked — matched by (parent, node, old
+      effective name) so even a node linked twice into one container under two
+      names renames only the walked entry. Pair with rename_node_if_sole so a
+      single-placement node's own name follows along (the common case stays
+      era-1-identical, including the node_touch_name modified_at bump).
+
+  rename_node_if_sole:
+    sql: |
+      UPDATE node SET name = :name
+      WHERE node_id = :node
+        AND (SELECT count(*) FROM edge
+             WHERE to_id = :node AND archived = 0) = 1
     params: { node: "NodeId", name: "new name" }
     returns: rowcount
     consumed_by: [rename]
-    notes: "Fires node_touch_name -> bumps modified_at only if the name actually changed."
+    notes: "The node-name half of rename (see rename_placement). No-op for multi-placement (hardlinked) nodes, whose node.name is just the default for unnamed placements."
 
   set_metadata:
     sql: |
@@ -561,11 +606,12 @@ mutation:
 
   create_volume:
     sql: |
-      INSERT INTO volume_new (volume_id, name, created_at, chunk_size, enc_mode) VALUES (:id, :name, :created_at, :chunk_size, :enc_mode)
-    params: { id: "VolumeId, host-minted stateless uuid7 (D-1)", name: "volume name, or NULL", created_at: "ms epoch, supplied by the host (see create_mount note)", chunk_size: "per-volume chunk size in bytes (default 1048576)" }
+      INSERT INTO volume (volume_id, name, created_at, api_version, chunk_size, enc_mode)
+      VALUES (:id, :name, :created_at, 2, :chunk_size, :enc_mode)
+    params: { id: "VolumeId, host-minted stateless uuid7 (D-1)", name: "volume name, or NULL", created_at: "ns epoch, supplied by the host (see create_mount note)", chunk_size: "per-volume chunk size in bytes (default 1048576)" }
     returns: none
     consumed_by: [create_volume]
-    notes: "api_version defaults to the schema's current era. id is a host-minted stateless uuid7 (D-1). chunk_size is fixed here and immutable thereafter (CV-1)."
+    notes: "Direct base-table insert (era 2 retired the insert-views); wm_ts/wm_seq start at the table default (0, 0). api_version is the literal current era. chunk_size is fixed here and immutable thereafter (CV-1)."
 
   update_volume_crypto:
     sql: |
@@ -586,22 +632,24 @@ mutation:
 
   create_mount:
     sql: |
-      INSERT INTO mount_new (mount_id, volume_id, mount_point, expires_at, created_at, N_m)
-      VALUES (:id, :volume, :mount_point, :expires_at, :created_at, :n_m)
+      INSERT INTO mount (mount_id, volume_id, mount_point, expires_at, created_at, N_m, access, principal)
+      VALUES (:id, :volume, :mount_point, :expires_at, :created_at, :n_m, :access, :principal)
     params:
       id:          "MountId, host-minted stateless uuid7 (D-1)"
       volume:      "VolumeId the session binds to"
       mount_point: "NodeId anchoring the session (defaults to volume root)"
-      expires_at:  "ms epoch ttl, or NULL"
-      created_at:  "ms epoch of mount creation, supplied by the host"
+      expires_at:  "ns epoch ttl, or NULL"
+      created_at:  "ns epoch of mount creation, supplied by the host"
+      access:      "'ro' | 'rw' (D-4 mount policy; vocabulary guarded by mount_guard_access)"
+      principal:   "tenant/user identity for policy, or NULL"
     returns: none
     consumed_by: [mount]
     notes: >
       created_at comes from the host, never from SQL: SQL-side now() is a
       silent dependency on the host sqlite version (unixepoch('subsec')
       returns NULL below 3.42), and the templates are the cross-language
-      conformance surface, so every implementation must supply it. The
-      trigger's coalesce fallback remains but nothing may rely on it.
+      conformance surface, so every implementation must supply it. Direct
+      base-table insert (era 2); state defaults to 'new'.
 
   set_mount_state:
     sql: |
@@ -614,20 +662,20 @@ mutation:
   renew_mount:
     sql: |
       UPDATE mount SET expires_at = :expires_at WHERE mount_id = :mount
-    params: { mount: "MountId", expires_at: "new ms-epoch ttl" }
+    params: { mount: "MountId", expires_at: "new ns-epoch ttl" }
     returns: rowcount
     consumed_by: [renew_mount]
 
   create_lock:
     sql: |
-      INSERT INTO lock_new (lock_id, mount_id, node_id, expires_at, created_at)
+      INSERT INTO lock (lock_id, mount_id, node_id, expires_at, created_at)
       VALUES (:id, :mount, :node, :expires_at, :created_at)
     params:
       id:         "LockId, host-minted stateless uuid7 (D-1)"
       mount:      "MountId holding the lock"
       node:       "NodeId being locked"
-      expires_at: "ms epoch ttl, or NULL"
-      created_at: "ms epoch of lock creation, supplied by the host"
+      expires_at: "ns epoch ttl, or NULL"
+      created_at: "ns epoch of lock creation, supplied by the host"
     returns: none
     consumed_by: [write_all, open_write]
     notes: >

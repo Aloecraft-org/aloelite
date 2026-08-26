@@ -64,8 +64,8 @@ from .types import (
 )
 
 
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+def _now_ns() -> int:
+    return time.time_ns()
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ def _new_node(
             "name": name,
             # host-supplied, never SQL-side now (see create_mount template
             # note); None only arrives from callers preserving a source value
-            "created_at": created_at if created_at is not None else _now_ms(),
+            "created_at": created_at if created_at is not None else _now_ns(),
             "modified_at": modified_at,
             "volume": m.volume,
             "metadata": _meta_to_json(metadata),
@@ -156,10 +156,15 @@ def _new_node(
     return NodeId(nid)
 
 
-def _link(db: Db, m: _Mount, parent: NodeId, child: NodeId) -> str:
+def _link(
+    db: Db, m: _Mount, parent: NodeId, child: NodeId, name: str | None = None
+) -> str:
+    """Place `child` under `parent`. `name` is the D-5 placement-name
+    override — non-None only for hardlinks minted under a different name;
+    ordinary placements resolve through the node's own name."""
     return db.create_monotonic(
         "mutation.create_edge",
-        {"from_id": parent, "to_id": child, "volume": m.volume},
+        {"from_id": parent, "to_id": child, "volume": m.volume, "name": name},
     )
 
 
@@ -217,7 +222,7 @@ def create_volume(
             {
                 "id": vid,
                 "name": name,
-                "created_at": _now_ms(),
+                "created_at": _now_ns(),
                 "chunk_size": chunk_size,
                 "enc_mode": mode,
             },
@@ -228,7 +233,7 @@ def create_volume(
             {
                 "type": "container",
                 "name": "/",
-                "created_at": _now_ms(),
+                "created_at": _now_ns(),
                 "modified_at": None,
                 "volume": vid,
                 "metadata": None,
@@ -299,6 +304,9 @@ def mount(
     at: str = "/",
     ttl_ms: int | None = None,
     pin: bytes | None = None,
+    *,
+    access: str = "rw",
+    principal: str | None = None,
 ) -> MountId:
     """Open a mount on a volume, anchored at `at` (relative to the
     volume root). Returns the durable MountId.
@@ -317,7 +325,7 @@ def mount(
             raise NotFound("volume or its root not found", volume=volume)
         root = NodeId(crow["root_node_id"])
         anchor = resolve(db, root, at).node  # mount point within the volume
-        expires = _now_ms() + ttl_ms if ttl_ms is not None else None
+        expires = _now_ns() + ttl_ms * 1_000_000 if ttl_ms is not None else None
         mid = db.gen_id()
         n_m = crypto.new_mount_nonce()
         db.run(
@@ -327,8 +335,10 @@ def mount(
                 "volume": volume,
                 "mount_point": anchor,
                 "expires_at": expires,
-                "created_at": _now_ms(),
+                "created_at": _now_ns(),
                 "n_m": n_m,
+                "access": access,
+                "principal": principal,
             },
         )
 
@@ -381,7 +391,7 @@ def unmount(db: Db, mount: MountId) -> None:
 def renew_mount(db: Db, mount: MountId, ttl_ms: int | None = None) -> MountInfo:
     with db.txn():
         _require_mount(db, mount)  # existence guard; raises NotFound
-        expires = _now_ms() + ttl_ms if ttl_ms is not None else None
+        expires = _now_ns() + ttl_ms * 1_000_000 if ttl_ms is not None else None
         db.rowcount("mutation.renew_mount", {"mount": mount, "expires_at": expires})
     return mount_info(db, mount)
 
@@ -809,20 +819,28 @@ def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
         )
 
 
-def set_mtime(db: Db, mount: MountId, node: NodeId, ts_ms: int) -> None:
-    """Explicitly set a node's modified_at (utimens; archive/rsync timestamp
-    restoration). Id-addressed like stat_by_id."""
+def set_mtime(db: Db, mount: MountId, node: NodeId, ts_ns: int) -> None:
+    """Explicitly set a node's modified_at in ns (utimens; archive/rsync
+    timestamp restoration). Id-addressed like stat_by_id."""
     with db.txn():
         _require_mount(db, mount)
-        db.rowcount("mutation.set_modified_at", {"node": node, "ts": ts_ms})
+        db.rowcount("mutation.set_modified_at", {"node": node, "ts": ts_ns})
 
 
 def rename(db: Db, mount: MountId, path: str, name: str) -> None:
+    """Rename the placement the path walked (D-5). For a hardlinked node this
+    renames only that directory entry; the node's own name follows along only
+    while it has a single placement (the era-1-identical common case)."""
     with db.txn():
         m = _require_mount(db, mount)
         _require_name(name)
+        parent, old_name = resolve_parent(db, m.mount_point, path)
         node = resolve(db, m.mount_point, path).node
-        db.rowcount("mutation.rename_node", {"node": node, "name": name})
+        db.rowcount(
+            "mutation.rename_placement",
+            {"parent": parent, "node": node, "old_name": old_name, "name": name},
+        )
+        db.rowcount("mutation.rename_node_if_sole", {"node": node, "name": name})
 
 
 def set_metadata(db: Db, mount: MountId, path: str, metadata: dict[str, str]) -> None:
@@ -848,6 +866,7 @@ def move(db: Db, mount: MountId, src: str, dst: str) -> None:
         m = _require_mount(db, mount)
         found = resolve(db, m.mount_point, src)
         node, ntype = found.node, found.type
+        src_parent, src_name = resolve_parent(db, m.mount_point, src)
         parent, new_name = resolve_parent(db, m.mount_point, dst)
         _require_name(new_name)
         if ntype is NodeType.CONTAINER:
@@ -855,14 +874,23 @@ def move(db: Db, mount: MountId, src: str, dst: str) -> None:
                 "validation.check_cycle", {"moving": node, "new_parent": parent}
             ):
                 raise WouldCycle(moving=node, new_parent=parent)
-        old = db.one("resolution.get_active_parent", {"node": node})
-        if old is None:
+        # archive THE placement the src path walked (D-5): with hardlinks a
+        # node can hold several, and rename(2) moves one directory entry
+        moved = db.rowcount(
+            "mutation.archive_placement",
+            {"parent": src_parent, "node": node, "name": src_name},
+        )
+        if not moved:
             raise NotFound("node has no active placement to move", node=node)
-        db.rowcount("mutation.archive_edge", {"edge": old["edge_id"]})
-        _link(db, m, parent, node)
         cur = db.one("resolution.get_node", {"node": node})
-        if cur is not None and cur["name"] != new_name:
-            db.rowcount("mutation.rename_node", {"node": node, "name": new_name})
+        renamed = cur is not None and cur["name"] != new_name
+        _link(db, m, parent, node, name=new_name if renamed else None)
+        if renamed:
+            # keep the common (sole-placement) case era-1-identical: the
+            # node's own name follows the move; hardlinked nodes keep theirs
+            db.rowcount(
+                "mutation.rename_node_if_sole", {"node": node, "name": new_name}
+            )
 
 
 def remove(db: Db, mount: MountId, path: str) -> None:
@@ -1110,7 +1138,7 @@ def open_write(
                 "mount": mount,
                 "node": node_id,
                 "expires_at": None,
-                "created_at": _now_ms(),
+                "created_at": _now_ns(),
             },
         )
         cs = db.chunk_size_of(m.volume)

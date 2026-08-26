@@ -56,7 +56,66 @@ MIN_SQLITE = (3, 45)
 # shipped 'subsec' triggers to hosts that couldn't run them). Files stamped
 # with a NEWER era are refused with a clear error instead of being half-read.
 # Bump this whenever schema.sql changes any view, trigger, or table.
-SCHEMA_ERA = 1
+#
+# Era 2 (the 0.4 break-once migration): host-minted ids (D-1/D-2), ownership/
+# time columns and per-placement names, PI-1 narrowed to containers, NODE-2
+# widened, mount policy columns, xattrs, and TIMESTAMPS IN NANOSECONDS.
+# Table-shape changes beyond the derived-object refresh live in _MIGRATIONS:
+# each entry upgrades a file FROM era-1 (one below its key) and runs before
+# the executescript that rebuilds the derived objects. Steps must be
+# crash-idempotent -- a failure between migration and stamp reruns them.
+SCHEMA_ERA = 2
+
+# ms epochs stay below 1e15 until the year 33658; ns epochs passed 1e18 in
+# 2001. Any stored value under this bound is an unmigrated millisecond value,
+# which is what makes the x1e6 rewrite safe to rerun after a crash.
+_NS_BOUND = 10**15
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM pragma_table_info(?) WHERE name = ?", (table, column)
+        ).fetchone()
+        is not None
+    )
+
+
+def _migrate_to_era2(conn: sqlite3.Connection) -> None:
+    """Era 1 -> 2. Additive columns (guarded per-column so a crashed run can
+    rerun), the ms->ns value rewrite (guarded by _NS_BOUND), and the drop of
+    the era-1 PI-1 partial unique index (its narrowed replacement is the
+    edge_guard_single_parent trigger pair, rebuilt with the derived objects)."""
+    for table, column, decl in [
+        ("node", "uid", "INTEGER"),
+        ("node", "gid", "INTEGER"),
+        ("node", "mode", "INTEGER"),
+        ("node", "atime", "INTEGER"),
+        ("node", "ctime", "INTEGER"),
+        ("edge", "name", "TEXT"),
+        ("mount", "access", "TEXT NOT NULL DEFAULT 'rw'"),
+        ("mount", "principal", "TEXT"),
+    ]:
+        if not _column_exists(conn, table, column):
+            conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {decl}')
+    for table, column in [
+        ("node", "created_at"),
+        ("node", "modified_at"),
+        ("volume", "created_at"),
+        ("mount", "created_at"),
+        ("mount", "expires_at"),
+        ("lock", "created_at"),
+        ("lock", "expires_at"),
+    ]:
+        conn.execute(
+            f'UPDATE "{table}" SET "{column}" = "{column}" * 1000000 '
+            f'WHERE "{column}" IS NOT NULL AND "{column}" < {_NS_BOUND} '
+            f'AND "{column}" > 0'
+        )
+    conn.execute("DROP INDEX IF EXISTS edge_active_placement")
+
+
+_MIGRATIONS = {2: _migrate_to_era2}
 
 
 def _check_sqlite_capabilities(conn: sqlite3.Connection) -> None:
@@ -171,7 +230,24 @@ class Db:
                     f"this build understands {SCHEMA_ERA}). Upgrade aloelite "
                     f"to open it."
                 )
+            fresh = (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+                ).fetchone()
+                is None
+            )
             if era < SCHEMA_ERA:
+                # Table-shape migrations first (new columns, value rewrites),
+                # oldest era to newest, so the derived objects rebuilt below
+                # can reference the new columns. Each step is idempotent; the
+                # stamp at the end is what marks the whole upgrade done. A
+                # fresh file has no tables to migrate -- executescript below
+                # creates them era-current.
+                if not fresh:
+                    for target in range(max(era + 1, 2), SCHEMA_ERA + 1):
+                        step = _MIGRATIONS.get(target)
+                        if step is not None:
+                            step(conn)
                 # Derived objects belong to the installed version, not to the
                 # file's creation era: drop every view and trigger so the
                 # executescript below re-creates them from the CURRENT schema.

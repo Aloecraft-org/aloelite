@@ -663,7 +663,7 @@ def create_app(
                             "name": e.name,
                             "type": "dir" if is_dir else "file",
                             "size": 0 if is_dir else (st.size or 0),
-                            "mtime": st.modified_at / 1000.0,
+                            "mtime": st.modified_at / 1e9,
                         }
                     )
                 return jsonify(out), 200
@@ -1022,7 +1022,7 @@ def create_app(
                 name=vname or volume_id[:8],
                 fs_id=fs_id,
                 encrypted=(enc_mode != "none"),
-                created_at=(created_at or 0) / 1000.0,
+                created_at=(created_at or 0) / 1e9,
                 mounted=False,
                 mountpoint=None,
             )
