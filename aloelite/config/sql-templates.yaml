@@ -18,15 +18,14 @@
 #   * Result: every template below is static SQL. Mustache ({{ }}) is reserved
 #     for a future genuinely-structural variation; none is needed today.
 #
-# id RETRIEVAL
-#   last_insert_rowid() is NOT usable: an INSERT performed inside an INSTEAD OF
-#   trigger (our insert-views) does not update the connection's
-#   last_insert_rowid() once the view-insert returns. So:
-#     * node / edge ids are minted monotonically per volume in SQL; the row just
-#       inserted is the MAX uuid7 in that volume (single-owning-connection model
-#       => unambiguous). create_* then get_generated_*_id (volume-scoped max).
-#     * volume / mount / lock ids are stateless: the host SELECTs new_uuid7 and
-#       passes the id INTO the create explicitly, so no read-back is needed.
+# id GENERATION
+#   Ids are host-minted (doc/DECISIONS.md D-1/D-2); every create takes an
+#   explicit :id and the caller holds it before the INSERT — no read-back, no
+#   single-owning-connection requirement, one minting implementation per host
+#   language instead of one per SQL dialect.
+#     * node / edge ids come from the per-volume MonotonicMint (aloelite/ids.py),
+#       fenced by the volume's (wm_ts, wm_seq) high-water mark at attach.
+#     * volume / mount / lock ids are stateless uuid7s (no ordering promise).
 #
 # Field meanings per template:
 #   sql          - the statement
@@ -358,39 +357,24 @@ mutation:
 
   create_node:
     sql: |
-      INSERT INTO node_new (type, name, created_at, modified_at, volume_id, metadata)
-      VALUES (:type, :name, :created_at, :modified_at, :volume, jsonb(:metadata))
+      INSERT INTO node (node_id, type, name, created_at, modified_at, volume_id, metadata)
+      VALUES (:id, :type, :name, :created_at, coalesce(:modified_at, :created_at), :volume, jsonb(:metadata))
     params:
+      id:          "NodeId minted by the host (D-1: MonotonicMint for in-volume, stateless for import)"
       type:        "'container' | 'entry'"
       name:        "node name"
       created_at:  "ms epoch, supplied by the host (NODE-4: copy passes the source value; see create_mount note)"
       modified_at: "ms epoch, or NULL to default to created_at"
-      volume:      "VolumeId, or NULL for import/recovery (non-monotonic id)"
+      volume:      "VolumeId, or NULL for import/recovery"
       metadata:    "JSON string of a shallow {string:string} map, or NULL for empty (NODE-6)"
     returns: none
     consumed_by: [create_container, create_entry, copy, unpack, "volume bootstrap"]
     notes: >
-      Fires the INSTEAD OF id-generation trigger. With a non-null volume the id is
-      monotonic from that volume's watermark; with NULL it is stateless. Follow
-      immediately with get_generated_node_id on the same connection. metadata is
-      passed as a JSON string and stored as JSONB via jsonb(); NULL => empty map.
-
-  get_generated_node_id:
-    sql: |
-      SELECT node_id FROM node
-      WHERE volume_id = :volume
-      ORDER BY node_id DESC
-      LIMIT 1
-    params: { volume: "VolumeId the node was created in" }
-    returns: "{ node_id }"
-    consumed_by: [create_container, create_entry, copy, unpack, "volume bootstrap"]
-    notes: >
-      Retrieves the id minted by create_node. Generation is monotonic per volume,
-      so the newest node is the MAX uuid7 in that volume; under the single-owning-
-      connection model (ACC-1) that is unambiguously the row just inserted.
-      last_insert_rowid() does NOT work here: an INSERT inside an INSTEAD OF trigger
-      does not update the connection's last_insert_rowid() after the view-insert
-      returns. Threads the old->new id map in copy/unpack.
+      Direct base-table insert; the guard triggers (NODE-2 vocabulary) still
+      fire. The id is host-minted (doc/DECISIONS.md D-1) — the caller holds it
+      before the INSERT, so there is no read-back step and no single-owning-
+      connection requirement. metadata is passed as a JSON string and stored
+      as JSONB via jsonb(); NULL => empty map.
 
   create_content:
     sql: |
@@ -501,31 +485,21 @@ mutation:
 
   create_edge:
     sql: |
-      INSERT INTO edge_new (from_id, to_id, volume_id)
-      VALUES (:from_id, :to_id, :volume)
+      INSERT INTO edge (edge_id, from_id, to_id, volume_id)
+      VALUES (:id, :from_id, :to_id, :volume)
     params:
+      id:      "EdgeId minted by the host (D-1: same per-volume MonotonicMint as nodes)"
       from_id: "container NodeId (parent)"
       to_id:   "child NodeId"
       volume:  "VolumeId"
     returns: none
     consumed_by: [create_container, create_entry, move, copy, unpack]
     notes: >
-      Fires id generation (monotonic, same volume watermark as nodes) and the
-      guard triggers: EDGE-4 (from_id container) and PI-6 (volume match). PI-1's
-      partial unique index rejects a second ACTIVE placement. Host should
-      pre-check (check_type, check_cycle) for typed errors; the triggers/index are
-      the backstop. Follow with get_generated_edge_id if the id is needed.
-
-  get_generated_edge_id:
-    sql: |
-      SELECT edge_id FROM edge
-      WHERE volume_id = :volume
-      ORDER BY edge_id DESC
-      LIMIT 1
-    params: { volume: "VolumeId the edge was created in" }
-    returns: "{ edge_id }"
-    consumed_by: [move, copy, "pack (ordering)"]
-    notes: "Same monotonic max-in-volume retrieval as get_generated_node_id (last_insert_rowid is unreliable through insert-view triggers)." 
+      Direct base-table insert; the guard triggers still fire: EDGE-4 (from_id
+      container) and PI-6 (volume match). PI-1's active-placement uniqueness
+      rejects a second ACTIVE placement. Host should pre-check (check_type,
+      check_cycle) for typed errors; the triggers/index are the backstop. The
+      id is host-minted (doc/DECISIONS.md D-1); the caller already holds it.
 
   archive_edge:
     sql: |
@@ -585,31 +559,13 @@ mutation:
       column by design, so this does not bump modified_at. UPDATE OF name/payload
       fire touches; UPDATE OF metadata deliberately does not.
 
-  new_uuid7:
-    sql: |
-      SELECT lower(printf('%s-%s-7%s-%s-%s',
-        substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 1, 8),
-        substr(printf('%012x', cast(unixepoch('subsec') * 1000 AS INTEGER)), 9, 4),
-        substr(lower(hex(randomblob(2))), 2, 3),
-        substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2, 3),
-        lower(hex(randomblob(6)))
-      )) AS id
-    params: {}
-    returns: "{ id }"
-    consumed_by: [create_volume, mount, "lock creation"]
-    notes: >
-      Stateless uuid7 for volume/mount/lock (no ordering need). The host SELECTs an
-      id, then passes it explicitly to the create — keeping generation in SQL while
-      letting the host hold the id without a fragile read-back. node/edge use the
-      monotonic watermark path (create_* + get_generated_*_id) instead.
-
   create_volume:
     sql: |
       INSERT INTO volume_new (volume_id, name, created_at, chunk_size, enc_mode) VALUES (:id, :name, :created_at, :chunk_size, :enc_mode)
-    params: { id: "VolumeId from new_uuid7", name: "volume name, or NULL", created_at: "ms epoch, supplied by the host (see create_mount note)", chunk_size: "per-volume chunk size in bytes (default 1048576)" }
+    params: { id: "VolumeId, host-minted stateless uuid7 (D-1)", name: "volume name, or NULL", created_at: "ms epoch, supplied by the host (see create_mount note)", chunk_size: "per-volume chunk size in bytes (default 1048576)" }
     returns: none
     consumed_by: [create_volume]
-    notes: "api_version defaults to the schema's current era. id supplied by the host via new_uuid7. chunk_size is fixed here and immutable thereafter (CV-1)."
+    notes: "api_version defaults to the schema's current era. id is a host-minted stateless uuid7 (D-1). chunk_size is fixed here and immutable thereafter (CV-1)."
 
   update_volume_crypto:
     sql: |
@@ -633,7 +589,7 @@ mutation:
       INSERT INTO mount_new (mount_id, volume_id, mount_point, expires_at, created_at, N_m)
       VALUES (:id, :volume, :mount_point, :expires_at, :created_at, :n_m)
     params:
-      id:          "MountId from new_uuid7"
+      id:          "MountId, host-minted stateless uuid7 (D-1)"
       volume:      "VolumeId the session binds to"
       mount_point: "NodeId anchoring the session (defaults to volume root)"
       expires_at:  "ms epoch ttl, or NULL"
@@ -667,7 +623,7 @@ mutation:
       INSERT INTO lock_new (lock_id, mount_id, node_id, expires_at, created_at)
       VALUES (:id, :mount, :node, :expires_at, :created_at)
     params:
-      id:         "LockId from new_uuid7"
+      id:         "LockId, host-minted stateless uuid7 (D-1)"
       mount:      "MountId holding the lock"
       node:       "NodeId being locked"
       expires_at: "ms epoch ttl, or NULL"

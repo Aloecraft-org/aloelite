@@ -142,7 +142,6 @@ def _new_node(
 ) -> NodeId:
     nid = db.create_monotonic(
         "mutation.create_node",
-        "mutation.get_generated_node_id",
         {
             "type": type.value,
             "name": name,
@@ -160,7 +159,6 @@ def _new_node(
 def _link(db: Db, m: _Mount, parent: NodeId, child: NodeId) -> str:
     return db.create_monotonic(
         "mutation.create_edge",
-        "mutation.get_generated_edge_id",
         {"from_id": parent, "to_id": child, "volume": m.volume},
     )
 
@@ -227,7 +225,6 @@ def create_volume(
         # the root container is created with the volume so monotonic ids work
         root = db.create_monotonic(
             "mutation.create_node",
-            "mutation.get_generated_node_id",
             {
                 "type": "container",
                 "name": "/",
