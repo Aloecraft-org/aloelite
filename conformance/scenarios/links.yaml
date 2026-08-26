@@ -1,0 +1,114 @@
+# Hardlinks — PI-1 narrowed to containers (era 2, exercising EXT-1's
+# reserved relaxation): a non-container leaf may hold several active
+# placements, each with its own effective name (NODE-3: edge placement name,
+# else the node's own). unlink and rename are placement operations — they
+# touch the directory entry the path walked, never the node's other
+# placements.
+scenarios:
+  - scenario: a-hardlink-is-the-same-node-under-a-second-name
+    requirements: [PI-1, EXT-1, NODE-3]
+    description: >
+      link places the SAME node again — same identity, shared content in both
+      directions, and nlink counting active placements.
+    steps:
+      - op: create_entry
+        args: {path: /a, data: {utf8: "original"}}
+        bind: node
+      - op: link
+        args: {"from": /a, to: /b}
+      - op: stat
+        args: {path: /b}
+        expect: {id: {ref: node}, nlink: 2}
+      - op: write_all
+        args: {path: /b, data: {utf8: "written through b"}}
+      - op: read_all
+        args: {path: /a}
+        expect: {utf8: "written through b"}
+
+  - scenario: unlinking-one-placement-keeps-the-others
+    requirements: [PI-1, PI-7, EXT-1]
+    description: >
+      remove archives the placement the path walked. The node survives —
+      reachable, readable, nlink decremented — until no active placement
+      remains.
+    steps:
+      - op: create_entry
+        args: {path: /a, data: {utf8: "payload"}}
+      - op: link
+        args: {"from": /a, to: /b}
+      - op: remove
+        args: {path: /a}
+      - op: exists
+        args: {path: /a}
+        expect: false
+      - op: read_all
+        args: {path: /b}
+        expect: {utf8: "payload"}
+      - op: stat
+        args: {path: /b}
+        expect: {nlink: 1}
+
+  - scenario: renaming-one-placement-leaves-the-other-alone
+    requirements: [NODE-3, EXT-1]
+    description: >
+      rename edits the walked directory entry (a placement property), so a
+      hardlinked node keeps its other names untouched.
+    steps:
+      - op: create_container
+        args: {path: /d}
+      - op: create_entry
+        args: {path: /a, data: {utf8: "x"}}
+      - op: link
+        args: {"from": /a, to: /d/b}
+      - op: rename
+        args: {path: /d/b, name: c}
+      - op: read_all
+        args: {path: /d/c}
+        expect: {utf8: "x"}
+      - op: read_all
+        args: {path: /a}
+        expect: {utf8: "x"}
+
+  - scenario: a-link-carries-its-own-effective-name
+    requirements: [NODE-3, NODE-5]
+    description: >
+      The placement's name override is what resolution and listings see; the
+      node's own name stays what it was born with.
+    steps:
+      - op: create_container
+        args: {path: /d}
+      - op: create_entry
+        args: {path: /a, data: {utf8: "x"}}
+      - op: link
+        args: {"from": /a, to: /d/renamed}
+      - op: list
+        args: {path: /d}
+        expect:
+          - {name: renamed, type: entry, visible: true}
+
+  - scenario: containers-refuse-hardlinks
+    requirements: [PI-1, PI-4]
+    description: >
+      Single active parent for containers is what keeps the container graph
+      a tree (PI-4's cycle argument). POSIX refuses directory hardlinks for
+      the same reason.
+    steps:
+      - op: create_container
+        args: {path: /d}
+      - op: link
+        args: {"from": /d, to: /dlink}
+        raises: not_an_entry
+
+  - scenario: linking-over-an-existing-name-is-refused
+    requirements: [NODE-5, EXT-1]
+    description: >
+      link(2) semantics: an existing dst name is EEXIST, never a silent
+      shadow.
+    steps:
+      - op: create_entry
+        args: {path: /a, data: {utf8: "x"}}
+      - op: create_entry
+        args: {path: /b, data: {utf8: "y"}}
+      - op: link
+        args: {"from": /a, to: /b}
+        raises: already_exists

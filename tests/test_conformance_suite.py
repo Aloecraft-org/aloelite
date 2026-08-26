@@ -35,7 +35,7 @@ import yaml
 from aloelite import errors
 from aloelite import operations as ops
 from aloelite.db import Db
-from aloelite.types import WriteMode
+from aloelite.types import NodeType, Whence, WriteMode
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCENARIOS = _ROOT / "conformance" / "scenarios"
@@ -231,8 +231,21 @@ def _h_two_mounts_one_volume(
     )
 
 
+def _h_ro_and_rw_mounts(path: Path, setup: dict) -> tuple[Db, dict[str, str], list[Db]]:
+    """One volume, one connection, an rw mount and an ro mount (D-4: ro never
+    conflicts). The ro mount is what the policy scenarios operate through."""
+    db = _open(path)
+    volume = ops.create_volume(db, "conformance", setup.get("chunk_size", 1048576))
+    return (
+        db,
+        {"rw": ops.mount(db, volume.id), "ro": ops.mount(db, volume.id, access="ro")},
+        [],
+    )
+
+
 _HARNESSES = {
     "default": _h_default,
+    "ro_and_rw_mounts": _h_ro_and_rw_mounts,
     "attach_without_key": _h_attach_without_key,
     "keyed_cipher_plain_volume": _h_keyed_cipher_plain_volume,
     "two_entries_same_bytes_convergent": _same_bytes("convergent"),
@@ -248,7 +261,11 @@ _HARNESSES = {
 _INSPECTIONS = {"assert_pool_rows"}
 
 # Scenario args are spec-level strings; a few name closed enums.
-_ENUMS = {"mode": WriteMode}
+_ENUMS = {"mode": WriteMode, "whence": Whence, "type": NodeType}
+
+# The spec's descriptor parameter names, mapped onto Descriptor's signatures
+# (the spec says `len`; the Python file-like method says `n`).
+_FD_ARG_ALIASES = {"len": "n"}
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +286,7 @@ def _call(op: str, args: dict[str, Any], db: Db, mount: str, binds: dict) -> Any
     # projection mount-api.yaml's `streaming` note describes for every binding.
     if "fd" in args:
         target = args.pop("fd")
+        args = {_FD_ARG_ALIASES.get(k, k): v for k, v in args.items()}
         return getattr(target, op)(**args)
     fn = getattr(ops, op, None)
     assert fn is not None, f"no operations.{op}"

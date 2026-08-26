@@ -1,0 +1,81 @@
+# Descriptor coherence — the mount-level guarantees behind the 2026-08 FUSE
+# fixes, stated portably. The per-handle-snapshot model broke `git push` onto
+# a mount (index-pack reads a pack back through a second fd while writing);
+# the contract that fixed it is engine-level and every implementation owes
+# it: an open read descriptor tracks the COMMITTED version pointer per read
+# (CV-3 — the pointer is the sole definition of current bytes), and an
+# END-relative seek measures the CURRENT committed size, not the size at
+# open. Positions are preserved across a replace; only the bytes change.
+scenarios:
+  - scenario: a-read-descriptor-tracks-the-committed-version
+    requirements: [CV-3, IO-3]
+    description: >
+      Open a read descriptor, then atomically replace the entry's content
+      through the API. The already-open descriptor serves the NEW committed
+      bytes on its next read — it froze a position, never a version. (A
+      descriptor that snapshots (version, size) at open is exactly the bug
+      that returned truncated reads to a concurrent reader.)
+    steps:
+      - op: create_entry
+        args: {path: /f, data: {utf8: "version-one"}}
+      - op: open_read
+        args: {path: /f}
+        bind: reader
+      - op: read
+        args: {fd: {ref: reader}, len: 5}
+        expect: {utf8: "versi"}
+      - op: write_all
+        args: {path: /f, data: {utf8: "VERSION-TWO-LONGER"}}
+      - op: read
+        args: {fd: {ref: reader}, len: 100}
+        expect: {utf8: "ON-TWO-LONGER"}
+      - op: close
+        args: {fd: {ref: reader}}
+
+  - scenario: end-relative-seek-measures-the-current-size
+    requirements: [CV-3, IO-3]
+    description: >
+      SEEK_END is relative to the committed size at the moment of the seek.
+      A descriptor opened before a replace must not seek against the stale
+      size — that is the other half of the frozen-snapshot bug.
+    steps:
+      - op: create_entry
+        args: {path: /f, data: {utf8: "short"}}
+      - op: open_read
+        args: {path: /f}
+        bind: reader
+      - op: write_all
+        args: {path: /f, data: {utf8: "the-replacement-is-LONGER"}}
+      - op: seek
+        args: {fd: {ref: reader}, offset: -6, whence: end}
+      - op: read
+        args: {fd: {ref: reader}, len: 6}
+        expect: {utf8: "LONGER"}
+      - op: close
+        args: {fd: {ref: reader}}
+
+  - scenario: a-streaming-write-commits-at-close-not-before
+    requirements: [CV-3, CV-5, IO-3]
+    description: >
+      Bytes written through a streaming descriptor are staged, not visible:
+      the committed pointer advances only at close. A reader mid-stream sees
+      the old content in full; after close it sees the new content in full —
+      never a mixture.
+    steps:
+      - op: create_entry
+        args: {path: /f, data: {utf8: "old-content"}}
+      - op: open_write
+        args: {path: /f, mode: truncate}
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {utf8: "new-"}}
+      - op: write
+        args: {fd: {ref: writer}, data: {utf8: "content-entirely"}}
+      - op: read_all
+        args: {path: /f}
+        expect: {utf8: "old-content"}
+      - op: close
+        args: {fd: {ref: writer}}
+      - op: read_all
+        args: {path: /f}
+        expect: {utf8: "new-content-entirely"}

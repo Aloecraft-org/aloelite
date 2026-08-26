@@ -229,7 +229,7 @@ operations:
         EOF; returns the new size. Chunk alignment is preserved (an overwrite
         never shifts bytes), so untouched chunks either side carry by reference.
     link:
-      params:  { mount: MountId, src: Path, dst: Path }
+      params:  { mount: MountId, "from": Path, to: Path }
       returns: void
       flags:   { mutates: true, atomic: true, locks: false, addr: path }
       raises:  [not_found, not_an_entry, nameless, already_exists, mount_invalid]
