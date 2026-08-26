@@ -55,6 +55,11 @@ What landed, one line each (commit messages carry the detail):
 - **WAL fallback resolved** — see §4 below; `db.py` now probes the returned
   journal mode instead of trusting an exception.
 - **Benchmarks written** — `script/benchmark.py` and `doc/BENCHMARKS.md`.
+- **Manager HTTP contract extracted** — `manager/api-spec.yaml` plus
+  `manager/test_api_spec.py`, which projects it onto the live Flask url_map
+  and fails in both drift directions (both verified by deliberately
+  introducing each). This is the artifact a second-language manager
+  implements against; it ships in the wheel.
 
 ## 3. Work queue for the next session
 
@@ -64,17 +69,25 @@ In rough priority order; none blocks the others.
    asks (do not open unasked), and handle review feedback. It is a large
    diff; the commit sequence is the review path — each commit is one
    coherent workstream with a full message.
-2. **Manager, next steps** (`manager/README.md` sketches these): extract
-   the HTTP route inventory into a spec file the way `mount-api.yaml` did
-   for the engine — that is the piece that makes a second-language manager
-   possible, and it is the natural next chunk of work. Then consider
-   splitting `api.py` (1,100 lines) into route modules per resource; the
-   repo split itself stays mechanical and is not urgent.
-3. **Benchmarks on real hardware.** The numbers in `doc/BENCHMARKS.md` were
+2. **Benchmarks on real hardware.** The numbers in `doc/BENCHMARKS.md` were
    taken in a containerized VM whose throughput varies by multiples between
    runs; the doc says so and reports ranges. The *ratios* are sound, the
    absolute figures are not. Rerun `script/benchmark.py --fuse` on a real
    machine before quoting any absolute number in release material.
+3. **Manager, remaining steps.** The HTTP contract is now extracted
+   (`manager/api-spec.yaml`); what is left is optional and not urgent:
+   splitting `api.py` (1,100 lines) into route modules per resource, and
+   the repo extraction itself, which `manager/README.md` describes as
+   mechanical once someone wants it. A useful smaller piece: the spec
+   records status codes per route but nothing asserts the codes, only the
+   route table — extending `test_api_spec.py` to check a few high-traffic
+   responses against the spec would close that gap.
+4. **Other unchecked PRAGMAs** (the generalization of the WAL finding in
+   §4). `foreign_keys` was the obvious suspect and has been **checked — it
+   is genuinely on and violations raise `IntegrityError`**, so that one is
+   clear. `busy_timeout` remains unverified; it fails soft (a busy database
+   raises instead of waiting) which is visible rather than silent, so it is
+   low priority. Worth a sweep if anyone touches connection setup.
 
 Owner-side (needs PyPI credentials, not automatable):
 - Review the branch; publish `0.4.0rc1`.
