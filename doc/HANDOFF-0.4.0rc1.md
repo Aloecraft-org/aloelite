@@ -40,34 +40,41 @@ What landed, one line each (commit messages carry the detail):
   (language-agnostic asset bundle) / `manager/engine/` (Python adapters);
   boundary rules in `manager/README.md`. All git-mv, history intact.
 
-## 2. Work queue for the next session
+## 2. Verified since the RC bump
+
+- **CI is green on the branch** — dispatched against
+  `claude/aloelite-v0.4-status-gz58qx`, all five jobs pass (`lint`,
+  `test` on 3.11 and 3.12, `sqlite-floor` at pinned 3.45.0,
+  `sqlite-too-old` on Debian 12). Two things worth knowing: the lint job
+  runs `ruff format --check` as well as `ruff check`, and **the FUSE tests
+  genuinely run on GitHub runners** — `336 passed`, zero skips, so
+  `doc/COMPATIBILITY.md`'s "verified in CI" claim is real rather than
+  quietly skipped. Re-dispatch with `actions_run_trigger` (the workflow is
+  `workflow_dispatch`-enabled) after any further push; feature branches
+  get no automatic runs.
+- **WAL fallback resolved** — see §4 below; `db.py` now probes the returned
+  journal mode instead of trusting an exception.
+- **Benchmarks written** — `script/benchmark.py` and `doc/BENCHMARKS.md`.
+
+## 3. Work queue for the next session
 
 In rough priority order; none blocks the others.
 
-1. **Verify CI on the branch.** Everything passes locally, including with
-   `[fuse]`, but the four workflow jobs (`lint`, `test`, `sqlite-floor` at
-   pinned 3.45.0, `sqlite-too-old` on Debian 12) have not been eyeballed on
-   these commits. Era 2 introduces no new sqlite features (jsonb/subsec were
-   already the floor), so surprises are unlikely — check anyway, fix
-   anything red.
-2. **Open the PR** for `claude/aloelite-v0.4-status-gz58qx` when the owner
+1. **Open the PR** for `claude/aloelite-v0.4-status-gz58qx` when the owner
    asks (do not open unasked), and handle review feedback. It is a large
    diff; the commit sequence is the review path — each commit is one
    coherent workstream with a full message.
-3. **Benchmarks** (old handoff §8 item 7, the one unfinished item). Useful
-   for release notes: cold/warm read and write throughput vs a plain
-   directory, plus the single-query resolver vs the old per-segment fold on
-   a deep path.
-4. **Manager, next steps** (`manager/README.md` sketches these): extract
+2. **Manager, next steps** (`manager/README.md` sketches these): extract
    the HTTP route inventory into a spec file the way `mount-api.yaml` did
-   for the engine; consider splitting `api.py` (1,100 lines) into route
-   modules per resource; the repo split itself stays mechanical and is not
-   urgent.
-5. **Candidate cleanup**: `db.py` falls back WAL→PERSIST when the backing
-   file sits on an aloelite mount, but the mount now passes sqlite-WAL
-   two-process tests (`test_sqlite_wal_concurrent_second_process`), so the
-   fallback may be obsolete. Retest nested-aloelite specifically before
-   removing it.
+   for the engine — that is the piece that makes a second-language manager
+   possible, and it is the natural next chunk of work. Then consider
+   splitting `api.py` (1,100 lines) into route modules per resource; the
+   repo split itself stays mechanical and is not urgent.
+3. **Benchmarks on real hardware.** The numbers in `doc/BENCHMARKS.md` were
+   taken in a containerized VM whose throughput varies by multiples between
+   runs; the doc says so and reports ranges. The *ratios* are sound, the
+   absolute figures are not. Rerun `script/benchmark.py --fuse` on a real
+   machine before quoting any absolute number in release material.
 
 Owner-side (needs PyPI credentials, not automatable):
 - Review the branch; publish `0.4.0rc1`.
@@ -76,7 +83,7 @@ Owner-side (needs PyPI credentials, not automatable):
   (additive columns + ms→ns rescale, crash-idempotent, no other table
   data touched); era-2 files refuse to open in older builds by design.
 
-## 3. Traps discovered this session
+## 4. Traps discovered this session
 
 - **The moment `link()` exists, git uses it** (object finalization tries
   link-then-unlink before falling back to rename). That instantly exposed
@@ -99,8 +106,21 @@ Owner-side (needs PyPI credentials, not automatable):
 - **sed across schema.sql is dangerous** — a broad timestamp substitution
   briefly rewrote expressions inside trigger bodies that happened to be
   deleted anyway. Prefer targeted edits on schema files.
+- **`PRAGMA journal_mode` reports failure by RETURN VALUE, not by raising.**
+  A mode sqlite cannot honor comes back as the unchanged mode with no
+  exception (`:memory:` answers `'memory'`), so `db.py`'s old
+  `try/except OperationalError` around the WAL request never fired on the
+  case its own comment named. Same silent-failure family as
+  `unixepoch('subsec')`. The rule this codebase keeps relearning: **probe
+  the result, never the exception.** Worth a grep for other PRAGMAs whose
+  success is assumed rather than checked.
+- **A benchmark without cache control measures the page cache.** The first
+  content benchmark showed raw writes at 185–3410 MB/s across runs because
+  nothing was fsynced; encrypted reads appeared *faster* than plain ones.
+  Fsync writes, `POSIX_FADV_DONTNEED` before reads, report medians with
+  ranges — and on a shared/virtualized host, trust ratios over absolutes.
 
-## 4. Properties to keep protecting
+## 5. Properties to keep protecting
 
 Unchanged from the previous handoff and still true: content-addressed
 immutable chunks, host-side encryption, the conformance suite doing
