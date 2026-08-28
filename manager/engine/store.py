@@ -1,7 +1,7 @@
-# ./manager/store.py
+# ./manager/engine/store.py
 # License: Apache-2.0 (disclaimer at bottom of file)
 """
-manager.store — volume metadata persistence.
+manager.engine.store — volume metadata persistence.
 
 All volume metadata is accessed exclusively through the VolumeStore interface;
 no other component reads or writes metadata directly. The initial backend is a

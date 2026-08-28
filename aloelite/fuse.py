@@ -52,7 +52,7 @@ import trio
 
 import aloelite.errors as aloe_errors
 from aloelite.aloelite import Aloelite
-from aloelite.types import Whence, WriteMode
+from aloelite.types import NodeType, Whence, WriteMode
 
 
 def _version() -> str:
@@ -151,10 +151,12 @@ class _OpenFile:
         # Idempotent: a second flush (another fh's RELEASE) is a no-op.
 
 
-def _perm_bits(info, default: int) -> int:
-    """Permission bits for a node: the octal string under the 'mode' metadata
-    key (NODE-6 convention, like symlink), else `default`. Masked to 0o7777 so
-    a malformed value can never smuggle in file-type bits."""
+def _mode_bits(info, default: int) -> int:
+    """Permission bits for a node: the era-2 mode column when set, else the
+    era-1 octal-string metadata convention, else `default`. Masked to 0o7777
+    so a malformed value can never smuggle in file-type bits."""
+    if info.mode is not None:
+        return info.mode & 0o7777
     raw = info.metadata.get("mode")
     if raw:
         try:
@@ -178,8 +180,12 @@ _ERRNO = {
     "NotAContainer": errno.ENOTDIR,
     "NotAnEntry": errno.EISDIR,
     "NotEmpty": errno.ENOTEMPTY,
+    "AlreadyExists": errno.EEXIST,
+    "ContainerExists": errno.EEXIST,
     "Nameless": errno.EINVAL,
     "LockHeld": errno.EAGAIN,
+    "ReadOnlyMount": errno.EROFS,
+    "MountConflict": errno.EBUSY,
     "WouldCycle": errno.EINVAL,
     "VolumeMismatch": errno.EXDEV,
     "MountInvalid": errno.EIO,
@@ -309,20 +315,27 @@ class AloeFuse(pyfuse3.Operations):
     def _attr(self, inode: int, info) -> pyfuse3.EntryAttributes:
         a = pyfuse3.EntryAttributes()
         a.st_ino = inode
-        is_dir = info.type.value == "container"
+        kind = info.type.value
+        is_dir = kind == "container"
         if is_dir:
-            a.st_mode = st_mod.S_IFDIR | _perm_bits(info, 0o777)
-        elif info.metadata.get("symlink"):
+            a.st_mode = st_mod.S_IFDIR | _mode_bits(info, 0o777)
+        elif kind == "symlink" or info.metadata.get("symlink"):
+            # era-2 first-class type; the metadata flag is the era-1 legacy
             a.st_mode = st_mod.S_IFLNK | 0o777
+        elif kind == "fifo":
+            a.st_mode = st_mod.S_IFIFO | _mode_bits(info, 0o666)
+        elif kind == "socket":
+            a.st_mode = st_mod.S_IFSOCK | _mode_bits(info, 0o666)
         else:
-            a.st_mode = st_mod.S_IFREG | _perm_bits(info, 0o666)
-        a.st_nlink = 2 if is_dir else 1
+            a.st_mode = st_mod.S_IFREG | _mode_bits(info, 0o666)
+        a.st_nlink = 2 if is_dir else max(info.nlink, 1)
         a.st_size = 0 if is_dir else info.size
-        a.st_uid = os.getuid()
-        a.st_gid = os.getgid()
-        a.st_mtime_ns = info.modified_at * 1_000_000
-        a.st_ctime_ns = info.created_at * 1_000_000
-        a.st_atime_ns = a.st_mtime_ns
+        a.st_uid = info.uid if info.uid is not None else os.getuid()
+        a.st_gid = info.gid if info.gid is not None else os.getgid()
+        # era 2: timestamps are stored in ns — no scaling, no precision loss
+        a.st_mtime_ns = info.modified_at
+        a.st_ctime_ns = info.ctime if info.ctime is not None else info.modified_at
+        a.st_atime_ns = info.atime if info.atime is not None else a.st_mtime_ns
         a.st_blksize = 512
         a.st_blocks = (a.st_size + 511) // 512
         # Stone 2: kernel caching on. 1s TTL bounds staleness from writers
@@ -411,7 +424,7 @@ class AloeFuse(pyfuse3.Operations):
             node = self.m.create_entry(path, b"")
             perms = mode & 0o7777
             if perms and perms != 0o666:
-                self.m.set_metadata(path, {"mode": format(perms, "o")})
+                self.m.set_owner(path, mode=perms)
             ino = self._remember(node)
             fh = self._next_fh()
             acc = flags & os.O_ACCMODE
@@ -448,14 +461,93 @@ class AloeFuse(pyfuse3.Operations):
         base = self._path(parent_inode).rstrip("/")
         path = f"{base}/{os.fsdecode(name)}"
         try:
-            # Convention (no schema change): an ordinary entry whose content is
-            # the target path, flagged via NODE-6 metadata. Round-trips through
-            # copy/pack/unpack for free.
-            node = self.m.create_entry(path, os.fsencode(os.fsdecode(target)))
-            self.m.set_metadata(path, {"symlink": "1"})
+            # era 2: first-class symlink type; the content is the target.
+            # (Era-1 files used an entry + NODE-6 'symlink' metadata flag,
+            # which _attr still honors on read.)
+            node = self.m.create_special(
+                path, NodeType.SYMLINK, os.fsencode(os.fsdecode(target))
+            )
             return self._attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
+
+    async def link(self, inode, new_parent_inode, new_name, ctx):
+        """Hardlink (era 2 / D-5): a second active placement of the node."""
+        base = self._path(new_parent_inode).rstrip("/")
+        try:
+            self.m.hardlink(self._path(inode), f"{base}/{os.fsdecode(new_name)}")
+            return self._attr(inode, self.m.stat_by_id(self._n[inode]))
+        except Exception as e:
+            raise _wrap(e)
+
+    async def mknod(self, parent_inode, name, mode, rdev, ctx):
+        """FIFOs and sockets only. Device nodes are refused by decision (D-3):
+        a data filesystem storing device nodes is a security surface with no
+        identified use case."""
+        if st_mod.S_ISBLK(mode) or st_mod.S_ISCHR(mode):
+            raise pyfuse3.FUSEError(errno.EPERM)
+        base = self._path(parent_inode).rstrip("/")
+        path = f"{base}/{os.fsdecode(name)}"
+        try:
+            if st_mod.S_ISFIFO(mode):
+                node = self.m.create_special(path, NodeType.FIFO)
+            elif st_mod.S_ISSOCK(mode):
+                node = self.m.create_special(path, NodeType.SOCKET)
+            else:  # S_IFREG (or unspecified): mknod can make regular files
+                node = self.m.create_entry(path, b"")
+            perms = mode & 0o7777
+            if perms:
+                self.m.set_owner(path, mode=perms)
+            return self._attr(self._remember(node), self.m.stat_by_id(node))
+        except Exception as e:
+            raise _wrap(e)
+
+    # -- xattrs (era 2). user.* only: security./trusted./system. namespaces
+    # carry kernel-enforced semantics this filesystem does not implement, so
+    # storing them would be a lie the kernel acts on. ENOTSUP per convention.
+    def _xattr_name(self, name) -> str:
+        decoded = os.fsdecode(name)
+        if not decoded.startswith("user."):
+            raise pyfuse3.FUSEError(errno.ENOTSUP)
+        return decoded
+
+    async def setxattr(self, inode, name, value, ctx):
+        try:
+            self.m.set_xattr(self._path(inode), self._xattr_name(name), bytes(value))
+        except pyfuse3.FUSEError:
+            raise
+        except Exception as e:
+            raise _wrap(e)
+
+    async def getxattr(self, inode, name, ctx):
+        decoded = self._xattr_name(name)
+        try:
+            value = self.m.get_xattr(self._path(inode), decoded)
+        except pyfuse3.FUSEError:
+            raise
+        except Exception as e:
+            raise _wrap(e)
+        if value is None:
+            raise pyfuse3.FUSEError(errno.ENODATA)
+        return value
+
+    async def listxattr(self, inode, ctx):
+        try:
+            names = self.m.list_xattrs(self._path(inode))
+        except Exception as e:
+            raise _wrap(e)
+        return [os.fsencode(n) for n in names]
+
+    async def removexattr(self, inode, name, ctx):
+        decoded = self._xattr_name(name)
+        try:
+            removed = self.m.remove_xattr(self._path(inode), decoded)
+        except pyfuse3.FUSEError:
+            raise
+        except Exception as e:
+            raise _wrap(e)
+        if not removed:
+            raise pyfuse3.FUSEError(errno.ENODATA)
 
     async def readlink(self, inode, ctx):
         try:
@@ -610,18 +702,25 @@ class AloeFuse(pyfuse3.Operations):
             raise _wrap(e)
 
     async def setattr(self, inode, attr, fields, fh, ctx):
-        # size, mtime, and mode are honored; uid/gid accepted silently
-        if fields.update_mode:
+        # era 2: size, mode, uid, gid, mtime, atime all land in real columns
+        if fields.update_mode or fields.update_uid or fields.update_gid:
             try:
-                info = self.m.stat_by_id(self._n[inode])
-                meta = dict(info.metadata)  # merge: preserve symlink & friends
-                meta["mode"] = format(attr.st_mode & 0o7777, "o")
-                self.m.set_metadata(self._path(inode), meta)
+                self.m.set_owner(
+                    self._path(inode),
+                    mode=(attr.st_mode & 0o7777) if fields.update_mode else None,
+                    uid=attr.st_uid if fields.update_uid else None,
+                    gid=attr.st_gid if fields.update_gid else None,
+                )
             except Exception as e:
                 raise _wrap(e)
         if fields.update_mtime:
             try:
-                self.m.set_mtime(self._n[inode], attr.st_mtime_ns // 1_000_000)
+                self.m.set_mtime(self._n[inode], attr.st_mtime_ns)
+            except Exception as e:
+                raise _wrap(e)
+        if fields.update_atime:
+            try:
+                self.m.set_atime(self._n[inode], attr.st_atime_ns)
             except Exception as e:
                 raise _wrap(e)
         if fields.update_size:
@@ -754,6 +853,23 @@ async def _watch_stop(stop_event, interval: float = 0.2) -> None:
     pyfuse3.terminate()
 
 
+# The daemon's engine mount carries a ttl and renews it while alive (ACC-3),
+# so a crashed daemon's mount row EXPIRES instead of blocking the volume's
+# rw-per-subtree admission (D-4) forever. Same trio loop as the handlers, so
+# the shared connection is never used concurrently.
+_MOUNT_TTL_MS = 300_000
+_RENEW_EVERY_S = 60.0
+
+
+async def _renew_mount(mount, interval: float = _RENEW_EVERY_S) -> None:
+    while True:
+        await trio.sleep(interval)
+        try:
+            mount.renew(_MOUNT_TTL_MS)
+        except Exception:
+            pass  # transient (db busy, teardown race); next tick retries
+
+
 async def fuse_main(
     sqlite_path: str,
     volume_name: str,
@@ -764,6 +880,7 @@ async def fuse_main(
     allow_other: bool = True,
     debug: bool = False,
     create: bool = False,
+    access: str = "rw",
 ) -> None:
     """Mount one Aloelite volume at `mountpoint` and serve FUSE until the mount
     is torn down (external `fusermount3 -uz`, or `stop_event` being set).
@@ -779,11 +896,17 @@ async def fuse_main(
     fs = Aloelite(sqlite_path)
     try:
         vol_id = _find_or_create_volume(fs, volume_name, pin=pin, create=create)
-        mount = fs.mount(vol_id, pin=pin).__enter__()
+        mount = fs.mount(
+            vol_id, pin=pin, access=access, ttl_ms=_MOUNT_TTL_MS
+        ).__enter__()
         try:
             ops = AloeFuse(mount)
             opts = set(pyfuse3.default_options)
             opts.add("fsname=aloefuse")
+            if access == "ro":
+                # both belts: the kernel refuses writes at the VFS, and the
+                # engine's D-4 gate refuses anything that slips past (EROFS)
+                opts.add("ro")
             if allow_other:
                 # consumer containers run as other UIDs; without this they can't
                 # read the mount (the single most common silent failure here).
@@ -792,13 +915,12 @@ async def fuse_main(
                 opts.add("debug")
             pyfuse3.init(ops, mountpoint, opts)
             try:
-                if stop_event is not None:
-                    async with trio.open_nursery() as nursery:
+                async with trio.open_nursery() as nursery:
+                    nursery.start_soon(_renew_mount, mount)
+                    if stop_event is not None:
                         nursery.start_soon(_watch_stop, stop_event)
-                        await pyfuse3.main()
-                        nursery.cancel_scope.cancel()  # main returned: stop watcher
-                else:
                     await pyfuse3.main()
+                    nursery.cancel_scope.cancel()  # main returned: stop helpers
             finally:
                 pyfuse3.close(unmount=True)
         finally:
@@ -856,6 +978,11 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         help="create the volume if it does not exist (off by default)",
     )
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument(
+        "--ro",
+        action="store_true",
+        help="mount read-only (a D-4 'ro' engine mount; kernel ro option too)",
+    )
     ap.add_argument(
         "--allow-other",
         action="store_true",
@@ -920,6 +1047,7 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         allow_other=args.allow_other,
         debug=args.debug,
         create=args.create,
+        access="ro" if args.ro else "rw",
     )
     try:
         trio.run(runner)

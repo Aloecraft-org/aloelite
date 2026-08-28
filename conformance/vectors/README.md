@@ -1,5 +1,10 @@
 # Format vectors
 
+`ids-v1.json` pins the host-minting contract (doc/DECISIONS.md D-1/D-2):
+the uuid7 layout's deterministic prefix and the MonotonicMint state machine
+(advance, 1ms borrow on overflow, clock-regression absorption, and the
+high-water-mark fence). Runner: tests/test_ids.py::test_conformance_id_vectors.
+
 `format-v1.json` pins the byte-level contract: content addressing, chunking,
 and the ENC-2 key ladder. Fixed inputs in, exact bytes out.
 

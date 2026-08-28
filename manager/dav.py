@@ -109,8 +109,8 @@ from flask import Blueprint, Response, request
 
 from . import errors as merr
 from .davlock import MAX_TIMEOUT, LockConflict, LockRegistry, parse_if
-from .direct import FRONTEND_DIRECT, DirectSessionRegistry
-from .store import VolumeRecord, VolumeStore
+from .engine.direct import FRONTEND_DIRECT, DirectSessionRegistry
+from .engine.store import VolumeRecord, VolumeStore
 
 DAV_NS = "DAV:"
 
@@ -164,16 +164,16 @@ _LIVE = frozenset(
 # ===========================================================================
 # Small helpers
 # ===========================================================================
-def _rfc1123(ms: int) -> str:
+def _rfc1123(ns: int) -> str:
     """getlastmodified is HTTP-date (RFC 1123), per RFC 4918 15.7 -- NOT the
     ISO 8601 that creationdate uses. Clients do notice."""
-    return formatdate(ms / 1000.0, usegmt=True)
+    return formatdate(ns / 1_000_000_000.0, usegmt=True)
 
 
-def _iso8601(ms: int) -> str:
+def _iso8601(ns: int) -> str:
     """creationdate is ISO 8601 (RFC 4918 15.1)."""
     return (
-        datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+        datetime.fromtimestamp(ns / 1_000_000_000.0, tz=timezone.utc)
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z")
     )
@@ -183,7 +183,7 @@ def _etag(info) -> str:
     """A STRONG validator wherever the engine can back one.
 
     content.version is the CV-3 committed version pointer: it advances on
-    every commit, so unlike modified_at -- milliseconds, and demonstrably
+    every commit, so unlike modified_at -- a clock reading, demonstrably
     capable of aliasing two writes in one tick -- it identifies content
     exactly. That distinction is not cosmetic. If-Match and If-Range both
     require STRONG comparison (RFC 9110 8.8.3.2), and a weak validator can

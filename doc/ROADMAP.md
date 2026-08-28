@@ -81,7 +81,7 @@ CodeMirror 6 is ESM-only: its npm `exports` offers `import` and `require` and
 nothing else, and the `codemirror` package is a meta-package over seven ESM
 `@codemirror/*` packages. There is no UMD or IIFE build. Adopting it means
 adopting a bundler, which the manager has so far avoided on purpose — see
-`manager/static/VENDOR.md` for why.
+`manager/ui/static/VENDOR.md` for why.
 
 Prism was chosen instead and covers the actual need (read-and-tweak editing
 of config and code files) at 64 KB with no build step. What Prism does not
@@ -92,13 +92,13 @@ textarea above it.
 
 **Pick this up when** the manager becomes somewhere people write code rather
 than adjust it, or when the 100 KB cap starts being hit in practice. When it
-happens, do the bundler properly: `manager/static` is package data shipped in
+happens, do the bundler properly: `manager/ui/static` is package data shipped in
 the wheel, so build output has to be either committed or generated at package
 time, and the release path must not require a Node toolchain.
 
 ## 5. Splitting `admin.html` further
 
-The Alpine component moved out to `manager/static/admin.js`, which was free —
+The Alpine component moved out to `manager/ui/static/admin.js`, which was free —
 it contained no Jinja, so it lifted verbatim. The template is now markup plus
 a `<style>` block.
 

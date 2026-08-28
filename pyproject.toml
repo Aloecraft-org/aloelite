@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aloelite"
-version = "0.3.6rc1"
+version = "0.4.0rc1"
 description = "Aloelite SQLite Filesystem"
 readme = "README.md"
 authors = [
@@ -62,7 +62,7 @@ include = ["aloelite*", "manager*"]
 
 [tool.setuptools.package-data]
 aloelite = ["config/*.yaml", "sql/*.sql"]
-manager = ["templates/*.html", "static/*"]
+manager = ["ui/templates/*.html", "ui/static/*", "api-spec.yaml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -1,0 +1,59 @@
+{
+  "format": "aloelite-id-vectors",
+  "version": 1,
+  "note": "Host-minted uuid7 contract (doc/DECISIONS.md D-1/D-2). Every implementation must mint the deterministic 19-char prefix (ts + '7' + seq) byte-identically; the tail is random. mint_sequences drive a MonotonicMint through (fence, mint@now) steps and pin the resulting (ts, seq) state — the borrow, regression-absorption, and fence rules every port must reproduce.",
+  "layout": {
+    "pattern": "tttttttt-tttt-7sss-vrrr-rrrrrrrrrrrr",
+    "t": "48-bit unix epoch milliseconds, 12 lowercase hex digits",
+    "s": "12-bit sequence, 3 lowercase hex digits",
+    "v": "variant nibble drawn from '89ab'",
+    "r": "random lowercase hex"
+  },
+  "prefix": [
+    { "ts_ms": 0, "seq": 0, "prefix": "00000000-0000-7000" },
+    { "ts_ms": 1723542000123, "seq": 7, "prefix": "01914b1b-d1fb-7007" },
+    { "ts_ms": 281474976710655, "seq": 4095, "prefix": "ffffffff-ffff-7fff" },
+    { "ts_ms": 1787770000000, "seq": 2048, "prefix": "01a03f65-5280-7800" }
+  ],
+  "mint_sequences": [
+    {
+      "name": "plain-advance",
+      "steps": [
+        { "mint_at_ms": 5000, "state": [5000, 0] },
+        { "mint_at_ms": 5000, "state": [5000, 1] },
+        { "mint_at_ms": 5001, "state": [5001, 0] }
+      ]
+    },
+    {
+      "name": "clock-regression-absorbed",
+      "steps": [
+        { "mint_at_ms": 1000000, "state": [1000000, 0] },
+        { "mint_at_ms": 999000, "state": [1000000, 1] }
+      ]
+    },
+    {
+      "name": "overflow-borrows-one-ms",
+      "steps": [
+        { "mint_at_ms": 5000, "state": [5000, 0] },
+        { "repeat_mint_at_ms": 5000, "times": 4095, "state": [5000, 4095] },
+        { "mint_at_ms": 5000, "state": [5001, 0] }
+      ]
+    },
+    {
+      "name": "fence-binds-a-slow-clock",
+      "steps": [
+        { "fence": [10000, 42] },
+        { "mint_at_ms": 3000, "state": [10000, 43] },
+        { "fence": [1000, 0], "note": "re-fencing below current state is a no-op" },
+        { "mint_at_ms": 3000, "state": [10000, 44] }
+      ]
+    },
+    {
+      "name": "fence-below-a-fast-clock-is-inert",
+      "steps": [
+        { "fence": [10000, 42] },
+        { "mint_at_ms": 20000, "state": [20000, 0] }
+      ]
+    }
+  ]
+}

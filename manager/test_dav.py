@@ -20,8 +20,8 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from manager.api import create_app
-from manager.direct import FRONTEND_DIRECT, DirectSessionRegistry
-from manager.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
+from manager.engine.direct import FRONTEND_DIRECT, DirectSessionRegistry
+from manager.engine.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
 
 D = "{DAV:}"
 PIN = "correct horse"
@@ -727,9 +727,9 @@ def test_file_etag_is_strong_and_collection_etag_is_weak(client):
     assert coll.text.startswith('W/"')
 
 
-def test_etag_distinguishes_writes_in_the_same_millisecond(client):
+def test_etag_distinguishes_writes_in_the_same_tick(client):
     """The whole reason for moving off modified_at: a tight rewrite loop can
-    land two commits in one millisecond, and a validator that aliases them
+    land two commits in one clock tick, and a validator that aliases them
     lets a client keep stale content it believes it revalidated."""
     _put(client, "/a.txt", b"seed")
     tags = []

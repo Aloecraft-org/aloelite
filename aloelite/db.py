@@ -12,8 +12,9 @@ Two responsibilities:
 
   2. Execute the named SQL templates from sql-templates.yaml with named binds,
      and provide the two primitives the templates can't express alone:
-       * create_returning_id  — the inseparable create_* + get_generated_*_id
-         pair, run on the same connection so last_insert_rowid() is valid.
+       * create_monotonic     — host-mints a monotonic id (D-1/D-2) and passes
+         it into the create template as :id; tracks the volume high-water
+         mark for flush at commit.
        * txn                  — the transaction context manager that makes the
          interface's `atomic` annotations real (autocommit off; commit on
          success, rollback on any exception).
@@ -34,6 +35,7 @@ import yaml
 from ._sqlite import sqlite3
 from .crypto import Cipher, IdentityCipher
 from .errors import Unsupported
+from .ids import MonotonicMint, stateless_uuid7
 
 # Template groups that contain executable `sql` entries (host_only / meta are not).
 _SQL_GROUPS = ("resolution", "mutation", "validation", "recursive", "maintenance")
@@ -54,7 +56,66 @@ MIN_SQLITE = (3, 45)
 # shipped 'subsec' triggers to hosts that couldn't run them). Files stamped
 # with a NEWER era are refused with a clear error instead of being half-read.
 # Bump this whenever schema.sql changes any view, trigger, or table.
-SCHEMA_ERA = 1
+#
+# Era 2 (the 0.4 break-once migration): host-minted ids (D-1/D-2), ownership/
+# time columns and per-placement names, PI-1 narrowed to containers, NODE-2
+# widened, mount policy columns, xattrs, and TIMESTAMPS IN NANOSECONDS.
+# Table-shape changes beyond the derived-object refresh live in _MIGRATIONS:
+# each entry upgrades a file FROM era-1 (one below its key) and runs before
+# the executescript that rebuilds the derived objects. Steps must be
+# crash-idempotent -- a failure between migration and stamp reruns them.
+SCHEMA_ERA = 2
+
+# ms epochs stay below 1e15 until the year 33658; ns epochs passed 1e18 in
+# 2001. Any stored value under this bound is an unmigrated millisecond value,
+# which is what makes the x1e6 rewrite safe to rerun after a crash.
+_NS_BOUND = 10**15
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM pragma_table_info(?) WHERE name = ?", (table, column)
+        ).fetchone()
+        is not None
+    )
+
+
+def _migrate_to_era2(conn: sqlite3.Connection) -> None:
+    """Era 1 -> 2. Additive columns (guarded per-column so a crashed run can
+    rerun), the ms->ns value rewrite (guarded by _NS_BOUND), and the drop of
+    the era-1 PI-1 partial unique index (its narrowed replacement is the
+    edge_guard_single_parent trigger pair, rebuilt with the derived objects)."""
+    for table, column, decl in [
+        ("node", "uid", "INTEGER"),
+        ("node", "gid", "INTEGER"),
+        ("node", "mode", "INTEGER"),
+        ("node", "atime", "INTEGER"),
+        ("node", "ctime", "INTEGER"),
+        ("edge", "name", "TEXT"),
+        ("mount", "access", "TEXT NOT NULL DEFAULT 'rw'"),
+        ("mount", "principal", "TEXT"),
+    ]:
+        if not _column_exists(conn, table, column):
+            conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {decl}')
+    for table, column in [
+        ("node", "created_at"),
+        ("node", "modified_at"),
+        ("volume", "created_at"),
+        ("mount", "created_at"),
+        ("mount", "expires_at"),
+        ("lock", "created_at"),
+        ("lock", "expires_at"),
+    ]:
+        conn.execute(
+            f'UPDATE "{table}" SET "{column}" = "{column}" * 1000000 '
+            f'WHERE "{column}" IS NOT NULL AND "{column}" < {_NS_BOUND} '
+            f'AND "{column}" > 0'
+        )
+    conn.execute("DROP INDEX IF EXISTS edge_active_placement")
+
+
+_MIGRATIONS = {2: _migrate_to_era2}
 
 
 def _check_sqlite_capabilities(conn: sqlite3.Connection) -> None:
@@ -118,18 +179,33 @@ class Db:
         # persisted beyond N_m (which is on the mount row). None when no
         # encrypted session is active.
         self.active_session: dict[str, Any] | None = None
+        # Per-volume monotonic id mints (D-2): in-memory only, fenced from the
+        # volume's high-water mark on first use, flushed back per write txn.
+        self._mints: dict[str, MonotonicMint] = {}
+        self._pending_wm: dict[str, tuple[int, int]] = {}
         # row access by column name everywhere
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         # Multi-connection model (mount is a row, not a connection): WAL lets
         # readers and the single writer coexist; busy_timeout makes a second
-        # writer wait briefly rather than fail instantly. (No-op on :memory:.)
+        # writer wait briefly rather than fail instantly.
+        #
+        # PROBE THE RESULT, do not trust an exception. `PRAGMA journal_mode`
+        # RETURNS the resulting mode; a request it cannot honor comes back as
+        # the unchanged mode with no error raised (':memory:' answers
+        # 'memory'). The same silent-failure shape as unixepoch('subsec'), and
+        # the reason the old try/except never fired on the case it named.
+        #
+        # WAL needs a shared-memory file (mmap MAP_SHARED). An aloelite FUSE
+        # mount now serves that (tests/test_posix_surface.py runs sqlite in WAL
+        # there, two processes), so nesting no longer forces the fallback --
+        # but network filesystems still refuse it, so the fallback stays.
+        # PERSIST avoids journal unlink churn.
         try:
-            self._conn.execute("PRAGMA journal_mode = WAL")
+            mode = self._conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
         except sqlite3.OperationalError:
-            # WAL needs a shared-memory file (mmap); filesystems without it
-            # (notably an aloelite FUSE mount) can still run in a rollback
-            # journal mode. PERSIST avoids journal unlink churn.
+            mode = "refused"
+        if str(mode).lower() not in ("wal", "memory"):
             self._conn.execute("PRAGMA journal_mode = PERSIST")
         self._conn.execute("PRAGMA busy_timeout = 5000")
         # We manage transactions explicitly via txn(); disable the driver's
@@ -165,7 +241,24 @@ class Db:
                     f"this build understands {SCHEMA_ERA}). Upgrade aloelite "
                     f"to open it."
                 )
+            fresh = (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1"
+                ).fetchone()
+                is None
+            )
             if era < SCHEMA_ERA:
+                # Table-shape migrations first (new columns, value rewrites),
+                # oldest era to newest, so the derived objects rebuilt below
+                # can reference the new columns. Each step is idempotent; the
+                # stamp at the end is what marks the whole upgrade done. A
+                # fresh file has no tables to migrate -- executescript below
+                # creates them era-current.
+                if not fresh:
+                    for target in range(max(era + 1, 2), SCHEMA_ERA + 1):
+                        step = _MIGRATIONS.get(target)
+                        if step is not None:
+                            step(conn)
                 # Derived objects belong to the installed version, not to the
                 # file's creation era: drop every view and trigger so the
                 # executescript below re-creates them from the CURRENT schema.
@@ -187,6 +280,11 @@ class Db:
         return db
 
     def close(self) -> None:
+        if self._pending_wm and not self._conn.in_transaction:
+            try:
+                self._flush_watermarks()
+            except sqlite3.Error:
+                pass  # detach fence still bounds the next session (D-2)
         self._conn.close()
 
     # -- raw template execution ---------------------------------------------
@@ -215,36 +313,64 @@ class Db:
 
     # -- id generation -------------------------------------------------------
     #
-    # IMPORTANT: last_insert_rowid() is NOT usable to read back a generated id.
-    # An INSERT performed inside an INSTEAD OF trigger (our insert-views) does
-    # not update the connection's last_insert_rowid() once the view-insert
-    # returns. So we use two correct paths:
+    # Host-minted (doc/DECISIONS.md D-1/D-2). The caller always holds the id
+    # before the INSERT, so there is no read-back and no single-owning-
+    # connection requirement.
     #
-    #   * node / edge ids are minted monotonically per volume in SQL, so the
-    #     row just inserted is the MAX uuid7 in that volume (single-owning-
-    #     connection model => unambiguous). create_monotonic() reads it back.
-    #   * volume / mount / lock ids are stateless: gen_id() SELECTs a fresh
-    #     uuid7 from SQL, the caller passes it INTO the insert explicitly, so
-    #     the caller already holds the id — no read-back needed.
+    #   * node / edge ids come from a per-volume MonotonicMint, fenced at
+    #     first use by the volume's stored (wm_ts, wm_seq) high-water mark so
+    #     a new session can never mint at or below anything the volume has
+    #     recorded — clock regression and failover skew included.
+    #   * volume / mount / lock ids are stateless uuid7s (no ordering promise).
+    #
+    # The high-water mark is written back inside the same transaction as the
+    # creates it covers (one monotonic UPDATE per write txn, not per id), so
+    # a rollback loses the advance together with the rows and the stored mark
+    # exactly covers committed ids. A shared-backend port may batch the
+    # advance more loosely; D-2's contract only requires the attach fence.
 
     def gen_id(self) -> str:
-        """A fresh stateless uuid7 (for volume/mount/lock), minted in SQL."""
-        return self.scalar("mutation.new_uuid7")
+        """A fresh stateless uuid7 (for volume/mount/lock ids)."""
+        return stateless_uuid7()
 
-    def create_monotonic(
-        self,
-        insert_template: str,
-        fetch_template: str,
-        params: Mapping[str, Any],
-    ) -> str:
-        """Create a node/edge (monotonic SQL id) and read the minted id back as
-        the max uuid7 in its volume. `params` must include 'volume'.
-        """
-        self.run(insert_template, params)
-        new_id = self.scalar(fetch_template, {"volume": params["volume"]})
-        if new_id is None:
-            raise RuntimeError(f"{insert_template} produced no row to read back")
+    def _mint_for(self, volume: str) -> MonotonicMint:
+        mint = self._mints.get(volume)
+        if mint is None:
+            mint = self._mints[volume] = MonotonicMint()
+            row = self._conn.execute(
+                "SELECT wm_ts, wm_seq FROM volume WHERE volume_id = ?", (volume,)
+            ).fetchone()
+            if row is not None:
+                mint.fence(row["wm_ts"], row["wm_seq"])
+        return mint
+
+    def create_monotonic(self, insert_template: str, params: Mapping[str, Any]) -> str:
+        """Create a node/edge with a host-minted monotonic id, passed to the
+        template as :id. `params` must include 'volume' (which may be None on
+        the import/recovery path — stateless mint, no watermark)."""
+        volume = params.get("volume")
+        if volume is None:
+            new_id = stateless_uuid7()
+        else:
+            mint = self._mint_for(volume)
+            new_id = mint.mint()
+            self._pending_wm[volume] = (mint.ts, mint.seq)
+        self.run(insert_template, {**params, "id": new_id})
+        if not self._conn.in_transaction:
+            self._flush_watermarks()
         return new_id
+
+    def _flush_watermarks(self) -> None:
+        """Advance each touched volume's high-water mark to the mint's state.
+        Monotonic guard in the WHERE: concurrent sessions can interleave
+        flushes in any order without ever moving a mark backwards."""
+        for volume, (ts, seq) in self._pending_wm.items():
+            self._conn.execute(
+                "UPDATE volume SET wm_ts = ?, wm_seq = ? WHERE volume_id = ? "
+                "AND (wm_ts < ? OR (wm_ts = ? AND wm_seq < ?))",
+                (ts, seq, volume, ts, ts, seq),
+            )
+        self._pending_wm.clear()
 
     # -- transaction boundary -----------------------------------------------
     @contextmanager
@@ -257,9 +383,12 @@ class Db:
         try:
             yield self
         except BaseException:
+            # discard the advance with the rows it covered
+            self._pending_wm.clear()
             self._conn.execute("ROLLBACK")
             raise
         else:
+            self._flush_watermarks()
             self._conn.execute("COMMIT")
 
     # -- escape hatch for the few host-only walks that need direct SQL -------

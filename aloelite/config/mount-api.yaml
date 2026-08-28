@@ -43,13 +43,13 @@ scalars:
   DbRef:     { base: opaque, note: "platform db reference: path, OPFS handle, etc." }
   Path:      { base: string, note: "mount-relative, slash-separated" }
   Bytes:     { base: binary }
-  Timestamp: { base: int,    note: "unix epoch milliseconds" }
+  Timestamp: { base: int,    note: "unix epoch nanoseconds (era 2; era 1 was milliseconds)" }
 
 # ----------------------------------------------------------------------------
 # Enums — all closed
 # ----------------------------------------------------------------------------
 enums:
-  NodeType: [container, entry]
+  NodeType: [container, entry, symlink, fifo, socket]   # era 2 (D-3): specials place like entries; devices refused
   MountState: [new, active, unmounted]   # new = under construction; active = in use; unmounted = terminal/invalid
   Whence: [set, cur, end]
   WriteMode:
@@ -69,7 +69,9 @@ records:
     { id: NodeId, type: NodeType, name: string, created_at: Timestamp,
       modified_at: Timestamp, volume: "VolumeId?", size: "int?",
       version: "int?", metadata: "{string:string}",
-      note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it). size is the materialized content total, null for a container. version is the CV-3 committed version pointer, which advances on every commit and so identifies content exactly -- unlike modified_at, whose millisecond resolution aliases two writes in the same tick; a binding serving HTTP should build its strong ETag from it. Null for anything with no content row, containers chiefly. metadata is the NODE-6 shallow annotation map, empty when unset (never null)." }
+      uid: "int?", gid: "int?", mode: "int?",
+      atime: "Timestamp?", ctime: "Timestamp?", nlink: int,
+      note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it). size is the materialized content total, null for a container. version is the CV-3 committed version pointer, which advances on every commit and so identifies content exactly -- unlike modified_at, whose resolution aliases two writes in the same tick; a binding serving HTTP should build its strong ETag from it. Null for anything with no content row, containers chiefly. metadata is the NODE-6 shallow annotation map, empty when unset (never null). Era 2: uid/gid/mode are ownership columns, null until set (hosts fall back to process defaults); atime/ctime coalesce to modified/created; nlink is the DERIVED count of active placements (>1 = hardlinked). Timestamps are ns." }
   DirEntry:
     { node: NodeId, name: string, type: NodeType, visible: bool, edge: EdgeId,
       current_directory: Path,
@@ -112,6 +114,9 @@ errors:
   corrupt:              "an invariant the schema cannot enforce was found violated"
   unsupported:          "operation not available in this build/target"
   container_exists:     "container already exists while attempting to create a new one"
+  already_exists:       "something already exists at the target path (link/mknod, EEXIST)"
+  read_only:            "a mutating operation arrived through a ro mount (D-4, EROFS)"
+  mount_conflict:       "an rw mount already covers this subtree; allow_overlap stacks deliberately (D-4)"
   bad_key:              "the supplied PIN/token did not unlock the volume (AEAD tag mismatch, ENC-2)"
   encryption_required:  "an encrypted volume was mounted without a PIN, or vice versa (ENC-3)"
 
@@ -144,11 +149,20 @@ operations:
       params:  { fs: FsHandle }
       returns: [VolumeInfo]
     mount:
-      params:  { fs: FsHandle, volume: VolumeId, at: "Path?", ttl_ms: "int?" }
+      params:  { fs: FsHandle, volume: VolumeId, at: "Path?", ttl_ms: "int?",
+                 access: "string?", principal: "string?", allow_overlap: "bool?" }
       returns: MountId
       flags:   { mutates: true, atomic: true, locks: false }
-      raises:  [not_found]
-      note:    "`at` defaults to the volume root; ttl per ACC-3"
+      raises:  [not_found, mount_conflict]
+      note: >
+        `at` defaults to the volume root; ttl per ACC-3. Era 2 (D-4): access
+        is 'rw' (default) or 'ro'; principal is an optional tenant/user
+        identity for policy. Admission default is at most ONE rw mount per
+        subtree — a new rw mount whose point equals, contains, or is
+        contained by a valid rw mount's point raises mount_conflict unless
+        allow_overlap is passed. Overlap is authorization policy only: id
+        correctness never depends on it (D-1/D-2) and entry write locks
+        arbitrate write-write conflicts.
     unmount:
       params:  { mount: MountId }
       returns: void
@@ -214,6 +228,66 @@ operations:
         in-place overwrite of [offset, offset+len), zero-filling any gap past
         EOF; returns the new size. Chunk alignment is preserved (an overwrite
         never shifts bytes), so untouched chunks either side carry by reference.
+    link:
+      params:  { mount: MountId, "from": Path, to: Path }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, not_an_entry, nameless, already_exists, mount_invalid]
+      note: >
+        hardlink (era 2, D-5): an additional active placement of the node src
+        resolves to, under dst's parent, named by dst's final segment (stored
+        as the edge's placement-name override when it differs from the node's
+        own name). Containers refused -- PI-1 keeps the container graph a
+        tree. nlink is the derived count of active placements.
+    create_special:
+      params:  { mount: MountId, path: Path, type: NodeType, data: bytes }
+      returns: NodeId
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, nameless, unsupported, mount_invalid]
+      note: >
+        create a symlink (data = target bytes), fifo, or socket leaf (era 2,
+        D-3). container/entry are refused -- use create_container /
+        create_entry. fifo/socket carry an empty content row; the kernel owns
+        their rendezvous semantics.
+    set_owner:
+      params:  { mount: MountId, path: Path, uid: "int?", gid: "int?", mode: "int?" }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: >
+        chown/chmod (era 2): set any of uid/gid/mode, null leaves a field
+        unchanged; mode is masked to 07777. Bumps ctime, never modified_at.
+    set_atime:
+      params:  { mount: MountId, node: NodeId, ts_ns: Timestamp }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: id }
+      raises:  [mount_invalid]
+      note: >
+        utimens' atime half, and the ONLY atime writer -- there is
+        deliberately no per-read atime update anywhere (noatime semantics).
+    set_xattr:
+      params:  { mount: MountId, path: Path, name: string, value: bytes }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: "upsert one extended attribute (era 2). Namespace policy (user.* only) is enforced at the FUSE boundary, not here."
+    get_xattr:
+      params:  { mount: MountId, path: Path, name: string }
+      returns: "bytes?"
+      flags:   { mutates: false, atomic: false, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: "the attribute's bytes, or null if unset (host maps to ENODATA)."
+    list_xattrs:
+      params:  { mount: MountId, path: Path }
+      returns: "[string]"
+      flags:   { mutates: false, atomic: false, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+    remove_xattr:
+      params:  { mount: MountId, path: Path, name: string }
+      returns: bool
+      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      raises:  [not_found, mount_invalid]
+      note: "false = the attribute did not exist (ENODATA)."
     set_metadata:
       params:  { mount: MountId, path: Path, metadata: "{string:string}" }
       returns: void
@@ -223,7 +297,7 @@ operations:
         replace the NODE-6 map wholesale on a container or an entry; empty
         clears it. Does NOT bump modified_at — annotation is not content.
     set_mtime:
-      params:  { mount: MountId, node: NodeId, ts_ms: Timestamp }
+      params:  { mount: MountId, node: NodeId, ts_ns: Timestamp }
       returns: void
       flags:   { mutates: true, atomic: true, locks: false, addr: id }
       raises:  [mount_invalid]

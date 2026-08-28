@@ -16,16 +16,16 @@ import signal
 import sys
 
 from .api import ALOELITE_ROOT, HOST_MNT_PREFIX, create_app
-from .preflight import MANAGER_MNT, run_preflight
-from .store import JsonVolumeStore
-from .supervisor import MountSupervisor
+from .engine.preflight import MANAGER_MNT, run_preflight
+from .engine.store import JsonVolumeStore
+from .engine.supervisor import MountSupervisor
 
 VOLUMES_JSON = os.path.join(ALOELITE_ROOT, "volumes.json")
 
 
 def build(store=None, supervisor=None, registry=None):
     """Construct the (store, supervisor, app) triple. Exposed for tests."""
-    from .direct import DirectSessionRegistry
+    from .engine.direct import DirectSessionRegistry
 
     store = store or JsonVolumeStore(VOLUMES_JSON)
     supervisor = supervisor or MountSupervisor(
