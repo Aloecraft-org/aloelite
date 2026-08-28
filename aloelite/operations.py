@@ -861,6 +861,12 @@ def rename(db: Db, mount: MountId, path: str, name: str) -> None:
         _require_name(name)
         parent, old_name = resolve_parent(db, m.mount_point, path)
         node = resolve(db, m.mount_point, path).node
+        # ACC-11: renaming edits the directory entry, which IS a placement
+        # change. Without this a same-directory rename walked past a lock that
+        # move() honours -- and FUSE routes `mv a b` here and `mv a sub/b` to
+        # move(), so one gesture was guarded and the other was not.
+        if db.scalar("validation.check_lock_held", {"node": node, "mount": mount}):
+            raise LockHeld(node=node)
         db.rowcount(
             "mutation.rename_placement",
             {"parent": parent, "node": node, "old_name": old_name, "name": name},
@@ -879,6 +885,13 @@ def link(db: Db, mount: MountId, src: str, dst: str) -> None:
         found = resolve(db, m.mount_point, src)
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
+        # ACC-11: a hardlink adds a placement to the locked node and changes
+        # its nlink. Milder than rename -- remove() is guarded, so a link can
+        # never be used to carry the node away -- but it is the same class.
+        if db.scalar(
+            "validation.check_lock_held", {"node": found.node, "mount": mount}
+        ):
+            raise LockHeld(node=found.node)
         parent, name = resolve_parent(db, m.mount_point, dst)
         _require_name(name)
         if db.one("resolution.resolve_segment", {"container": parent, "name": name}):

@@ -234,8 +234,8 @@ operations:
     link:
       params:  { mount: MountId, "from": Path, to: Path }
       returns: void
-      flags:   { mutates: true, atomic: true, locks: false, addr: path }
-      raises:  [not_found, not_an_entry, nameless, already_exists, mount_invalid]
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, not_an_entry, nameless, already_exists, lock_held, mount_invalid]
       note: >
         hardlink (era 2, D-5): an additional active placement of the node src
         resolves to, under dst's parent, named by dst's final segment (stored
@@ -334,8 +334,14 @@ operations:
     rename:
       params:  { mount: MountId, path: Path, name: string }
       returns: void
-      flags:   { mutates: true, atomic: true, locks: false, addr: path }
-      raises:  [not_found, nameless, mount_invalid]
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, nameless, lock_held, mount_invalid]
+      note: >
+        ACC-11: rename edits the directory entry the path walked, which is a
+        placement change, so it is refused at a node another mount has locked
+        — the same answer move() gives. The two differ only in mechanism
+        (rename edits the edge name in place, D-5; move archives and recreates
+        the edge), never in what a lock protects.
     remove:
       params:  { mount: MountId, path: Path }
       returns: void

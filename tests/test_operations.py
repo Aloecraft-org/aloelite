@@ -317,6 +317,70 @@ def _other_mount(db, mount):
     )
 
 
+def test_write_lock_blocks_rename_from_another_mount(db, mount):
+    """Same-directory rename is the one that walked past the lock.
+
+    ACC-11 says a lock excludes another mount from changing the locked node's
+    placement, and rename edits the directory entry, so it qualifies — but the
+    guard only existed on move(). That split mattered because FUSE routes by
+    parent: `mv a.txt b.txt` reaches rename() and `mv a.txt sub/b.txt` reaches
+    move(), so the same user gesture was guarded or not depending on whether
+    the parent changed.
+    """
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld):
+            ops.rename(db, other, "/f", "stolen")
+        # the cross-directory sibling has always been refused; pinned together
+        # so the two can never drift apart again
+        ops.create_container(db, mount, "/sub")
+        with pytest.raises(errors.LockHeld):
+            ops.move(db, other, "/f", "/sub/stolen")
+    ops.rename(db, other, "/f", "renamed")  # released on close
+    assert ops.exists(db, mount, "/renamed")
+
+
+def test_write_lock_blocks_link_from_another_mount(db, mount):
+    """A hardlink adds a placement to the locked node, which ACC-11 covers."""
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld):
+            ops.link(db, other, "/f", "/alias")
+    ops.link(db, other, "/f", "/alias")  # released on close
+    assert ops.stat(db, mount, "/alias").nlink == 2
+
+
+def test_a_lock_holder_cannot_be_renamed_into_writing_a_different_node(db, mount):
+    """The sequence the guard exists to prevent, end to end.
+
+    Before the guard: a WebDAV client LOCKs a resource (dav.py takes an engine
+    lock for exactly this — to exclude FUSE and the browser UI), someone
+    renames it in place from another mount, and the client's next PUT lands in
+    a BRAND NEW node, because PUT goes to open_write which creates when the
+    path is missing. The client held a valid lock the whole time, got a 201,
+    and its content ended up somewhere other than the thing it locked — with
+    no error raised anywhere in the chain.
+    """
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/doc.txt", b"under lock")
+    held = ops.lock(db, mount, "/doc.txt")
+
+    with pytest.raises(errors.LockHeld):
+        ops.rename(db, other, "/doc.txt", "stolen.txt")
+
+    # The lock holder's own path still resolves to the node it locked, so a
+    # write goes where it meant it to go rather than to a fresh entry.
+    with ops.open_write(db, mount, "/doc.txt", lock=held.id) as w:
+        assert w.node == held.node
+        w.write(b"new content")
+    assert ops.read_all(db, mount, "/doc.txt") == b"new content"
+    assert not ops.exists(db, mount, "/stolen.txt")
+
+
 def test_write_lock_blocks_remove_from_another_mount(db, mount):
     """Removing a file another mount is actively writing discards that
     writer's data with no error on either side. The lock already existed; it
