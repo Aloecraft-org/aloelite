@@ -108,7 +108,24 @@ fcntl byte-range locks and flock ship as kernel-arbitrated per mount (pinned
 by `tests/test_posix_surface.py`). pyfuse3 exposes no lock handlers, so
 cross-mount lock coherence is structurally out of reach for the Python
 engine; schema-backed `getlk`/`setlk` (ACC-8 already forward-provisions the
-columns) is the Rust engine's cross-mount upgrade, not a Python feature.
+columns) is the Rust engine's cross-mount upgrade.
+
+> **Amended 2026-08-28**, when the era-2 branch absorbed the WebDAV work.
+> The sentence above originally ended "...not a Python feature", and that
+> clause is now wrong: the Python engine *does* have schema-backed
+> cross-mount advisory locks — `lock`/`unlock`/`renew_lock` and the ACC-11
+> exclusions, which WebDAV class 2 is built on, and which arbitrate between
+> mounts exactly as this decision imagined.
+>
+> What survives is the narrower and still-true claim: the gap is the **FUSE
+> path**, not the engine. pyfuse3 exposes no `getlk`/`setlk` handlers, so an
+> `fcntl` call made by an application on a mount never reaches the daemon
+> and cannot be routed to the engine locks that now exist. Wiring POSIX
+> byte-range locks through to ACC-11 is the Rust engine's upgrade; the lock
+> table it would drive is already there, and already used over HTTP.
+>
+> Everything below is unaffected — it reasons about fcntl/flock through a
+> mount, which is still kernel-arbitrated per mount.
 
 Two facts keep this safe rather than surprising:
 

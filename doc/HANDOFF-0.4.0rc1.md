@@ -8,6 +8,44 @@ list is done except benchmarks, and its §5 open decisions are resolved and
 recorded in `doc/DECISIONS.md` (D-1..D-5). Read DECISIONS.md first — the
 code implements those five decisions and this document assumes them.
 
+## 0. Amendment — reconciled with main, 2026-08-28
+
+This document records the session that produced era 2, and its body is left
+as written. One thing has changed underneath it: **the branch has since
+absorbed `main`**, which by then carried PR #2 (WebDAV RFC 4918 class 2, TLS,
+and first-class engine locks — `lock`/`unlock`/`renew_lock` with the ACC-11
+exclusions). Read §1–§5 with that in mind.
+
+What that changes for a reader here:
+
+- **Test counts below are superseded.** 336 was era 2 alone; the reconciled
+  tree is **461 passed, 2 skipped** (the two FUSE modules self-skip without
+  `fusermount3`; CI has it and runs them).
+- **§3 item 1 is done differently.** PR #2 landed on main first and era 2
+  absorbed it, rather than the two being reviewed side by side.
+- **D-4 is amended** — see `doc/DECISIONS.md`. Schema-backed cross-mount
+  locks are no longer "the Rust engine's" alone; Python has them. The Rust
+  upgrade narrows to wiring POSIX `fcntl` through FUSE to reach them.
+- **A new trap joins §4**, and it is the reconciliation's whole lesson: an
+  era that changes a *unit* breaks code that never mentions the unit. Era 2
+  moved timestamps ms → ns; the WebDAV date helpers divided by 1000 and every
+  date became the year 56,659,232, and `operations.py` grew four calls to a
+  `_now_ms()` that no longer existed — where the obvious fix (re-add it) would
+  have written ms into ns columns and made every lock be born expired. Both
+  are now guarded: `test_lock_flag_matches_the_implementation` and
+  `test_propfind_dates_are_plausible_not_merely_well_formed`. The rule, next
+  to "probe the result, never the exception": **assert the value is
+  plausible, not merely well-formed.**
+- **Still open, and owner-side:** whether ACC-11 should extend to the seven
+  operations era 2 added (`rename`, `link`, `create_special`, `set_owner`,
+  `set_atime`, `set_xattr`, `remove_xattr`) — all unguarded today, and
+  `rename`/`link` are placement operations, which ACC-11 says locks guard.
+  `copy`/`pack`/`unpack` want the same review. The spec now states today's
+  answer honestly and a test holds it there, so changing it is a decision
+  rather than a drift.
+
+---
+
 ## 1. Where the tree stands
 
 `pyproject.toml` says `0.4.0rc1`. 336 tests pass (including the real-kernel

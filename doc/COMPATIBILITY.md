@@ -57,7 +57,7 @@ engine's charter (doc/DECISIONS.md D-4).
 
 | Feature | Why |
 |---|---|
-| Cross-mount POSIX lock coherence | Structurally out of reach for the Python engine (no pyfuse3 lock handlers). Schema-backed range locks (ACC-8 forward-provisions the columns) are the Rust engine's cross-mount upgrade — D-4. The default mount policy (one rw mount per subtree, overlap by explicit opt-in) keeps the gap from surprising anyone |
+| Cross-mount POSIX lock coherence | The gap is the FUSE path, not the engine: pyfuse3 exposes no lock handlers, so an application's `fcntl` never reaches the daemon and cannot be routed to the engine's cross-mount locks — which **do** exist (`lock`/`unlock`/`renew_lock`, ACC-11) and are what WebDAV class 2 arbitrates with. Wiring the two together is the Rust engine's upgrade — D-4, as amended. The default mount policy (one rw mount per subtree, overlap by explicit opt-in) keeps the gap from surprising anyone |
 | Cross-mount `mmap MAP_SHARED` coherence | Same page cache is per mount; staleness bounded by the attr TTL, not eliminated |
 | `copy_file_range` | No pyfuse3 handler; the kernel falls back to read/write loops (correct, no reflink speedup) |
 | Random writes on an `O_WRONLY\|O_TRUNC` streaming handle | ENOTSUP by design; open O_RDWR for random access (see `aloelite/fuse.py` module docs) |
