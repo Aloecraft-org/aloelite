@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import base64
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 import pytest
 
@@ -194,6 +196,46 @@ def test_propfind_depth_1_lists_children_with_live_properties(client):
     assert _prop(coll, "resourcetype").find(f"{D}collection") is not None
     # A collection has no content length; asking must yield 404, not "0".
     assert _prop(coll, "getcontentlength") is None
+
+
+def test_propfind_dates_are_plausible_not_merely_well_formed(client):
+    """Well-formed is not the same as correct, and only shape was checked.
+
+    getlastmodified/creationdate are rendered by dividing an engine timestamp
+    down to unix seconds, so the divisor encodes which unit the engine stores.
+    Era 2 moved timestamps from milliseconds to nanoseconds and the divisor did
+    not follow.
+
+    That particular error was loud — the dates overflowed to the year 56,659,232
+    and formatdate raised, taking 44 tests red with it. The dangerous half of
+    this bug class is the other direction: over-divide instead of under-divide
+    and every date is 1970-01-01, which ends in "GMT", ends in "Z", parses
+    cleanly, and satisfies every structural assertion in this module. Verified:
+    with the divisor too large, the depth-1 test above still passes and only
+    this one fails.
+
+    So assert the VALUE, not just the shape. A unit error is never subtle in
+    magnitude; it is only subtle in appearance.
+    """
+    floor = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
+    _put(client, "/fresh.txt", b"now")
+    entry = _responses(_propfind(client, "/", depth="1"))["/dav/v1/fresh.txt"]
+
+    # RFC 1123, e.g. "Wed, 27 Aug 2026 12:00:00 GMT"
+    modified = parsedate_to_datetime(_prop(entry, "getlastmodified").text)
+    # ISO 8601, e.g. "2026-08-27T12:00:00Z"
+    created = datetime.fromisoformat(
+        _prop(entry, "creationdate").text.replace("Z", "+00:00")
+    )
+
+    # A generous window: this only has to reject a unit error, and every unit
+    # error is off by at least three orders of magnitude.
+    ceiling = datetime.now(tz=timezone.utc) + timedelta(minutes=5)
+    for label, value in (("getlastmodified", modified), ("creationdate", created)):
+        assert floor <= value <= ceiling, (
+            f"{label} is {value.isoformat()}, which is not within minutes of now "
+            "— the engine timestamp was scaled by the wrong unit"
+        )
 
 
 def test_collection_hrefs_end_in_slash_and_are_percent_encoded(client):

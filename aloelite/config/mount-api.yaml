@@ -14,7 +14,10 @@
 # Operation annotations are the behaviors the conformance suite asserts:
 #   mutates  - writes to the database
 #   atomic   - the whole operation is one transaction (all-or-nothing)
-#   locks    - acquires/holds a lock row scoped to the mount
+#   locks    - acquires, holds, or requires a lock row scoped to the mount
+#             (ACC-6/ACC-11). True means a port cannot implement the operation
+#             correctly without implementing advisory locking; asserted against
+#             the reference implementation by tests/test_spec_projection.py
 #   addr     - how the target is named: path | id | both
 #             (path resolves against the mount point; path addresses only
 #              VISIBLE nodes, so hidden same-name siblings need an id variant)
@@ -291,7 +294,7 @@ operations:
     set_metadata:
       params:  { mount: MountId, path: Path, metadata: "{string:string}" }
       returns: void
-      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
       raises:  [not_found, mount_invalid]
       note: >
         replace the NODE-6 map wholesale on a container or an entry; empty
@@ -314,7 +317,7 @@ operations:
     move:
       params:  { mount: MountId, from: Path, to: Path }
       returns: void
-      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
       raises:  [not_found, not_a_container, would_cycle, volume_mismatch, mount_invalid]
       note:    "archive old edge + create new edge (OP-3)"
     copy:
@@ -336,7 +339,7 @@ operations:
     remove:
       params:  { mount: MountId, path: Path }
       returns: void
-      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
       raises:  [not_found, not_empty, mount_invalid]
       note: >
         detach a leaf or empty container: archive active edge; node becomes
@@ -345,7 +348,7 @@ operations:
     remove_recursive:
       params:  { mount: MountId, path: Path }
       returns: void
-      flags:   { mutates: true, atomic: true, locks: false, addr: path }
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
       raises:  [not_found, mount_invalid]
       note: >
         archive the whole ACTIVE subtree in one transaction (CTE-driven set
@@ -425,7 +428,7 @@ operations:
     unlock:
       params:  { mount: MountId, lock: LockId }
       returns: void
-      flags:   { mutates: true }
+      flags:   { mutates: true, locks: true }
       raises:  [lock_invalid, lock_held, mount_invalid]
       note: >
         Not idempotent: releasing an already-gone lock raises lock_invalid,
@@ -435,7 +438,7 @@ operations:
     renew_lock:
       params:  { mount: MountId, lock: LockId, ttl_ms: "int?" }
       returns: LockInfo
-      flags:   { mutates: true }
+      flags:   { mutates: true, locks: true }
       raises:  [lock_invalid, lock_held, mount_invalid]
       note: >
         Keeps the lock id, which is what lets a client carry one token across
