@@ -35,6 +35,7 @@ from .errors import (
     Corrupt,
     EncryptionRequired,
     LockHeld,
+    LockInvalid,
     MountInvalid,
     NotAContainer,
     NotAnEntry,
@@ -46,6 +47,7 @@ from .models import (
     Anomaly,
     ContentPruneReport,
     DirEntry,
+    LockInfo,
     MountInfo,
     NodeInfo,
     PruneReport,
@@ -836,6 +838,8 @@ def set_metadata(db: Db, mount: MountId, path: str, metadata: dict[str, str]) ->
     with db.txn():
         m = _require_mount(db, mount)
         node = resolve(db, m.mount_point, path).node
+        if db.scalar("validation.check_lock_held", {"node": node, "mount": mount}):
+            raise LockHeld(node=node)
         db.rowcount(
             "mutation.set_metadata",
             {"node": node, "metadata": _meta_to_json(metadata)},
@@ -851,6 +855,8 @@ def move(db: Db, mount: MountId, src: str, dst: str) -> None:
         m = _require_mount(db, mount)
         found = resolve(db, m.mount_point, src)
         node, ntype = found.node, found.type
+        if db.scalar("validation.check_lock_held", {"node": node, "mount": mount}):
+            raise LockHeld(node=node)
         parent, new_name = resolve_parent(db, m.mount_point, dst)
         _require_name(new_name)
         if ntype is NodeType.CONTAINER:
@@ -874,6 +880,10 @@ def remove(db: Db, mount: MountId, path: str) -> None:
     with db.txn():
         m = _require_mount(db, mount)
         found = resolve(db, m.mount_point, path)
+        if db.scalar(
+            "validation.check_lock_held", {"node": found.node, "mount": mount}
+        ):
+            raise LockHeld(node=found.node)
         if found.type is NodeType.CONTAINER:
             if db.scalar("validation.check_empty", {"container": found.node}):
                 raise NotEmpty(node=found.node)
@@ -888,6 +898,15 @@ def remove_recursive(db: Db, mount: MountId, path: str) -> None:
     with db.txn():
         m = _require_mount(db, mount)
         node = resolve(db, m.mount_point, path).node
+        # Checked over the WHOLE subtree, not just the root: this destroys
+        # every member, so a lock anywhere below is a lock on something this
+        # statement would archive. Naming the offender matters -- "something
+        # in this tree is locked" is not actionable on a deep tree.
+        locked = db.one(
+            "validation.check_lock_held_subtree", {"root": node, "mount": mount}
+        )
+        if locked is not None:
+            raise LockHeld(node=NodeId(locked["node_id"]))
         db.rowcount("recursive.archive_subtree", {"root": node})
 
 
@@ -1065,6 +1084,100 @@ def unpack(db: Db, mount: MountId, path: str) -> None:
 
 
 # ===========================================================================
+# Locking
+#
+# A lock taken here is a FIRST-CLASS OBJECT: it exists with no open descriptor
+# and outlives any single operation. open_write still mints its own lock when
+# none is supplied -- that is what a POSIX write wants, where the lock's whole
+# life is the open file -- but a protocol whose LOCK and PUT arrive as separate
+# requests (WebDAV class 2) needs the lock to be the durable thing and the
+# descriptor the transient one, which is the inversion these three provide.
+#
+# Nothing here actively invalidates a lock: validity is derived from the
+# mount's validity and the ttl (ACC-9/10), so renewal is just moving
+# expires_at, and reclamation stays prune's job.
+# ===========================================================================
+def _require_own_lock(db: Db, mount: MountId, lock: LockId) -> Any:
+    """Fetch a lock the caller is entitled to act on, or raise.
+
+    Ownership is checked, not just validity: a lock is mount-scoped (ACC-6), so
+    a mount releasing or renewing another mount's lock would defeat the whole
+    point. LockHeld (not LockInvalid) is the honest answer for a live lock
+    belonging to someone else -- it IS held, by another mount -- while a lock
+    that has expired, been released, or lost its mount is LockInvalid.
+    """
+    row = db.one("resolution.get_lock", {"lock": lock})
+    if row is None or not row["valid"]:
+        raise LockInvalid(lock=lock)
+    if row["mount_id"] != mount:
+        raise LockHeld(node=NodeId(row["node_id"]), lock=lock)
+    return row
+
+
+def lock(db: Db, mount: MountId, path: str, ttl_ms: int | None = None) -> LockInfo:
+    """Take a standalone exclusive lock on an entry or container.
+
+    Refused if ANY valid lock exists on the node -- including one this mount
+    already holds. Self-exclusion is deliberate here and deliberately absent
+    from the write paths: a second row for the same (mount, node) would make
+    unlock ambiguous about which lock it released, whereas a mount writing a
+    file it already has open is ordinary.
+
+    ttl_ms=None means no expiry, and such a lock is reclaimed only when its
+    mount ends (ACC-9). A network protocol should pass a ttl and renew.
+    """
+    with db.txn():
+        m = _require_mount(db, mount)
+        node = resolve(db, m.mount_point, path).node
+        if db.scalar("validation.check_any_lock", {"node": node}):
+            raise LockHeld(node=node)
+        lock_id = db.gen_id()
+        expires = _now_ms() + ttl_ms if ttl_ms is not None else None
+        db.run(
+            "mutation.create_lock",
+            {
+                "id": lock_id,
+                "mount": mount,
+                "node": node,
+                "expires_at": expires,
+                "created_at": _now_ms(),
+            },
+        )
+        return LockInfo(id=LockId(lock_id), mount=mount, node=node, expires_at=expires)
+
+
+def unlock(db: Db, mount: MountId, lock: LockId) -> None:
+    """Release a lock this mount holds. Not idempotent: releasing a lock that
+    is already gone raises LockInvalid, because silently succeeding would hide
+    a client that thinks it still holds something it does not."""
+    with db.txn():
+        _require_mount(db, mount)
+        _require_own_lock(db, mount, lock)
+        db.rowcount("mutation.release_lock", {"lock": lock})
+
+
+def renew_lock(
+    db: Db, mount: MountId, lock: LockId, ttl_ms: int | None = None
+) -> LockInfo:
+    """Extend (or clear) a lock's ttl, keeping its id.
+
+    Keeping the id is the point: it is what lets a client hold one token across
+    many requests, which is exactly how a WebDAV lock token behaves.
+    """
+    with db.txn():
+        _require_mount(db, mount)
+        row = _require_own_lock(db, mount, lock)
+        expires = _now_ms() + ttl_ms if ttl_ms is not None else None
+        db.rowcount("mutation.renew_lock", {"lock": lock, "expires_at": expires})
+        return LockInfo(
+            id=LockId(lock),
+            mount=mount,
+            node=NodeId(row["node_id"]),
+            expires_at=expires,
+        )
+
+
+# ===========================================================================
 # Streaming
 # ===========================================================================
 def open_read(db: Db, mount: MountId, path: str) -> Descriptor:
@@ -1087,8 +1200,22 @@ def open_read(db: Db, mount: MountId, path: str) -> Descriptor:
 
 
 def open_write(
-    db: Db, mount: MountId, path: str, mode: WriteMode = WriteMode.TRUNCATE
+    db: Db,
+    mount: MountId,
+    path: str,
+    mode: WriteMode = WriteMode.TRUNCATE,
+    lock: LockId | None = None,
 ) -> Descriptor:
+    """Open an entry for streaming writes under an exclusive lock.
+
+    `lock` supplies an EXISTING lock from ops.lock() instead of minting one.
+    The difference is lifetime, and it is the whole reason the parameter
+    exists: a minted lock is owned by the descriptor and released on
+    close()/abort(), while a supplied one outlives the descriptor and is
+    released only by unlock(). That is what a protocol needs when LOCK, PUT
+    and UNLOCK are three separate requests -- releasing on close would drop
+    the lock between them, which is precisely the bug class 2 clients hit.
+    """
     with db.txn():
         m = _require_mount(db, mount)
         try:
@@ -1103,19 +1230,29 @@ def open_write(
             # Safe creation within the isolated block (pass the MountId, not
             # the resolved _Mount — _create_entry_internal re-validates it)
             node_id = _create_entry_internal(db, mount, path)
-        if db.scalar("validation.check_lock_held", {"node": node_id, "mount": mount}):
-            raise LockHeld(node=node_id)
-        lock = db.gen_id()
-        db.run(
-            "mutation.create_lock",
-            {
-                "id": lock,
-                "mount": mount,
-                "node": node_id,
-                "expires_at": None,
-                "created_at": _now_ms(),
-            },
-        )
+        owns_lock = lock is None
+        if lock is not None:
+            row = _require_own_lock(db, mount, lock)
+            if row["node_id"] != node_id:
+                # Guards the copy-paste error of reusing a token from another
+                # path; a lock authorises writes to ONE node.
+                raise LockInvalid(lock=lock, node=node_id)
+        else:
+            if db.scalar(
+                "validation.check_lock_held", {"node": node_id, "mount": mount}
+            ):
+                raise LockHeld(node=node_id)
+            lock = db.gen_id()
+            db.run(
+                "mutation.create_lock",
+                {
+                    "id": lock,
+                    "mount": mount,
+                    "node": node_id,
+                    "expires_at": None,
+                    "created_at": _now_ms(),
+                },
+            )
         cs = db.chunk_size_of(m.volume)
         # Append carries the prior version's FULL leading chunks forward
         # unchanged and rebuilds only from the partial final chunk; truncate
@@ -1140,6 +1277,7 @@ def open_write(
         FdId(db.gen_id()),
         writable=True,
         lock=LockId(lock),
+        owns_lock=owns_lock,
         volume=m.volume,
         chunk_size=cs,
         carry_src=carry_src,
@@ -1284,6 +1422,9 @@ __all__ = [
     "unpack",
     "open_read",
     "open_write",
+    "lock",
+    "unlock",
+    "renew_lock",
     "prune",
     "set_retention",
     "prune_content",

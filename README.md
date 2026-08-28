@@ -10,7 +10,7 @@ A portable encrypted filesystem stored inside one file
 
 **Overview (current)** | [Getting Started](https://github.com/Aloecraft-org/aloelite/blob/main/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](https://github.com/Aloecraft-org/aloelite/blob/main/doc/FAQ.md) 
 
-[Troubleshooting](https://github.com/Aloecraft-org/aloelite/blob/main/doc/TROUBLESHOOTING.md) | [Requirements Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/REQUIREMENTS.md) | [Encryption Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ENCRYPTION.md) | [Roadmap](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ROADMAP.md)
+[Troubleshooting](https://github.com/Aloecraft-org/aloelite/blob/main/doc/TROUBLESHOOTING.md) | [Requirements Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/REQUIREMENTS.md) | [Encryption Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ENCRYPTION.md) | [WebDAV](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WEBDAV.md) | [Roadmap](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ROADMAP.md)
 
 [![PyPI Version](https://img.shields.io/pypi/v/aloelite.svg)](https://pypi.org/project/aloelite/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/aloelite.svg)](https://pypi.org/project/aloelite/)
@@ -32,6 +32,7 @@ A portable encrypted filesystem stored inside one file
 - [Command Line](#command-line)
 - [Mount API](#mount-api)
 - [FUSE](#fuse)
+- [WebDAV](#webdav)
 - [Volume Manager and WebUI](#volume-manager-and-webui)
     + [API](#api)
     + [Backup Sync Pattern](#backup-sync-pattern)
@@ -404,6 +405,46 @@ configuration escape hatch — point the mmap-backed store at a regular
 directory, or switch the journal mode — while the payload data stays on
 the volume.
 
+## WebDAV
+
+Mount a volume as a network drive from any OS — no FUSE, no privileges, no
+kernel module. The WebDAV frontend is a **peer of FUSE**, not a layer on it: it
+consumes the same ops API the browser UI does, so it runs anywhere the manager
+runs, including Windows and macOS hosts where FUSE was never an option.
+
+It is off by default — a second write-capable surface on every volume does not
+appear by accident:
+
+```bash
+aloelite-web --webdav                  # or ALOELITE_WEBDAV=1
+
+# Linux
+sudo mount -t davfs http://127.0.0.1:8080/dav/<volume-id> /mnt/vault
+
+# Anywhere, and the best experience today (no locking required)
+rclone mount :webdav:/ /mnt/vault --webdav-url http://127.0.0.1:8080/dav/<volume-id>
+
+# Windows (off loopback this needs TLS and a machine-trusted certificate)
+net use Z: http://127.0.0.1:8080/dav/<volume-id>
+```
+
+Encrypted volumes authenticate with HTTP Basic where **the password is the
+PIN** — proving it also unlocks the volume. Basic sends that PIN on every
+request, so serving WebDAV off loopback **requires TLS** (`--tls-self-signed`,
+or `--tls-cert`/`--tls-key` for a certificate your clients already trust); the
+manager refuses rather than putting the PIN on the wire in the clear.
+
+**RFC 4918 compliance class 2** — `LOCK`/`UNLOCK`, Depth 0 and infinity,
+exclusive write locks — so Finder and Explorer mount read-write rather than
+read-only or failing at first save. Ranged `GET`, `If-Match`/`If-None-Match`
+and `If-Range` are supported, so clients can seek, resume safely, and avoid
+lost updates.
+
+See [doc/WEBDAV.md](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WEBDAV.md)
+for per-client detail, the TLS story, and how locking is built. Note the
+desktop-client behaviour there is derived from vendor documentation, not from
+a Windows or macOS runner in CI.
+
 ## Volume Manager and WebUI
 
 The volume manager serves Aloelite volumes over an HTTP API with a browser
@@ -424,9 +465,10 @@ aloelite-web
 
 That's the whole setup: direct mode, bound to `127.0.0.1:8080`, data in
 `~/.aloelite`. No sudo, no directories to prepare. Flags (see
-`aloelite-web --help`): `-p/--port`, `--host`, `--root`, and `--fuse` to
-run the container-grade FUSE provisioning mode instead; the matching
-`ALOELITE_*` environment variables are honored when a flag is absent.
+`aloelite-web --help`): `-p/--port`, `--host`, `--root`, `--webdav`,
+`--tls-self-signed` / `--tls-cert` + `--tls-key`, and `--fuse` to run the
+container-grade FUSE provisioning mode instead; the matching `ALOELITE_*`
+environment variables are honored when a flag is absent.
 The manager API has no authentication — keep the default loopback bind
 and put a reverse proxy with auth in front if you need remote access.
 

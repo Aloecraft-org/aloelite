@@ -1,4 +1,4 @@
-# ACC-6..9. The point of pinning these now is ACC-8: the lock row carries
+# ACC-6..11. The point of pinning these now is ACC-8: the lock row carries
 # read_count and write_count, and they are RECORDED BUT NOT ENFORCED. Read on
 # its own, that schema looks like an invitation to implement shared reads. It
 # is not — it forward-provisions a future policy without committing to one.
@@ -45,6 +45,297 @@ scenarios:
         args: {path: /contended.txt, size: 0}
         via: second
         raises: lock_held
+
+  - scenario: a-write-lock-excludes-another-mounts-remove
+    requirements: [ACC-6, ACC-7, ACC-11]
+    harness: two_mounts_one_volume
+    description: >
+      A lock has to guard EXISTENCE, not only bytes. Removing an entry another
+      mount is actively writing discards that writer's work, and neither side
+      sees an error: the writer's close commits to a node with no placement.
+      Exclusion that covers write_all but not remove is bypassable by anyone
+      willing to delete first.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: remove
+        args: {path: /contended.txt}
+        via: second
+        raises: lock_held
+
+  - scenario: a-write-lock-excludes-another-mounts-move
+    requirements: [ACC-6, ACC-7, ACC-11]
+    harness: two_mounts_one_volume
+    description: >
+      Relocating a locked entry is refused at the entry itself. This is also
+      what a future WebDAV class 2 frontend needs: RFC 4918 does not permit
+      MOVE of a locked resource by a principal without the token.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: move
+        args: {from: /contended.txt, to: /moved.txt}
+        via: second
+        raises: lock_held
+
+  - scenario: a-write-lock-excludes-another-mounts-metadata-write
+    requirements: [ACC-6, ACC-7, ACC-11, NODE-6]
+    harness: two_mounts_one_volume
+    description: >
+      set_metadata replaces the NODE-6 map WHOLESALE, so an unguarded write
+      from another mount erases annotations the lock holder is relying on.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: set_metadata
+        args: {path: /contended.txt, metadata: {k: v}}
+        via: second
+        raises: lock_held
+
+  - scenario: a-recursive-remove-is-refused-by-a-lock-deep-in-the-subtree
+    requirements: [ACC-6, ACC-7, ACC-11]
+    harness: two_mounts_one_volume
+    description: >
+      DESTRUCTION IS CHECKED TRANSITIVELY. remove_recursive archives every
+      member of the subtree, so a lock anywhere below the root covers something
+      the statement would destroy. An implementation that checks only the root
+      passes the simple cases and still silently discards a deep writer's work.
+    steps:
+      - op: create_container
+        args: {path: /a}
+      - op: create_container
+        args: {path: /a/b}
+      - op: create_entry
+        args: {path: /a/b/deep.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /a/b/deep.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: remove_recursive
+        args: {path: /a}
+        via: second
+        raises: lock_held
+      - op: exists
+        args: {path: /a/b/deep.txt}
+        via: first
+        expect: true
+
+  - scenario: moving-an-ancestor-of-a-locked-node-is-permitted
+    requirements: [ACC-7, ACC-11]
+    harness: two_mounts_one_volume
+    description: >
+      The deliberate BOUNDARY of the rule above, pinned so a port does not
+      "helpfully" tighten it. Relocation is checked at the locked node itself,
+      not transitively: moving an ancestor changes the locked node's path but
+      neither its content nor its existence. Checking ancestors would make an
+      exclusive write lock behave like a lock on every directory above it, and
+      one open file would freeze a whole tree.
+    steps:
+      - op: create_container
+        args: {path: /a}
+      - op: create_entry
+        args: {path: /a/f.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /a/f.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: move
+        args: {from: /a, to: /moved}
+        via: second
+      - op: exists
+        args: {path: /moved/f.txt}
+        via: second
+        expect: true
+
+  - scenario: aborting-a-write-releases-the-lock
+    requirements: [ACC-7, ACC-9, CV-3]
+    harness: two_mounts_one_volume
+    description: >
+      An abort must free the entry as completely as a close does. If it did
+      not, the safe way to discard a partial write would be to strand the lock
+      and leave the resource permanently unwritable — worse than the partial
+      commit it was meant to avoid. The other mount must find the ORIGINAL
+      bytes, not the aborted ones.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {utf8: "abandoned"}}
+      - op: write_all
+        args: {path: /contended.txt, data: {utf8: "blocked"}}
+        via: second
+        raises: lock_held
+      - op: abort
+        args: {fd: {ref: writer}}
+        via: first
+      - op: read_all
+        args: {path: /contended.txt}
+        via: second
+        expect: {utf8: "original"}
+      - op: write_all
+        args: {path: /contended.txt, data: {utf8: "now permitted"}}
+        via: second
+      - op: read_all
+        args: {path: /contended.txt}
+        via: second
+        expect: {utf8: "now permitted"}
+
+  - scenario: a-standalone-lock-outlives-the-descriptor-that-used-it
+    requirements: [ACC-6, ACC-7, ACC-11]
+    harness: two_mounts_one_volume
+    description: >
+      THE DISTINCTION BETWEEN A MINTED AND A SUPPLIED LOCK. open_write given an
+      existing lock must not release it on close: the lock's lifetime belongs
+      to whoever took it. A protocol whose LOCK, PUT and UNLOCK are separate
+      requests would otherwise be unprotected between them, and a second
+      writer could slip in after the first PUT closed.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: lock
+        args: {path: /contended.txt, ttl_ms: 60000}
+        via: first
+        bind: held
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate, lock: {ref: held.id}}
+        via: first
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {utf8: "first request"}}
+      - op: close
+        args: {fd: {ref: writer}}
+        via: first
+      - op: write_all
+        args: {path: /contended.txt, data: {utf8: "interloper"}}
+        via: second
+        raises: lock_held
+      - op: unlock
+        args: {lock: {ref: held.id}}
+        via: first
+      - op: write_all
+        args: {path: /contended.txt, data: {utf8: "now permitted"}}
+        via: second
+      - op: read_all
+        args: {path: /contended.txt}
+        via: second
+        expect: {utf8: "now permitted"}
+
+  - scenario: a-minted-lock-is-still-released-on-close
+    requirements: [ACC-7]
+    harness: two_mounts_one_volume
+    description: >
+      The other half of the same rule, pinned so an implementation adding
+      supplied locks does not accidentally make every write leak one:
+      open_write WITHOUT a token owns its lock and gives it back at close.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {utf8: "mine"}}
+      - op: close
+        args: {fd: {ref: writer}}
+        via: first
+      - op: write_all
+        args: {path: /contended.txt, data: {utf8: "permitted"}}
+        via: second
+
+  - scenario: a-second-standalone-lock-on-one-node-is-refused
+    requirements: [ACC-6, ACC-7]
+    description: >
+      lock() excludes the caller's OWN mount too, unlike the write paths. Two
+      lock rows for one (mount, node) pair would leave unlock ambiguous about
+      which of them it released.
+    steps:
+      - op: create_entry
+        args: {path: /f.txt, data: {utf8: "x"}}
+      - op: lock
+        args: {path: /f.txt}
+        bind: held
+      - op: lock
+        args: {path: /f.txt}
+        raises: lock_held
+      - op: unlock
+        args: {lock: {ref: held.id}}
+      - op: lock
+        args: {path: /f.txt}
+
+  - scenario: unlock-is-scoped-to-the-owning-mount
+    requirements: [ACC-6]
+    harness: two_mounts_one_volume
+    description: >
+      A lock is mount-scoped (ACC-6), so another mount may not release it --
+      otherwise exclusion would be advisory in the worst sense. lock_held, not
+      lock_invalid: the lock is live, it simply is not the caller's.
+    steps:
+      - op: create_entry
+        args: {path: /f.txt, data: {utf8: "x"}}
+      - op: lock
+        args: {path: /f.txt, ttl_ms: 60000}
+        via: first
+        bind: held
+      - op: unlock
+        args: {lock: {ref: held.id}}
+        via: second
+        raises: lock_held
+      - op: unlock
+        args: {lock: {ref: held.id}}
+        via: first
+
+  - scenario: unlocking-an-already-released-lock-is-an-error
+    requirements: [ACC-9]
+    description: >
+      Deliberately NOT idempotent, unlike close/abort. Succeeding would hide a
+      client that believes it still holds a lock it does not, which is the
+      failure mode a token-based protocol is least able to detect on its own.
+    steps:
+      - op: create_entry
+        args: {path: /f.txt, data: {utf8: "x"}}
+      - op: lock
+        args: {path: /f.txt}
+        bind: held
+      - op: unlock
+        args: {lock: {ref: held.id}}
+      - op: unlock
+        args: {lock: {ref: held.id}}
+        raises: lock_invalid
+
+  - scenario: open-write-refuses-a-token-for-a-different-node
+    requirements: [ACC-6, ACC-7]
+    description: >
+      A lock authorises writes to ONE node. Without this an implementation
+      that merely checks "is this token valid" would let a client lock a file
+      it may write and then use that token against one it may not.
+    steps:
+      - op: create_entry
+        args: {path: /f.txt, data: {utf8: "f"}}
+      - op: create_entry
+        args: {path: /g.txt, data: {utf8: "g"}}
+      - op: lock
+        args: {path: /g.txt}
+        bind: held
+      - op: open_write
+        args: {path: /f.txt, mode: truncate, lock: {ref: held.id}}
+        raises: lock_invalid
 
   - scenario: releasing-a-write-lock-readmits-the-other-mount
     requirements: [ACC-7, ACC-9]

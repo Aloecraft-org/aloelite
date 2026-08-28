@@ -2,6 +2,89 @@
 # chunk_size so boundary behaviour is exercised with bytes you can read in the
 # fixture rather than megabytes you cannot.
 scenarios:
+  - scenario: abort-discards-a-partial-write-and-keeps-the-previous-bytes
+    requirements: [CV-3, IO-2]
+    description: >
+      abort is what makes a streamed write all-or-nothing for callers that
+      need it. The committed version pointer is the sole definition of current
+      bytes (CV-3), so declining to advance it leaves the entry exactly as it
+      was — the partial content was never visible to any reader at any point.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /f.bin, mode: truncate}
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {utf8: "replacement text that is long"}}
+      - op: abort
+        args: {fd: {ref: writer}}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "original"}
+      - op: stat
+        args: {path: /f.bin}
+        expect: {size: 8}
+
+  - scenario: abort-after-many-chunk-flushes-still-discards-everything
+    requirements: [CV-3, IO-2, IO-5]
+    description: >
+      The case an implementation is most likely to get wrong. A long stream
+      flushes full chunks mid-write in their own transactions (IO-5, bounded
+      memory), so those rows are already durable when abort runs. They are
+      staged at a version ABOVE the committed pointer and must remain
+      invisible: an implementation that advances the pointer per flush, or
+      that treats durability as commitment, fails here while passing the
+      single-chunk case above.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /f.bin, mode: truncate}
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {repeat: {utf8: "Y"}, count: 96}}
+      - op: abort
+        args: {fd: {ref: writer}}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "original"}
+
+  - scenario: abort-is-idempotent-and-close-still-commits
+    requirements: [CV-3]
+    description: >
+      abort and close are the two terminal states of one descriptor, not a
+      mode switch. Repeating abort is a no-op, and the ordinary close path is
+      unchanged by abort existing — a binding must not make every scope exit
+      discard.
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /f.bin, mode: truncate}
+        bind: doomed
+      - op: write
+        args: {fd: {ref: doomed}, data: {utf8: "discarded"}}
+      - op: abort
+        args: {fd: {ref: doomed}}
+      - op: abort
+        args: {fd: {ref: doomed}}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "original"}
+      - op: open_write
+        args: {path: /f.bin, mode: truncate}
+        bind: kept
+      - op: write
+        args: {fd: {ref: kept}, data: {utf8: "committed"}}
+      - op: close
+        args: {fd: {ref: kept}}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "committed"}
+
   - scenario: write-all-replaces-the-whole-payload
     requirements: [IO-2, CV-3]
     description: >

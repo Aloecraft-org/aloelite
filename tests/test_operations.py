@@ -308,6 +308,302 @@ def test_same_mount_does_not_self_block(db, mount):
     assert ops.read_all(db, mount, "/f") in (b"x", b"y")
 
 
+def _other_mount(db, mount):
+    return ops.mount(db, ops.mount_info(db, mount).volume, "/", ttl_ms=60_000)
+
+
+def test_write_lock_blocks_remove_from_another_mount(db, mount):
+    """Removing a file another mount is actively writing discards that
+    writer's data with no error on either side. The lock already existed; it
+    simply was not consulted outside the content-write paths."""
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld):
+            ops.remove(db, other, "/f")
+    ops.remove(db, other, "/f")  # released on close
+
+
+def test_write_lock_blocks_move_from_another_mount(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld):
+            ops.move(db, other, "/f", "/g")
+    ops.move(db, other, "/f", "/g")
+
+
+def test_write_lock_blocks_set_metadata_from_another_mount(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld):
+            ops.set_metadata(db, other, "/f", {"k": "v"})
+    ops.set_metadata(db, other, "/f", {"k": "v"})
+
+
+def test_recursive_remove_is_blocked_by_a_lock_deep_in_the_subtree(db, mount):
+    """Destruction is checked TRANSITIVELY. The lock is three levels down and
+    the remove is issued at the top, so a root-only check would miss it and
+    archive the locked node anyway."""
+    other = _other_mount(db, mount)
+    ops.create_container(db, mount, "/a")
+    ops.create_container(db, mount, "/a/b")
+    ops.create_container(db, mount, "/a/b/c")
+    ops.create_entry(db, mount, "/a/b/c/deep", b"")
+    with ops.open_write(db, mount, "/a/b/c/deep") as w:
+        w.write(b"x")
+        with pytest.raises(errors.LockHeld) as caught:
+            ops.remove_recursive(db, other, "/a")
+        # The error names the offending descendant, not the tree root.
+        assert caught.value.context["node"] == ops.stat(db, mount, "/a/b/c/deep").id
+        assert ops.exists(db, mount, "/a/b/c/deep")
+    ops.remove_recursive(db, other, "/a")
+    assert not ops.exists(db, mount, "/a")
+
+
+def test_moving_an_ancestor_of_a_locked_node_is_allowed(db, mount):
+    """Relocation is checked at the node itself only. Moving an ancestor
+    changes a locked node's path but neither its content nor its existence;
+    blocking it would make an exclusive write lock behave like a lock on every
+    directory above it."""
+    other = _other_mount(db, mount)
+    ops.create_container(db, mount, "/a")
+    ops.create_entry(db, mount, "/a/f", b"")
+    with ops.open_write(db, mount, "/a/f") as w:
+        w.write(b"x")
+        ops.move(db, other, "/a", "/moved")  # allowed
+    assert ops.exists(db, mount, "/moved/f")
+
+
+def test_lock_checks_never_block_the_holding_mount(db, mount):
+    """Cross-mount exclusivity only -- the same mount must still be able to
+    rename or annotate what it is itself writing."""
+    ops.create_entry(db, mount, "/f", b"")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+        ops.set_metadata(db, mount, "/f", {"k": "v"})
+        ops.move(db, mount, "/f", "/g")
+    assert ops.exists(db, mount, "/g")
+
+
+def test_with_block_that_raises_aborts_the_write(db, mount):
+    """The rule that closed the interrupted-upload data loss: a block that
+    raised did not finish producing the content, so committing what arrived
+    would publish a truncated file as if it were whole -- silently, since the
+    exception is about the transfer, not the data."""
+    ops.create_entry(db, mount, "/f", b"original")
+
+    class Boom(Exception):
+        pass
+
+    with pytest.raises(Boom):
+        with ops.open_write(db, mount, "/f") as w:
+            w.write(b"partial")
+            raise Boom
+    assert ops.read_all(db, mount, "/f") == b"original"
+    # and the entry is still writable -- the lock was released, not stranded
+    ops.write_all(db, mount, "/f", b"after")
+    assert ops.read_all(db, mount, "/f") == b"after"
+
+
+def test_with_block_that_completes_still_commits(db, mount):
+    ops.create_entry(db, mount, "/f", b"original")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"replaced")
+    assert ops.read_all(db, mount, "/f") == b"replaced"
+
+
+def test_explicit_close_after_an_error_still_commits(db, mount):
+    """THE FUSE CONTRACT, pinned. aloelite/fuse.py never uses `with`: it parks
+    the writer in self._open and calls close() from flush()/release(). A
+    partial POSIX write must still land, the way it does on a local
+    filesystem, so the commit decision has to stay at the call site rather
+    than move inside the descriptor."""
+    ops.create_entry(db, mount, "/f", b"original")
+    w = ops.open_write(db, mount, "/f")
+    try:
+        w.write(b"partial")
+        raise RuntimeError("something upstream failed")
+    except RuntimeError:
+        pass
+    w.close()  # explicit close commits regardless of the error
+    assert ops.read_all(db, mount, "/f") == b"partial"
+
+
+def test_abort_releases_the_lock_for_another_mount(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    w = ops.open_write(db, mount, "/f")
+    w.write(b"discarded")
+    with pytest.raises(errors.LockHeld):
+        ops.write_all(db, other, "/f", b"blocked")
+    w.abort()
+    ops.write_all(db, other, "/f", b"permitted")
+    assert ops.read_all(db, mount, "/f") == b"permitted"
+
+
+def test_abort_on_a_read_descriptor_is_a_noop(db, mount):
+    ops.create_entry(db, mount, "/f", b"data")
+    r = ops.open_read(db, mount, "/f")
+    r.abort()
+    assert r.closed
+    assert ops.read_all(db, mount, "/f") == b"data"
+
+
+def test_abort_below_one_chunk_stages_nothing_to_reclaim(db, mount):
+    """A write that never fills a chunk never flushes, so it never allocates a
+    version at all -- there is nothing for prune to find. Worth pinning
+    because it is the reason the leak test below needs a tiny chunk size."""
+    ops.create_entry(db, mount, "/f", b"original")
+    w = ops.open_write(db, mount, "/f")
+    w.write(b"x" * 64)  # default chunk is 1 MiB
+    w.abort()
+    assert ops.prune_content(db, None).versions_pruned == 0
+    assert ops.read_all(db, mount, "/f") == b"original"
+
+
+def test_aborted_versions_are_reclaimed_by_prune_content(db):
+    """abort deliberately leaves staged chunks above the committed pointer
+    instead of deleting them: that is already the CV-3 incomplete-write state
+    and CV-7's prune_content owns reclaiming it. If that were not true, abort
+    would trade a data-loss bug for a disk leak."""
+    vol = ops.create_volume(db, "tiny-chunks", chunk_size=8)
+    m = ops.mount(db, vol.id, "/", ttl_ms=60_000)
+    ops.create_entry(db, m, "/f", b"original")
+    w = ops.open_write(db, m, "/f")
+    w.write(b"Y" * 96)  # 12 full chunks, each flushed in its own txn
+    w.abort()
+    report = ops.prune_content(db, vol.id)
+    assert report.versions_pruned >= 1
+    assert ops.read_all(db, m, "/f") == b"original"
+
+
+# --------------------------------------------------------------------------
+# Standalone locks — a lock with no open descriptor
+# --------------------------------------------------------------------------
+def test_a_standalone_lock_survives_the_descriptor_that_used_it(db, mount):
+    """THE POINT OF THE FEATURE. LOCK, PUT, PUT, UNLOCK arrive as four
+    separate requests in WebDAV class 2; if close() dropped the lock, the
+    resource would be unprotected between them and the second PUT could land
+    after someone else's."""
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    held = ops.lock(db, mount, "/f", ttl_ms=60_000)
+
+    with ops.open_write(db, mount, "/f", lock=held.id) as w:
+        w.write(b"first request")
+    with pytest.raises(errors.LockHeld):
+        ops.write_all(db, other, "/f", b"interloper")  # still locked after close
+
+    with ops.open_write(db, mount, "/f", lock=held.id) as w:
+        w.write(b"second request")
+    assert ops.read_all(db, mount, "/f") == b"second request"
+
+    ops.unlock(db, mount, held.id)
+    ops.write_all(db, other, "/f", b"now permitted")
+
+
+def test_a_minted_lock_is_still_released_on_close(db, mount):
+    """The default path must not change: open_write without a token owns its
+    lock and gives it back, or every FUSE write would leak one."""
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    with ops.open_write(db, mount, "/f") as w:
+        w.write(b"x")
+    ops.write_all(db, other, "/f", b"permitted")
+
+
+def test_abort_leaves_a_supplied_lock_standing(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    held = ops.lock(db, mount, "/f", ttl_ms=60_000)
+    w = ops.open_write(db, mount, "/f", lock=held.id)
+    w.write(b"discarded")
+    w.abort()
+    assert ops.read_all(db, mount, "/f") == b"original"
+    with pytest.raises(errors.LockHeld):
+        ops.write_all(db, other, "/f", b"interloper")
+    ops.unlock(db, mount, held.id)
+
+
+def test_a_second_lock_on_one_node_is_refused_even_for_the_same_mount(db, mount):
+    """Self-exclusion, unlike the write paths. Two rows for one (mount, node)
+    would make unlock ambiguous about which it released."""
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f")
+    with pytest.raises(errors.LockHeld):
+        ops.lock(db, mount, "/f")
+    ops.unlock(db, mount, held.id)
+    ops.lock(db, mount, "/f")  # free again
+
+
+def test_unlock_and_renew_are_owner_scoped(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f", ttl_ms=60_000)
+    # LockHeld, not LockInvalid: the lock is live, just not this caller's.
+    with pytest.raises(errors.LockHeld):
+        ops.unlock(db, other, held.id)
+    with pytest.raises(errors.LockHeld):
+        ops.renew_lock(db, other, held.id, 60_000)
+    ops.unlock(db, mount, held.id)
+
+
+def test_unlocking_twice_is_lock_invalid(db, mount):
+    """Deliberately not idempotent: succeeding would hide a client that
+    believes it still holds a lock it does not."""
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f")
+    ops.unlock(db, mount, held.id)
+    with pytest.raises(errors.LockInvalid):
+        ops.unlock(db, mount, held.id)
+
+
+def test_renew_keeps_the_lock_id(db, mount):
+    """A stable id is what lets a client carry one token across requests."""
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f", ttl_ms=1_000)
+    renewed = ops.renew_lock(db, mount, held.id, 60_000)
+    assert renewed.id == held.id
+    assert renewed.node == held.node
+    assert renewed.expires_at > held.expires_at
+
+
+def test_an_expired_lock_stops_excluding_and_cannot_be_renewed(db, mount):
+    """ACC-9/10: validity is derived, so a client that vanishes cannot wedge a
+    node forever -- the ttl is what makes a network lock safe to hand out."""
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"original")
+    held = ops.lock(db, mount, "/f", ttl_ms=120)
+    with pytest.raises(errors.LockHeld):
+        ops.write_all(db, other, "/f", b"blocked")
+    time.sleep(0.3)
+    ops.write_all(db, other, "/f", b"after expiry")  # node is free again
+    with pytest.raises(errors.LockInvalid):
+        ops.renew_lock(db, mount, held.id, 60_000)
+    assert ops.prune(db).locks_pruned >= 1
+
+
+def test_open_write_rejects_a_token_for_another_node(db, mount):
+    ops.create_entry(db, mount, "/f", b"f")
+    ops.create_entry(db, mount, "/g", b"g")
+    held = ops.lock(db, mount, "/g")
+    with pytest.raises(errors.LockInvalid):
+        ops.open_write(db, mount, "/f", lock=held.id)
+
+
+def test_open_write_rejects_another_mounts_token(db, mount):
+    other = _other_mount(db, mount)
+    ops.create_entry(db, mount, "/f", b"x")
+    held = ops.lock(db, mount, "/f", ttl_ms=60_000)
+    with pytest.raises(errors.LockHeld):
+        ops.open_write(db, other, "/f", lock=held.id)
+
+
 def test_open_write_creates_missing_entry(db, mount):
     # open_write(TRUNCATE) on a missing path creates the entry inside the
     # operation's own transaction (no wrapper pre-create, no TOCTOU window)

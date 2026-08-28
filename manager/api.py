@@ -130,6 +130,7 @@ def create_app(
     aloelite_root: str = ALOELITE_ROOT,
     host_mnt_prefix: str = HOST_MNT_PREFIX,
     auth_mode: str | None = None,
+    webdav: bool | None = None,
 ) -> Flask:
     app = Flask(__name__)
     registry = registry or DirectSessionRegistry()
@@ -1071,6 +1072,18 @@ def create_app(
     @app.get("/")
     def index():
         return redirect("/admin")
+
+    # -- WebDAV (opt-in) ----------------------------------------------------
+    # Off unless asked for. It is a second, write-capable surface on every
+    # volume, and unlike the JSON API it is the feature that tempts people to
+    # bind past loopback -- so it does not appear by accident.
+    if webdav is None:
+        webdav = os.environ.get("ALOELITE_WEBDAV", "") not in ("", "0")
+    if webdav:
+        from .dav import create_dav_blueprint
+
+        app.register_blueprint(create_dav_blueprint(store, registry))
+    app.config["WEBDAV"] = bool(webdav)
 
     @app.get("/admin")
     def admin():

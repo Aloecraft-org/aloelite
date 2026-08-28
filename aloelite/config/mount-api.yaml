@@ -68,8 +68,8 @@ records:
   NodeInfo:
     { id: NodeId, type: NodeType, name: string, created_at: Timestamp,
       modified_at: Timestamp, volume: "VolumeId?", size: "int?",
-      metadata: "{string:string}",
-      note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it). size is the materialized content total, null for a container. metadata is the NODE-6 shallow annotation map, empty when unset (never null)." }
+      version: "int?", metadata: "{string:string}",
+      note: "modified_at tracks the node's own content/metadata change, not placement (move does not bump it). size is the materialized content total, null for a container. version is the CV-3 committed version pointer, which advances on every commit and so identifies content exactly -- unlike modified_at, whose millisecond resolution aliases two writes in the same tick; a binding serving HTTP should build its strong ETag from it. Null for anything with no content row, containers chiefly. metadata is the NODE-6 shallow annotation map, empty when unset (never null)." }
   DirEntry:
     { node: NodeId, name: string, type: NodeType, visible: bool, edge: EdgeId,
       current_directory: Path,
@@ -325,12 +325,54 @@ operations:
       flags:   { addr: both }
       raises:  [not_found, not_an_entry, mount_invalid]
 
+  # --- locking (a lock with no open descriptor) ----------------------------
+  locking:
+    note: >
+      A lock taken here is a FIRST-CLASS OBJECT: it exists with no open
+      descriptor and outlives any single operation. open_write still mints its
+      own lock when none is supplied — right for a POSIX write, where the
+      lock's whole life is the open file — but a protocol whose LOCK, PUT and
+      UNLOCK arrive as three separate requests (WebDAV class 2) needs the lock
+      durable and the descriptor transient. Exclusive only, per ACC-7.
+
+      Validity stays derived (ACC-9/10): nothing actively invalidates a lock,
+      so renewal is only moving expires_at and reclamation remains prune's job.
+      A lock with no ttl ends only with its mount.
+    lock:
+      params:  { mount: MountId, path: Path, ttl_ms: "int?" }
+      returns: LockInfo
+      flags:   { mutates: true, locks: true, addr: both }
+      raises:  [not_found, lock_held, mount_invalid]
+      note: >
+        Refused if ANY valid lock exists on the node, INCLUDING one this mount
+        already holds — unlike the write paths, which exclude the caller's own
+        mount. A second row for one (mount, node) would make unlock ambiguous
+        about which lock it released.
+    unlock:
+      params:  { mount: MountId, lock: LockId }
+      returns: void
+      flags:   { mutates: true }
+      raises:  [lock_invalid, lock_held, mount_invalid]
+      note: >
+        Not idempotent: releasing an already-gone lock raises lock_invalid,
+        since succeeding silently would hide a client that believes it still
+        holds something it does not. lock_held is the answer for a live lock
+        owned by another mount — it is held, just not by the caller.
+    renew_lock:
+      params:  { mount: MountId, lock: LockId, ttl_ms: "int?" }
+      returns: LockInfo
+      flags:   { mutates: true }
+      raises:  [lock_invalid, lock_held, mount_invalid]
+      note: >
+        Keeps the lock id, which is what lets a client carry one token across
+        many requests — the WebDAV lock-token shape.
+
   # --- streaming (descriptor lifecycle) ------------------------------------
   streaming:
     note: >
       The flat primitives below back a per-binding wrapper (Rust Read/Write,
       Python file-like, JS stream, Kotlin InputStream). open_write takes an
-      exclusive mount-scoped lock (ACC-6/7) held until close. A long stream is
+      exclusive mount-scoped lock (ACC-6/7) held until close or abort. A long stream is
       an ordinary lock with a generous ttl, not a special case. Must not hold a
       write transaction open for the stream's life (IO-4/5); writes batch behind
       a single commit at close.
@@ -340,10 +382,17 @@ operations:
       flags:   { locks: false, addr: both }
       raises:  [not_found, not_an_entry, mount_invalid, mount_point_archived]
     open_write:
-      params:  { mount: MountId, path: Path, mode: WriteMode }
+      params:  { mount: MountId, path: Path, mode: WriteMode, lock: "LockId?" }
       returns: Descriptor
       flags:   { mutates: true, locks: true, addr: both }
-      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
+      raises:  [not_found, not_an_entry, lock_held, lock_invalid, mount_invalid]
+      note: >
+        `lock` supplies an existing lock from locking.lock instead of minting
+        one, and the difference is LIFETIME: a minted lock is owned by the
+        descriptor and released on close/abort, a supplied one outlives it and
+        goes only on unlock. Releasing a supplied lock at close would drop a
+        protocol-level lock between requests. A supplied lock must belong to
+        this mount and to this node, else lock_held / lock_invalid.
     read:
       params:  { fd: FdId, len: int }
       returns: Bytes
@@ -364,6 +413,23 @@ operations:
       returns: void
       flags:   { mutates: true }
       note:    "flushes, commits the staged content atomically, releases the lock"
+    abort:
+      params:  { fd: FdId }
+      returns: void
+      flags:   { mutates: true }
+      note: >
+        The counterpart to close: releases the lock WITHOUT advancing the
+        committed version pointer, so the entry keeps its previous bytes and a
+        partial write is never visible. Idempotent, and a no-op on a read
+        descriptor. Staged chunks are left above the committed pointer rather
+        than deleted eagerly — that is already the CV-3 "incomplete write"
+        state, and CV-7's prune_content is what reclaims it. A binding whose
+        native wrapper has scope-exit semantics (Python __exit__, Rust Drop,
+        Kotlin use) should COMMIT on a clean exit and ABORT on an unwinding
+        one: a block that raised did not finish producing the content, so
+        committing what arrived publishes a truncated file as whole. Explicit
+        close() must keep committing whatever was written, which is what a
+        POSIX/FUSE frontend needs.
 
   # --- maintenance ---------------------------------------------------------
   maintenance:

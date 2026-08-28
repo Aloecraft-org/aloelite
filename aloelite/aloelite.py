@@ -23,6 +23,13 @@ manager (its own concern: the lock lifecycle), so it composes:
     with fs.mount(vol) as m:
         with m.open_write("/f") as w:
             w.write(b"...")
+
+That `with` COMMITS on a clean exit and ABORTS if the block raises, leaving the
+entry's previous bytes untouched -- a block that did not finish producing the
+content should not publish a truncated file as if it were whole. Callers that
+want a partial write kept (a POSIX frontend, where that is the expected
+behaviour) call close() explicitly instead of using `with`; see
+Descriptor.abort and aloelite/fuse.py.
 """
 
 from __future__ import annotations
@@ -38,12 +45,13 @@ from .descriptor import Descriptor
 from .models import (
     ContentPruneReport,
     DirEntry,
+    LockInfo,
     MountInfo,
     NodeInfo,
     PruneReport,
     VolumeInfo,
 )
-from .types import MountId, NodeId, VolumeId, WriteMode
+from .types import LockId, MountId, NodeId, VolumeId, WriteMode
 
 if TYPE_CHECKING:
     # Runtime import lives inside Mount.path() to break the aloelite <-> path
@@ -347,8 +355,23 @@ class Mount:
     def open_read(self, path: str) -> Descriptor:
         return ops.open_read(self._db, self.id, path)
 
-    def open_write(self, path: str, mode: WriteMode = WriteMode.TRUNCATE) -> Descriptor:
-        return ops.open_write(self._db, self.id, path, mode)
+    def open_write(
+        self,
+        path: str,
+        mode: WriteMode = WriteMode.TRUNCATE,
+        lock: LockId | None = None,
+    ) -> Descriptor:
+        return ops.open_write(self._db, self.id, path, mode, lock)
+
+    # -- standalone locks (a lock with no open descriptor) -------------------
+    def lock(self, path: str, ttl_ms: int | None = None) -> LockInfo:
+        return ops.lock(self._db, self.id, path, ttl_ms)
+
+    def unlock(self, lock: LockId) -> None:
+        ops.unlock(self._db, self.id, lock)
+
+    def renew_lock(self, lock: LockId, ttl_ms: int | None = None) -> LockInfo:
+        return ops.renew_lock(self._db, self.id, lock, ttl_ms)
 
 
 __all__ = ["Aloelite", "Mount"]
