@@ -31,7 +31,13 @@ PREFIX = "_aloelite_smoke/"
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--endpoint", required=True, help="e.g. http://127.0.0.1:7081")
+    ap.add_argument(
+        "--endpoint",
+        required=True,
+        help="e.g. http://127.0.0.1:7081. Prefer an IP over a hostname when "
+        "something looks like a hang: a name that resolves to an address "
+        "nothing answers on is the likeliest cause, not the server.",
+    )
     ap.add_argument("--bucket", required=True, help="the volume's NAME")
     ap.add_argument("--access-key", required=True)
     ap.add_argument("--secret-key", required=True)
@@ -48,7 +54,18 @@ def main() -> int:
         aws_secret_access_key=a.secret_key,
         region_name=a.region,
         # Path style: what a deployment must configure litestream for anyway.
-        config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 1}),
+        # A short connect timeout on purpose. botocore's default is 60s, and
+        # a hostname that resolves to an address nothing answers on (a stale
+        # DNS entry, an IPv6 record with no listener) then looks exactly like
+        # a hung server rather than the name-resolution problem it is. Ten
+        # seconds is generous for anything on a LAN or VPN, and failing with
+        # "could not connect" beats sitting silent.
+        config=Config(
+            s3={"addressing_style": "path"},
+            retries={"max_attempts": 1},
+            connect_timeout=10,
+            read_timeout=120,
+        ),
     )
 
     failures = []
