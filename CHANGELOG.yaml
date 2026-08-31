@@ -147,6 +147,19 @@ releases:
         `/proc/self/mountinfo`, `fusermount3`), so those never execute there.
     fixed:
       - |
+        **A WebDAV volume can be addressed by NAME, not just by its uuid.**
+        `/dav/backups` now resolves as well as
+        `/dav/ca678c06bfaa41928ea9d01d45234ee5`. The id is authoritative and
+        still tried first, so nothing that worked before resolves differently.
+        This was a real usability wall rather than a nicety: a DAV URL is
+        typed once into a Map Network Drive dialog and has to be recognised
+        later, a 32-hex uuid is neither memorable nor checkable, and the S3
+        frontend on the SAME manager already addressed the same volumes by
+        name -- the product disagreed with itself. Names are unique only
+        within a filesystem, so an ambiguous name is refused with a 409 naming
+        the candidate ids rather than resolved to whichever sorts first;
+        silently mounting the wrong volume is the worse failure.
+      - |
         **The too-old-sqlite message named a fix that does not exist on
         Windows.** It said `pip install 'aloelite[bundled-sqlite]'`, but that
         extra resolves to pysqlite3-binary, which pyproject markers to

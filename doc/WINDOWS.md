@@ -178,18 +178,37 @@ New-NetFirewallRule -DisplayName "aloelite S3" -Direction Inbound `
 `_session_token` returns `None` for a plain volume — so on loopback it mounts
 with no TLS, no certificate, and no registry changes:
 
-The URL takes the volume **id**, not its name (`dav.py` resolves it with
-`store.get(vid)`), so look it up first:
+### The short version
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:8080/volumes | Select-Object id, name
-net start WebClient                     # manual-start on some editions
-net use Z: \\127.0.0.1@8080\DavWWWRoot\dav\<volume-id>
+**File Explorer → This PC → Map network drive**, tick *Reconnect at sign-in*,
+and paste:
+
+```
+http://127.0.0.1:7081/dav/backups
 ```
 
-The `@8080` is the port — without it Windows tries the name as SMB first and
-takes ~30s to fail over. Explorer's *Map network drive* dialog wants the same
-thing spelled as a URL: `http://127.0.0.1:8080/dav/<volume-id>`.
+That is the whole thing. The URL takes the volume's **name** — you do not need
+its id. Start `WebClient` first if the dialog complains (`net start WebClient`,
+needs admin, once).
+
+The command-line equivalent, if you prefer:
+
+```powershell
+net use Z: \\127.0.0.1@7081\DavWWWRoot\dav\backups /persistent:yes
+```
+
+Pair that with a scheduled task that starts the manager at logon and you are
+done — the *Reconnect at sign-in* tick and the task are the two moving parts,
+and Windows reconnects the drive on its own once the server answers.
+
+The id still works and is still what `GET /volumes` reports; the name is
+simply the form a person can type. Where a name is ambiguous (names are unique
+only within a filesystem, so two filesystems may each hold a `backups`), the
+server refuses with a 409 naming the ids rather than guessing.
+
+The `@7081` in the UNC form is the port — without it Windows tries the name as
+SMB first and takes ~30s to fail over. The Explorer dialog wants the plain URL
+instead, which is why it is the easier of the two.
 
 To make it survive a reboot, add `/persistent:yes` — though the drive will
 show as disconnected until the manager is running again.

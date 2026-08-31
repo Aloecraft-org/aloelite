@@ -581,10 +581,38 @@ def create_dav_blueprint(
             store.put(rec)
 
     def _require_volume(vid: str) -> VolumeRecord:
+        """Resolve a volume by ID, or failing that by NAME.
+
+        The id is authoritative and is tried first, so nothing that worked
+        before changes. The name fallback exists because a DAV URL is
+        something a person types once into a Map Network Drive dialog and
+        then has to recognise later, and
+
+            http://host:7081/dav/ca678c06bfaa41928ea9d01d45234ee5
+
+        is not a URL anyone can remember, check, or paste from memory -- while
+        the S3 frontend on this same manager addresses the same volumes by
+        name. One product should not disagree with itself about that.
+
+        Names are unique only WITHIN a filesystem (api.py checks
+        `volumes_of(fs_id)`), so two filesystems may each hold a "backups".
+        An ambiguous name is refused by name rather than resolved to whichever
+        record happens to sort first: silently mounting the wrong volume is a
+        far worse outcome than a 409 that says which ids to choose between.
+        """
         rec = store.get(vid)
-        if rec is None:
-            raise DavFault(404, "no such volume")
-        return rec
+        if rec is not None:
+            return rec
+        matches = [r for r in store.list() if r.name == vid]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise DavFault(
+                409,
+                "%r names %d volumes (ids: %s); use the id"
+                % (vid, len(matches), ", ".join(sorted(r.id for r in matches))),
+            )
+        raise DavFault(404, "no such volume")
 
     # -- properties ---------------------------------------------------------
     def _propstat(
