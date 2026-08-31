@@ -31,6 +31,20 @@ jobs:
     - name: Check formatting
       run: ruff format --check .
 
+    # CHANGELOG.yaml is the source of truth for release notes; CHANGELOG.md is
+    # generated from it and committed. `check` is what stops that copy going
+    # stale, and `consistency` is what catches the version drifting between
+    # pyproject.toml, .technoproj and db.py's SCHEMA_ERA -- which is exactly
+    # what happened at v0.3.6rc1, where only pyproject.toml moved.
+    - name: Install changelog deps
+      run: pip install pyyaml
+
+    - name: Changelog is generated from its source
+      run: python script/changelog.py check
+
+    - name: Tree version agrees with the changelog
+      run: python script/changelog.py consistency
+
   test:
     runs-on: ubuntu-latest
     # A wedged FUSE mount would otherwise hold the runner for the 6h default.
