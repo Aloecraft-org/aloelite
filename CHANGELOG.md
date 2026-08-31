@@ -122,6 +122,17 @@ two of its shapes are not the ones an API summary would suggest.
   `manager/web.py` gains the `__main__` guard it was missing so
   `python -m manager.web` works too. Pinned as subprocess tests, since
   importing a module proves nothing about `-m` dispatch.
+- **`script/windows/Install-AloeliteTasks.ps1`**, which registers the two
+  scheduled tasks a rebootable Windows instance needs. Two rather than
+  one because they answer to different owners: the manager runs at system
+  startup as SYSTEM (backups arrive whether or not anyone is logged in,
+  which is also why `-Root` is mandatory -- SYSTEM's profile is not
+  yours), while the drive mapping is per-logon-session by construction
+  and runs at logon, as the user, unelevated. The mapping waits for
+  `/health` before it maps: a remembered mapping is restored at logon
+  BEFORE the server is listening, which is exactly how Windows ends up
+  with a dead drive marked disconnected. The S3 secret is passed by
+  `ALOELITE_S3_SECRET_FILE` so it never enters the task definition.
 
 ### Known issues
 

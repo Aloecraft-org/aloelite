@@ -217,6 +217,75 @@ TLS with a certificate the machine trusts, or that registry value raised —
 which is a worse trade than simply using an unencrypted volume on a machine
 you already trust, or browsing it through the web UI instead.
 
+### Two traps, both costing a round trip
+
+**A drive mapped from an elevated prompt is invisible to Explorer.** Windows
+maps drives per *logon session*, and an elevated session is a different one
+from your normal token. `net start WebClient` genuinely needs admin; `net use`
+must be run as your ordinary user or Explorer will never see it. (Setting
+`EnableLinkedConnections` to 1 under
+`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` shares
+mappings between the two contexts, but that is a broad change for one drive.)
+
+**"New connections will be remembered" means the mapping comes back at logon
+— before the manager is listening.** Windows then leaves it marked
+disconnected with a red X, and Explorer stalls probing it. Map test drives
+with `/persistent:no` and let the logon task below do the real thing.
+
+To undo a mapping, delete it in *both* sessions — the live mapping is
+per-session even though the remembered record is shared:
+
+```powershell
+net use Z: /delete          # in each window that mapped it
+net use                     # should list nothing
+Get-ChildItem HKCU:\Network  # a leftover 'Z' key is the remembered record
+```
+
+## Starting at boot
+
+`script/windows/Install-AloeliteTasks.ps1` registers two scheduled tasks. Two
+rather than one, because they answer to different owners:
+
+- **The manager** must run whether or not anyone is logged in — backups arrive
+  on their own schedule — so it runs **at system startup as SYSTEM**. That is
+  why `-Root` is mandatory: as SYSTEM, the default `~/.aloelite` resolves into
+  SYSTEM's profile, not yours.
+- **The drive mapping** is per-logon-session by construction, so SYSTEM cannot
+  create one for you. It runs **at logon, as you, unelevated**, and waits for
+  the manager's `/health` to answer before mapping — which is what stops the
+  dead-drive-at-logon problem above.
+
+From an elevated PowerShell:
+
+```powershell
+# Keep the secret out of the task definition and the environment.
+"a long random string" | Set-Content C:\aloelite\s3-secret.txt
+
+.\script\windows\Install-AloeliteTasks.ps1 `
+    -Python C:\aloelite\venv\Scripts\python.exe `
+    -Root C:\aloelite\data `
+    -VolumeId <volume-id> `
+    -Port 7081 `
+    -AccessKey AKIALOCALBACKUP `
+    -SecretFile C:\aloelite\s3-secret.txt
+```
+
+Then, without rebooting:
+
+```powershell
+Start-ScheduledTask -TaskName Aloelite-Manager
+Start-ScheduledTask -TaskName Aloelite-MapDrive
+```
+
+It generates the two scripts it runs into `C:\aloelite\bin` rather than
+shipping them, so the paths inside are yours and you can read exactly what
+starts. Omit `-AccessKey`/`-SecretFile` for a WebDAV-only manager. Remove
+everything with:
+
+```powershell
+Unregister-ScheduledTask -TaskName Aloelite-Manager,Aloelite-MapDrive -Confirm:$false
+```
+
 ## What to watch on the first run
 
 These are the places a Linux-only assumption would surface. None of them is
