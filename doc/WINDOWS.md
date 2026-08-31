@@ -277,6 +277,53 @@ Start-ScheduledTask -TaskName Aloelite-Manager
 Start-ScheduledTask -TaskName Aloelite-MapDrive
 ```
 
+### Letting other machines ship backups to it
+
+The default binds loopback, which means S3 is reachable **only from this
+machine** — fine for a local test, useless for catching backups. To let other
+hosts reach it, one manager must bind off loopback:
+
+```powershell
+.\script\windows\Install-AloeliteTasks.ps1 ... -BindHost 10.x.x.x -Insecure
+```
+
+One manager, not two. Splitting S3 and WebDAV into separate processes would
+need two `--root`s (the store supports a single writer), which means two
+separate volume sets — so backups would land somewhere the mapped drive cannot
+see them.
+
+`-Insecure` is required because `--webdav` off loopback without TLS is refused.
+The refusal's reason is specific and worth understanding before overriding it:
+WebDAV authenticates with HTTP Basic where the password is the volume PIN.
+**An unencrypted volume issues no Basic challenge at all** (`dav.py`'s
+`_session_token` returns `None` for a plain volume), so there is no PIN to
+leak and `-Insecure` costs nothing the transport did not already cost. On an
+**encrypted** volume it puts the PIN on the wire in base64 on every request —
+use `--tls-cert` with a trusted certificate instead.
+
+Object data still crosses the network in the clear either way, so use a VPN
+address rather than `0.0.0.0` where you can, and remember the firewall rule
+(the installer prints it when you bind off loopback).
+
+### If PowerShell refuses to run the script
+
+`running scripts is disabled on this system` is the default execution policy,
+not a problem with the file. Run it for this one invocation without changing
+anything system-wide:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\Install-AloeliteTasks.ps1 -Python ... 
+```
+
+or loosen it for the current window only (reverts when you close it):
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+If the file came from another machine it may also carry the mark-of-the-web:
+`Unblock-File .\Install-AloeliteTasks.ps1`.
+
 It generates the two scripts it runs into `C:\aloelite\bin` rather than
 shipping them, so the paths inside are yours and you can read exactly what
 starts. Omit `-AccessKey`/`-SecretFile` for a WebDAV-only manager. Remove
