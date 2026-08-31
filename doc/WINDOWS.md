@@ -111,7 +111,7 @@ That refusal interacts badly with your goal, so pick deliberately:
 | --- | --- |
 | Browse WebDAV **from the Windows box itself** | Keep `--host 127.0.0.1`. No TLS, no cert trust, nothing to configure. |
 | Browse WebDAV **from another machine** | Needs TLS *and* a certificate that machine trusts — see below. |
-| S3 reachable **on the LAN/VPN** | See "Splitting the two surfaces". |
+| S3 reachable **on the LAN/VPN** | Bind `0.0.0.0` with `-Insecure` and a firewall rule — see below. |
 
 **`--tls-self-signed` will not satisfy Windows Explorer.** The WebDAV
 redirector refuses untrusted certificates outright (the `--tls-cert` help says
@@ -124,29 +124,15 @@ protection. `manager/tls.py` opens it with that mode, but Windows ignores
 POSIX permission bits — the key inherits the directory's ACLs instead. Put
 `--root` somewhere only your account can read.
 
-### Splitting the two surfaces
+### One manager, not two
 
-The refusal is about WebDAV's Basic auth, not about S3. SigV4 never puts the
-secret on the wire — it sends a signature — so an S3-only listener off
-loopback is a materially different risk from a WebDAV one. It is still
-**plaintext data**, so prefer TLS or a VPN-only interface.
+An earlier version of this document recommended running a second manager for
+S3. **That does not work.** A second manager needs a second `--root` (the
+store supports a single writer), and two roots are two separate volume sets —
+so backups would land in a volume the mapped drive cannot see. Run one
+manager serving both surfaces, and bind it where the backups can reach it.
 
-The simplest safe arrangement for what you described is two processes:
-
-```powershell
-# 1. WebDAV + UI, loopback only, browsed from this machine.
-aloelite-web --webdav --host 127.0.0.1 --root C:\aloelite\data
-
-# 2. S3 only, reachable on the VPN. No --webdav, so no Basic-auth refusal.
-$env:ALOELITE_S3 = "1"
-aloelite-web --host 0.0.0.0 --port 9000 --root C:\aloelite\data
-```
-
-**They must not share a `--root`.** Two manager processes over one
-`volumes.json` and one set of `.sqlite` files is not a supported
-configuration — the store's own docstring says only one manager process
-touches it. Give each its own root, or run a single process and accept
-loopback-only WebDAV.
+See "Letting other machines ship backups to it" below.
 
 ## 3. Point litestream at the S3 surface
 
