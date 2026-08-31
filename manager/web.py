@@ -67,9 +67,10 @@ def main() -> int:
         "--webdav",
         action="store_true",
         help="serve every volume over WebDAV at /dav/<volume-id> (RFC 4918 "
-        "class 1: no locking, so macOS Finder mounts read-only). Off by "
-        "default; encrypted volumes authenticate with HTTP Basic where the "
-        "password is the PIN, so serving this off loopback requires TLS "
+        "class 2: LOCK/UNLOCK, so macOS Finder mounts read-write and the "
+        "Windows redirector survives its first save). Off by default; "
+        "encrypted volumes authenticate with HTTP Basic where the password "
+        "is the PIN, so serving this off loopback requires TLS "
         "(--tls-self-signed or --tls-cert/--tls-key).",
     )
     ap.add_argument(

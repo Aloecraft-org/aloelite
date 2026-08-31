@@ -13,6 +13,7 @@ nothing in a Linux CI run notices.
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -75,7 +76,16 @@ def test_no_posix_only_calls_on_the_startup_import_path():
     banned = ("os.geteuid", "os.getuid", "os.setsid", "os.fork", "os.killpg")
     root = pathlib.Path(__file__).resolve().parent
     offenders = []
-    for name in ("web.py", "__main__.py", "api.py", "dav.py", "davlock.py", "tls.py"):
+    for name in (
+        "web.py",
+        "__main__.py",
+        "api.py",
+        "dav.py",
+        "davlock.py",
+        "tls.py",
+        "s3.py",
+        "sigv4.py",
+    ):
         text = (root / name).read_text()
         for call in banned:
             # A hasattr guard may wrap onto its own line, so the check is
@@ -86,6 +96,33 @@ def test_no_posix_only_calls_on_the_startup_import_path():
     assert not offenders, "POSIX-only calls on the startup path: " + "; ".join(
         offenders
     )
+
+
+def test_sqlite_floor_message_names_a_fix_that_exists_on_this_platform(monkeypatch):
+    """The rescue differs by platform and the wrong one is worse than none.
+
+    `aloelite[bundled-sqlite]` resolves to pysqlite3-binary, which pyproject
+    markers to platform_system == 'Linux' because it publishes manylinux
+    wheels only. Telling a Windows user to run it sends them round the loop
+    again with nothing installed, no error, and the same refusal.
+    """
+    import aloelite.db as db
+
+    class _Conn:
+        def execute(self, sql):
+            raise db.sqlite3.OperationalError("no such function: jsonb")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(db.Unsupported) as e:
+        db._check_sqlite_capabilities(_Conn())
+    msg = str(e.value)
+    assert "bundled-sqlite" not in msg or "Linux-only" in msg
+    assert "sqlite3.dll" in msg, "the Windows message must name the Windows fix"
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(db.Unsupported) as e:
+        db._check_sqlite_capabilities(_Conn())
+    assert "aloelite[bundled-sqlite]" in str(e.value)
 
 
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>

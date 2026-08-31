@@ -92,6 +92,26 @@ two of its shapes are not the ones an API summary would suggest.
   holding the others' data -- and so a backup job's key cannot unlock
   the volume through every other frontend.
 - `manager/test_s3.py` drives the frontend with a real botocore client over a real socket. A request signed by our own code would only test the verifier against its own canonicalisation.
+- **`doc/WINDOWS.md`**, and the audit behind it. Windows is where the
+  WebDAV frontend was aimed and where aloelite has still never run, so
+  the manager's startup path was read for POSIX-only assumptions rather
+  than assumed clean. `aloelite-web` defaults to direct-only mode, which
+  skips every FUSE precondition (`/dev/fuse`, `CAP_SYS_ADMIN`,
+  `/proc/self/mountinfo`, `fusermount3`), so those never execute there.
+
+### Fixed
+
+- **The too-old-sqlite message named a fix that does not exist on
+  Windows.** It said `pip install 'aloelite[bundled-sqlite]'`, but that
+  extra resolves to pysqlite3-binary, which pyproject markers to
+  `platform_system == 'Linux'` because it publishes manylinux wheels
+  only. On Windows the command installs nothing, reports no error, and
+  the next run refuses in exactly the same way -- so the message sent a
+  reader round a loop with no exit. The Windows branch now names the
+  fixes that exist there (a newer CPython, or replacing `sqlite3.dll`)
+  and says the extra will not help.
+- `aloelite-web --webdav`'s help still described RFC 4918 class 1 and macOS Finder mounting read-only. Class 2 shipped in 0.3.6, and mounting read-write is the whole point of it.
+- `manager/test_portability.py`'s guard against POSIX-only calls on the startup path did not cover the new `s3.py` and `sigv4.py`, which are on it. Both are now included, and the sqlite message's platform branches are pinned.
 
 ### Known issues
 
