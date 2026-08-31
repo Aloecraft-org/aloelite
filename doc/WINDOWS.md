@@ -45,6 +45,11 @@ are:
 
 ## 1. Install
 
+> **On the Python version:** `requires-python` is `>=3.11` and CI covers 3.11
+> and 3.12 only. Newer interpreters (3.13, 3.14) install fine and are expected
+> to work, but they are genuinely untested — if something behaves oddly, the
+> interpreter version is worth mentioning in the report.
+
 ```powershell
 py -m venv C:\aloelite\venv
 C:\aloelite\venv\Scripts\pip install aloelite
@@ -52,6 +57,24 @@ C:\aloelite\venv\Scripts\pip install aloelite
 
 Do **not** install the `fuse` extra — `pyfuse3` has no Windows build and is
 not needed.
+
+## 1b. If `aloelite` is "not recognized"
+
+Expected, and not a broken install. `pip install` puts `aloelite.exe` in the
+interpreter's `Scripts\` directory, which on Windows is routinely not on
+PATH. Either use the full path:
+
+```powershell
+C:\Users\<you>\AppData\Local\Python\pythoncore-3.14-64\Scripts\aloelite-web.exe --version
+```
+
+or skip the scripts entirely — every entry point is reachable with `-m`:
+
+```powershell
+python -m aloelite --version          # the CLI
+python -m aloelite web --webdav       # the manager (same as aloelite-web)
+python -m manager.web --webdav        # identical, spelled the other way
+```
 
 ## 2. Run it
 
@@ -148,6 +171,26 @@ port for the private/VPN profile only:
 New-NetFirewallRule -DisplayName "aloelite S3" -Direction Inbound `
   -LocalPort 9000 -Protocol TCP -Action Allow -Profile Private
 ```
+
+## Mounting WebDAV from Explorer
+
+**An unencrypted volume needs no credentials at all** — `dav.py`'s
+`_session_token` returns `None` for a plain volume — so on loopback it mounts
+with no TLS, no certificate, and no registry changes:
+
+```
+\\127.0.0.1@8080\DavWWWRoot\dav\<volume-id>
+```
+
+(or Map Network Drive → `http://127.0.0.1:8080/dav/<volume-id>`.) Start the
+`WebClient` service first if it is not running: `net start WebClient`.
+
+An **encrypted** volume authenticates with HTTP Basic where the password is
+the PIN, and Windows refuses Basic over plain HTTP by default
+(`BasicAuthLevel` defaults to SSL-only). So an encrypted volume needs either
+TLS with a certificate the machine trusts, or that registry value raised —
+which is a worse trade than simply using an unencrypted volume on a machine
+you already trust, or browsing it through the web UI instead.
 
 ## What to watch on the first run
 

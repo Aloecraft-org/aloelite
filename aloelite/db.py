@@ -78,7 +78,7 @@ def _check_sqlite_capabilities(conn: sqlite3.Connection) -> None:
         if sys.platform == "win32":
             fixes = (
                 "Fixes: install a CPython whose bundled sqlite3.dll is >= "
-                f"{floor} (check with: python -c \"import sqlite3; "
+                f'{floor} (check with: python -c "import sqlite3; '
                 'print(sqlite3.sqlite_version)"), or replace the sqlite3.dll in '
                 "your Python installation's DLLs directory with a current one "
                 "from sqlite.org. The 'bundled-sqlite' extra is Linux-only and "

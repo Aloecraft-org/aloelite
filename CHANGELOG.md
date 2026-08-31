@@ -112,6 +112,16 @@ two of its shapes are not the ones an API summary would suggest.
   and says the extra will not help.
 - `aloelite-web --webdav`'s help still described RFC 4918 class 1 and macOS Finder mounting read-only. Class 2 shipped in 0.3.6, and mounting read-write is the whole point of it.
 - `manager/test_portability.py`'s guard against POSIX-only calls on the startup path did not cover the new `s3.py` and `sigv4.py`, which are on it. Both are now included, and the sqlite message's platform branches are pinned.
+- **A fresh Windows install hit two dead ends in a row.** `pip install`
+  puts the console scripts in the interpreter's `Scripts\` directory,
+  which is routinely not on PATH, so `aloelite` is "not recognized" --
+  and the obvious recovery, `python -m aloelite`, failed too with "'aloelite'
+  is a package and cannot be directly executed". `aloelite/__main__.py`
+  now makes `python -m aloelite` the console script, sub-tool dispatch
+  included (`python -m aloelite web --webdav` starts the manager), and
+  `manager/web.py` gains the `__main__` guard it was missing so
+  `python -m manager.web` works too. Pinned as subprocess tests, since
+  importing a module proves nothing about `-m` dispatch.
 
 ### Known issues
 

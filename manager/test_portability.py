@@ -13,6 +13,7 @@ nothing in a Linux CI run notices.
 from __future__ import annotations
 
 import os
+import pathlib
 import sys
 
 import pytest
@@ -123,6 +124,36 @@ def test_sqlite_floor_message_names_a_fix_that_exists_on_this_platform(monkeypat
     with pytest.raises(db.Unsupported) as e:
         db._check_sqlite_capabilities(_Conn())
     assert "aloelite[bundled-sqlite]" in str(e.value)
+
+
+@pytest.mark.parametrize("module", ["aloelite", "aloelite.cli", "manager.web"])
+def test_module_entry_points_run(module):
+    """`python -m <module> --version` must work for every documented entry.
+
+    The console scripts (`aloelite`, `aloelite-web`) land in the interpreter's
+    Scripts/ directory, which on Windows is routinely not on PATH -- so the
+    first thing a fresh install does is fail with "not recognized". The
+    obvious recovery is `python -m aloelite`, and that used to fail too:
+
+        No module named aloelite.__main__; 'aloelite' is a package and
+        cannot be directly executed
+
+    Two dead ends on a working install. Run as SUBPROCESSES because that is
+    the only thing that proves -m dispatch; importing the module would pass
+    whether or not __main__.py exists.
+    """
+    import subprocess
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        [sys.executable, "-m", module, "--version"],
+        capture_output=True,
+        text=True,
+        cwd=str(root),
+        timeout=60,
+    )
+    assert out.returncode == 0, f"{module}: rc={out.returncode} {out.stderr}"
+    assert "aloelite" in out.stdout.lower(), out.stdout
 
 
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>

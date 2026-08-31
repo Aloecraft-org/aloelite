@@ -144,3 +144,13 @@ def main() -> int:
     from .__main__ import main as _main
 
     return _main()
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    # `python -m manager.web`, for the same reason aloelite/__main__.py
+    # exists: on Windows the console scripts land in a Scripts\ directory
+    # that is often not on PATH, and this is the server people actually
+    # need to start.
+    import sys
+
+    sys.exit(main())
