@@ -13,10 +13,19 @@ FUSE is Linux-only, so on Windows the manager **is** the product: `aloelite-web`
 serves volumes over the browser UI, WebDAV, and S3 without a kernel mount,
 without Docker and without administrator rights.
 
-> **Status: never run in production on Windows, and not covered by CI** — there
-> is no Windows runner. Everything below is derived from a code audit plus the
-> portability guards in `manager/test_portability.py`. Treat the first run as
-> the test it is.
+> **Status: exercised once on a real Windows host (2026-08-31), still not
+> covered by CI** — there is no Windows runner, so nothing here is protected
+> against regression.
+>
+> What has actually run, on Windows 11 with CPython 3.14: the manager starts
+> as a scheduled task, a WebDAV volume mounts in Explorer as a drive letter,
+> and the S3 frontend passes `script/s3_smoke.py` end to end — put/get, a deep
+> key's implied prefixes, flat and delimited listing, a multipart upload past
+> the 5 MiB part size, and a batch delete.
+>
+> What has NOT been exercised: sustained load, large files through the mapped
+> drive, an encrypted volume over WebDAV, TLS, binding off loopback, and a
+> real litestream replica cycle. Treat those as untested.
 
 ---
 

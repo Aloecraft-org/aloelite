@@ -139,6 +139,13 @@ releases:
         the volume through every other frontend.
       - "`manager/test_s3.py` drives the frontend with a real botocore client over a real socket. A request signed by our own code would only test the verifier against its own canonicalisation."
       - |
+        `script/s3_smoke.py`, which runs the same shape of check against a
+        DEPLOYED endpoint rather than a fixture -- the question someone
+        standing in front of a new install is actually asking. First run on a
+        real Windows host passed all six: put/get, a deep key's implied
+        prefixes, flat and delimited listing, a multipart upload past the
+        5 MiB part size, and a batch delete."
+      - |
         **`doc/WINDOWS.md`**, and the audit behind it. Windows is where the
         WebDAV frontend was aimed and where aloelite has still never run, so
         the manager's startup path was read for POSIX-only assumptions rather
