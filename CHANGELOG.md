@@ -45,6 +45,74 @@ benchmarks (`script/benchmark.py`, `doc/BENCHMARKS.md`), and the
 conformance suite extended with mount-level semantics and id-minting
 vectors.
 
+## [0.3.7] - unreleased
+
+`v0.3.7` &middot; schema era `1`
+
+**An S3 frontend, scoped to what a replication client actually calls.**
+Enough of S3 for a backup tool to ship to an aloelite volume alongside
+the AWS bucket it already uses, and no more. Off by default, like
+WebDAV, and one step stricter: enabled without credentials is a startup
+error rather than an endpoint that authenticates nobody.
+
+The surface was derived by reading litestream 0.3.13's S3 replica
+client rather than the S3 API docs, which is why it is small -- and why
+two of its shapes are not the ones an API summary would suggest.
+
+### Added
+
+- **S3 frontend (`ALOELITE_S3`), bucket = volume.** ListObjects,
+  GetObject, PutObject, multipart upload, and batch DeleteObjects,
+  served at the application root so a client's `endpoint` needs no path
+  component. Buckets are volumes created through the manager's own API;
+  there is no CreateBucket, the same posture WebDAV takes toward
+  volumes.
+- **`ListObjects` is V1, not V2.** The target client paginates with
+  `Marker`/`NextMarker`, not a continuation token, and groups
+  generations through `CommonPrefixes` with `delimiter=/`. A V2-only
+  implementation would leave it unable to enumerate a single
+  generation. Listings are sorted lexicographically because S3 promises
+  that and aloelite's own listing order is canonical (edge_id,
+  node_id), not alphabetical.
+- **Multipart upload, which is not optional.** Every write in that
+  client goes through `s3manager.Uploader`, whose default part size is
+  5 MiB: WAL segments land as a single PutObject, but any snapshot
+  past that becomes a real multipart upload with up to five concurrent
+  UploadPart requests. Parts stage in memory and are concatenated at
+  Complete, with the staging cap enforced rather than discovered.
+- **SigV4 verification (`manager/sigv4.py`)**, cross-checked against
+  botocore's own signer rather than against vectors of our own: the
+  tests sign with botocore and verify with this module, so a
+  disagreement about canonical form fails the suite. Chunked upload
+  signing (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`) is refused BY NAME
+  rather than mis-parsed as a body, because treating the chunk framing
+  as content would corrupt the object.
+- **S3 credentials are separate from the volume PIN**, and scopable to
+  a set of buckets, so one endpoint can serve several jobs without each
+  holding the others' data -- and so a backup job's key cannot unlock
+  the volume through every other frontend.
+- `manager/test_s3.py` drives the frontend with a real botocore client over a real socket. A request signed by our own code would only test the verifier against its own canonicalisation.
+
+### Known issues
+
+- An ETag here is opaque (`"<id>-<version>"`), not the object's MD5.
+  Aloelite's chunk addresses are taken over CIPHERTEXT, and storing a
+  plaintext digest beside the ciphertext would hand anyone with file
+  access an offline confirmation oracle -- exactly what a volume's
+  `random` enc_mode gives up dedup to avoid. Real S3 also returns
+  non-MD5 ETags for SSE-KMS and multipart objects, and multipart part
+  ETags are round-tripped by the client, so nothing in the target
+  client notices. A tool that verifies ETag == MD5 would.
+- Litestream does NOT infer path-style addressing from `endpoint`
+  alone: `s3.ParseHost` sets it only for hosts it recognises as a known
+  provider, and a bare `s3://bucket/prefix` URL falls through to
+  `forcePathStyle = false`. A deployment pointing litestream at this
+  frontend must set `force-path-style: true` in its replica block, or
+  configure `ALOELITE_S3_VHOST_SUFFIX` and provide wildcard DNS.
+- Multipart parts stage in memory and are not persisted, so an upload interrupted by a manager restart is abandoned. The client retries the whole object, which is the same outcome it already handles.
+- A key cannot be both an object and a prefix of other objects. S3's keyspace is flat and permits it; a tree cannot, so it is refused with InvalidRequest rather than resolved arbitrarily.
+
+
 ## [0.3.6] - 2026-08-31
 
 `v0.3.6` &middot; schema era `1`
