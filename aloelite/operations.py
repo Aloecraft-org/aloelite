@@ -1165,6 +1165,14 @@ def pack(db: Db, mount: MountId, path: str) -> NodeId:
         if found.type is not NodeType.CONTAINER:
             raise NotAContainer(node=found.node)
         node = found.node
+        # ACC-11, transitively: pack archives the WHOLE subtree, which is what
+        # remove_recursive does, so it takes remove_recursive's check. A lock
+        # anywhere below is a lock on something this operation would archive.
+        locked = db.one(
+            "validation.check_lock_held_subtree", {"root": node, "mount": mount}
+        )
+        if locked is not None:
+            raise LockHeld(node=NodeId(locked["node_id"]))
         placement = db.one("resolution.get_active_parent", {"node": node})
         if placement is None:
             raise NotFound("cannot pack a node with no active placement", node=node)
@@ -1217,6 +1225,11 @@ def unpack(db: Db, mount: MountId, path: str) -> None:
         if found.type is NodeType.CONTAINER:
             raise NotAnEntry(node=found.node)
         node = found.node
+        # ACC-11: unpack archives the packed entry's placement, so the entry
+        # stops existing at this path — the same change remove() makes, and
+        # non-transitive because a packed entry is a single leaf.
+        if db.scalar("validation.check_lock_held", {"node": node, "mount": mount}):
+            raise LockHeld(node=node)
         blob = db.read_content_bytes(node)
         doc = msgpack.unpackb(blob, raw=False)
         if not isinstance(doc, dict) or doc.get("fmt") != _PACK_FMT:

@@ -362,20 +362,24 @@ operations:
     pack:
       params:  { mount: MountId, path: Path }
       returns: NodeId
-      flags:   { mutates: true, atomic: true, locks: false, addr: path }
-      raises:  [not_found, not_a_container, mount_invalid]
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, not_a_container, lock_held, mount_invalid]
       note: >
         MsgPack-consolidate a subtree into an entry (OP-6, TX-2). ACTIVE edges
         only. Host-side top-down walk in canonical order (subtree view);
         serialized child order must match the walk so unpack reproduces it.
+        ACC-11 is checked TRANSITIVELY, as for remove_recursive: pack archives
+        every member of the subtree, so a lock anywhere below refuses it.
     unpack:
       params:  { mount: MountId, path: Path }
       returns: void
-      flags:   { mutates: true, atomic: true, locks: false, addr: path }
-      raises:  [not_found, not_an_entry, mount_invalid]
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
       note: >
         inverse of pack: reinsert the serialized subtree top-down through the
         generation path, remapping serialized refs to freshly minted ids.
+        ACC-11 applies to the packed entry itself, which stops existing at this
+        path — non-transitive, since a packed entry is a single leaf.
 
   # --- read / resolution (read-only) ---------------------------------------
   read:

@@ -150,3 +150,93 @@ while tenants mount subtrees, concurrently) are supported by the engine, with
 entry write locks arbitrating write-write conflicts. Mount policy — access
 mode (ro/rw), principal, per-subtree exclusivity where an admin wants it — is
 authorization, configured per deployment, layered above correctness.
+
+---
+
+## D-6: ACC-11's excluded set is closed, and so is what it deliberately leaves open
+
+**Decided 2026-08-31.**
+
+ACC-11 arrived with the WebDAV work on a branch cut before schema era 2, so it
+was written against the operations that existed then. When the two branches
+were reconciled, seven era-2 operations sat outside it — not judged and
+excluded, simply never in the same tree as the rule. `mount-api.yaml`'s
+per-operation `locks` flag said `false` for all of them, which read as a
+decision and was an accident.
+
+This decision closes both sets. A lock excludes:
+
+> content writes, `set_metadata`, `move`, `rename`, `link`, `remove`,
+> `remove_recursive`, `pack`, `unpack` — with `remove_recursive` and `pack`
+> checked transitively over the subtree.
+
+and deliberately does **not** exclude:
+
+> `set_owner`, `set_atime`, `set_mtime`, `set_xattr`, `remove_xattr`, `copy`,
+> and the `create_*` family.
+
+### Why each addition
+
+- **`rename`** is the one that mattered. It edits the directory entry the path
+  walked, which is a placement change, and `move` was already excluded. The
+  gap was shaped like the host's syscall routing: pyfuse3 sends a
+  same-directory `mv` to `rename` and a cross-directory `mv` to `move`, so one
+  user gesture honoured the lock and the other did not. It ran all the way to
+  a wrong answer — a WebDAV client's LOCK, a rename from a FUSE mount, and the
+  client's next PUT landing in a freshly created node because PUT creates on a
+  missing path. Valid lock, 201 returned, content in the wrong place, no error
+  anywhere.
+- **`link`** is the same class and milder: it adds a placement and changes
+  derived `nlink`, but cannot carry the node away, because `remove` was
+  already excluded.
+- **`pack`** is destruction wearing a different name. It runs the same
+  `archive_subtree` as `remove_recursive` and then serializes what it
+  archived, so it takes the same transitive check — a lock anywhere below is a
+  lock on something pack would consume.
+- **`unpack`** archives the packed entry's placement, so the entry stops
+  existing at that path: the change `remove` makes. Non-transitive, since a
+  packed entry is a single leaf.
+
+### Why each omission
+
+These are the harder half, and symmetry is the wrong reason to add them.
+
+- **Ownership and times** (`set_owner`, `set_atime`, `set_mtime`). Advisory
+  locks do not gate `chmod`, `chown` or `utimes` on any POSIX system. A kernel
+  binding holds an engine lock for the entire life of an open write handle, so
+  excluding these would make an ordinary `chmod` from a second mount fail
+  against a file another mount merely has open — stricter than POSIX, and
+  surprising to anyone who knows POSIX.
+- **Extended attributes** (`set_xattr`, `remove_xattr`). This looked like the
+  strong case for inclusion, on the theory that WebDAV dead properties live in
+  xattrs and RFC 4918 expects PROPPATCH to respect a lock. They do not:
+  `manager/dav.py` stores dead properties in the NODE-6 metadata map under a
+  `dav:` prefix, and `set_metadata` is already excluded. WebDAV property
+  exclusion is therefore already correct, and `user.*` xattrs are a purely
+  POSIX surface where the reasoning above applies. Checking where the
+  properties actually live is what decided this.
+- **`copy`** never overwrites: it resolves the destination's *parent* and
+  creates new nodes beneath it, reading the source at its committed version
+  (CV-3). It cannot observe a torn state and cannot disturb the locked node.
+- **The `create_*` family** only ever mints new nodes, so there is no existing
+  node for a lock to protect. `locks: false` there was always correct.
+
+### What makes this stick
+
+Both halves are conformance data, not prose. `conformance/scenarios/locking.yaml`
+pins the exclusions **and** the permissions, so a port that refuses a `chmod`
+under a lock fails the suite exactly as one that permits a `rename` does.
+`tests/test_spec_projection.py::test_lock_flag_matches_the_implementation`
+asserts every operation's `locks` flag against the reference implementation in
+both directions, so a future operation cannot inherit `false` by omission —
+which is precisely how this gap opened. It fired twice while this decision was
+being implemented, both times before the spec had been touched.
+
+### Not settled here
+
+Sibling shadowing is a separate question. NODE-5 resolves a name collision to
+the greatest uuid7, and a freshly minted node always wins, so `create_entry`
+at a locked node's name makes the locked node invisible to path resolution
+without touching it. That predates era 2 and applies to every `create_*`
+operation; it is a NODE-5 visibility question, not an ACC-11 exclusion
+question, and it wants its own decision.
