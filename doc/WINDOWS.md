@@ -178,12 +178,37 @@ New-NetFirewallRule -DisplayName "aloelite S3" -Direction Inbound `
 `_session_token` returns `None` for a plain volume — so on loopback it mounts
 with no TLS, no certificate, and no registry changes:
 
-```
-\\127.0.0.1@8080\DavWWWRoot\dav\<volume-id>
+The URL takes the volume **id**, not its name (`dav.py` resolves it with
+`store.get(vid)`), so look it up first:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/volumes | Select-Object id, name
+net start WebClient                     # manual-start on some editions
+net use Z: \\127.0.0.1@8080\DavWWWRoot\dav\<volume-id>
 ```
 
-(or Map Network Drive → `http://127.0.0.1:8080/dav/<volume-id>`.) Start the
-`WebClient` service first if it is not running: `net start WebClient`.
+The `@8080` is the port — without it Windows tries the name as SMB first and
+takes ~30s to fail over. Explorer's *Map network drive* dialog wants the same
+thing spelled as a URL: `http://127.0.0.1:8080/dav/<volume-id>`.
+
+To make it survive a reboot, add `/persistent:yes` — though the drive will
+show as disconnected until the manager is running again.
+
+### The 50 MB ceiling, which will bite a filesystem
+
+Windows' WebClient caps a single transfer at **`FileSizeLimitInBytes`, which
+defaults to 50,000,000 bytes** (~47 MiB). Past that a copy fails with a
+generic error that says nothing about size. For a filesystem that is a low
+ceiling, so raise it (4 GB is the maximum) and restart the service:
+
+```powershell
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" `
+  -Name FileSizeLimitInBytes -Value 0xFFFFFFFF -Type DWord
+Restart-Service WebClient
+```
+
+This is a Windows client limit, not an aloelite one — the same cap applies to
+any WebDAV server.
 
 An **encrypted** volume authenticates with HTTP Basic where the password is
 the PIN, and Windows refuses Basic over plain HTTP by default
