@@ -1042,16 +1042,13 @@ def create_dav_blueprint(
         except aerr.NotFound as e:
             raise DavFault(409, "parent collection does not exist") from e
 
-        # An INTERRUPTED PUT COMMITS WHAT ARRIVED, replacing the previous
-        # content. That is not a choice made here so much as one the engine
-        # makes: Descriptor.close() commits unconditionally and there is no
-        # abort, so the alternative -- skipping close() on the error path --
-        # would strand the write lock on the node until prune reclaimed it,
-        # leaving the resource unwritable rather than merely truncated. It
-        # matches what the FUSE frontend does with a partial write, and
-        # test_dav.py pins it so it stays a known property. A clean fix needs
-        # an engine-level descriptor abort (discard staged chunks, release the
-        # lock, leave the committed pointer alone).
+        # An INTERRUPTED PUT LEAVES THE PREVIOUS CONTENT INTACT. The engine
+        # makes that choice, not this handler: Descriptor.__exit__ commits on a
+        # clean exit and aborts when the block is unwinding, so the partial
+        # bytes are discarded and the committed pointer never moves. The lock
+        # is released either way, so a dead transfer cannot wedge the node.
+        # test_dav.py::test_interrupted_put_is_atomic_and_does_not_wedge pins
+        # both halves.
         with handle as writer:
             stream = request.stream
             while True:
