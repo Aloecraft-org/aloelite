@@ -45,7 +45,7 @@ benchmarks (`script/benchmark.py`, `doc/BENCHMARKS.md`), and the
 conformance suite extended with mount-level semantics and id-minting
 vectors.
 
-## [0.3.6] - unreleased
+## [0.3.6] - 2026-08-31
 
 `v0.3.6` &middot; schema era `1`
 

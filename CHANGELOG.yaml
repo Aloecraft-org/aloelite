@@ -87,9 +87,10 @@ planned:
 
 releases:
   - version: "0.3.6"
-    date: null
-    status: unreleased
+    date: 2026-08-31
+    status: released
     stable: true
+    latest: true
     api_version: 1
     summary: |
       **WebDAV, promoted from an assessment to a working frontend.** The
@@ -135,7 +136,6 @@ releases:
     date: 2026-08-08
     status: released
     stable: true
-    latest: true
     api_version: 1
     summary: |
       **The manager learns to show you what is inside a file.** Rendering
