@@ -374,10 +374,15 @@ operations:
       params:  { mount: MountId, path: Path }
       returns: void
       flags:   { mutates: true, atomic: true, locks: true, addr: path }
-      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
+      raises:  [not_found, not_an_entry, lock_held, corrupt, unsupported, mount_invalid]
       note: >
         inverse of pack: reinsert the serialized subtree top-down through the
         generation path, remapping serialized refs to freshly minted ids.
+        The blob's `ver` is a GATE every port must implement: a pack written by
+        a newer build raises unsupported rather than being read with this
+        build's field set, which would silently drop whatever the new version
+        added. A malformed or absent version is corrupt. Older versions stay
+        readable — fields added after v1 are optional on read.
         ACC-11 applies to the packed entry itself, which stops existing at this
         path — non-transitive, since a packed entry is a single leaf.
 

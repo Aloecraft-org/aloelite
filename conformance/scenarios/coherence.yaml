@@ -79,3 +79,42 @@ scenarios:
       - op: read_all
         args: {path: /f}
         expect: {utf8: "new-content-entirely"}
+
+  - scenario: unpack-refuses-a-pack-from-a-newer-build
+    requirements: [OP-7]
+    description: >
+      THE VERSION GATE. A pack blob carries `ver`, and it has to be read, not
+      merely written: an implementation that ignores it will take the fields it
+      recognises out of a future blob, drop everything the new version added,
+      and report success. That is the silent-partial-read this gate exists to
+      prevent, and it is the same posture the schema era takes toward a file
+      written by a newer build.
+      The literal below is msgpack for {"fmt": "aloefs.pack", "ver": 2,
+      "nodes": []} — a minimal well-formed pack claiming a version no shipped
+      build understands. It is a fixed byte string precisely so every port
+      tests the same input.
+    steps:
+      - op: create_entry
+        args:
+          path: /future.pack
+          data: {base64: "g6NmbXSrYWxvZWZzLnBhY2ujdmVyAqVub2Rlc5A="}
+      - op: unpack
+        args: {path: /future.pack}
+        raises: unsupported
+
+  - scenario: unpack-refuses-a-pack-with-no-version
+    requirements: [OP-7]
+    description: >
+      The other half of the gate: a blob carrying the right `fmt` but no usable
+      `ver` is malformed, not merely old. Defaulting an absent version to 1
+      would let any future writer that forgets the field be read as v1 — the
+      same silent partial read by a different route.
+      Literal is msgpack for {"fmt": "aloefs.pack", "nodes": []}.
+    steps:
+      - op: create_entry
+        args:
+          path: /versionless.pack
+          data: {base64: "gqNmbXSrYWxvZWZzLnBhY2ulbm9kZXOQ"}
+      - op: unpack
+        args: {path: /versionless.pack}
+        raises: corrupt

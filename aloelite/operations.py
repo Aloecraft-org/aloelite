@@ -1152,6 +1152,13 @@ def copy(db: Db, mount: MountId, src: str, dst: str) -> NodeId:
 #     "t": "container" | "entry",
 #     "n": <name>, "c": <created_at>, "m": <modified_at>,
 #     "d": <payload bytes>  (entries only; omitted/None for containers) }
+#
+# VERSIONING. `ver` is a gate, not decoration: unpack refuses a blob written by
+# a newer build rather than reading the fields it happens to recognise and
+# dropping the rest. That silent-partial-read is the failure this exists to
+# prevent, and it is the same rule db.py applies to a newer schema era. Older
+# versions stay readable — every field added since v1 is optional on read, so a
+# v1 blob restores exactly as well as it ever did.
 _PACK_FMT = "aloefs.pack"
 _PACK_VER = 1
 
@@ -1234,6 +1241,18 @@ def unpack(db: Db, mount: MountId, path: str) -> None:
         doc = msgpack.unpackb(blob, raw=False)
         if not isinstance(doc, dict) or doc.get("fmt") != _PACK_FMT:
             raise Corrupt("not an aloefs pack blob", node=node)
+        ver = doc.get("ver")
+        if not isinstance(ver, int) or isinstance(ver, bool) or ver < 1:
+            raise Corrupt(f"pack blob has no usable version ({ver!r})", node=node)
+        if ver > _PACK_VER:
+            # Same posture as db.py's schema-era gate: refuse loudly rather
+            # than half-read. Reading a newer blob with this build's field set
+            # would silently drop whatever the new version added.
+            raise Unsupported(
+                f"pack was written by a newer aloelite (pack format v{ver}; "
+                f"this build understands v{_PACK_VER}). Upgrade aloelite to "
+                f"unpack it."
+            )
 
         placement = db.one("resolution.get_active_parent", {"node": node})
         if placement is None:
