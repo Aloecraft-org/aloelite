@@ -87,9 +87,10 @@ planned:
 
 releases:
   - version: "0.3.7"
-    date: null
-    status: unreleased
+    date: 2026-08-31
+    status: released
     stable: true
+    latest: true
     api_version: 1
     summary: |
       **An S3 frontend, scoped to what a replication client actually calls.**
@@ -226,7 +227,6 @@ releases:
     date: 2026-08-31
     status: released
     stable: true
-    latest: true
     api_version: 1
     summary: |
       **WebDAV, promoted from an assessment to a working frontend.** The
