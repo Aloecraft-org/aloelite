@@ -188,8 +188,20 @@ http://127.0.0.1:7081/dav/backups
 ```
 
 That is the whole thing. The URL takes the volume's **name** — you do not need
-its id. Start `WebClient` first if the dialog complains (`net start WebClient`,
-needs admin, once).
+its id.
+
+**Set `WebClient` to start automatically first.** It ships as trigger-start and
+stops when idle, and a mapping attempted while it is stopped fails with
+`System error 67 - The network name cannot be found`, which names nothing
+useful. Once, from an elevated prompt:
+
+```powershell
+Set-Service WebClient -StartupType Automatic
+Start-Service WebClient
+```
+
+Starting it by hand works for the moment but not across a reboot, which is the
+case that matters for a drive you want reconnected at sign-in.
 
 The command-line equivalent, if you prefer:
 
