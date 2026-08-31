@@ -85,6 +85,30 @@ if (-not (Test-Path $Python)) { throw "No interpreter at $Python" }
 if ($AccessKey -and -not $SecretFile) { throw "-AccessKey needs -SecretFile" }
 if ($SecretFile -and -not (Test-Path $SecretFile)) { throw "No secret file at $SecretFile" }
 
+# Validate the paths HERE rather than letting New-Item fail below. Its message
+# ("The path is not of a legal form") names a line in this script instead of
+# the parameter that was wrong, which is a bad first experience for the one
+# argument nobody can guess for you.
+foreach ($pair in @(@('-Root', $Root), @('-ScriptDir', $ScriptDir))) {
+    $name, $value = $pair
+    if ([string]::IsNullOrWhiteSpace($value) -or -not [System.IO.Path]::IsPathRooted($value) -or
+        $value -notmatch '^[A-Za-z]:\\') {
+        throw @"
+$name must be a full Windows path such as C:\aloelite\data -- got '$value'.
+
+If you do not know where the running manager keeps its data, ask it: the
+volume's fs_id names the file.
+
+  Invoke-RestMethod http://127.0.0.1:$Port/volumes | Format-Table id, name, fs_id
+  Get-ChildItem `$env:USERPROFILE\.aloelite      # the default root
+
+A manager started without --root uses `$env:USERPROFILE\.aloelite, which is
+NOT where this task will look: it runs as SYSTEM, whose profile is different.
+Pass that path explicitly, or move the data somewhere neutral first.
+"@
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $ScriptDir, $Root | Out-Null
 
 # -- 1. the manager -------------------------------------------------------
