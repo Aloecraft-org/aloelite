@@ -897,12 +897,15 @@ recursive:
 
   enumerate_subtree:
     sql: |
-      SELECT node_id, parent_id, edge_id, depth
-      FROM subtree
-      WHERE root_id = :root
-      ORDER BY depth, edge_id, node_id
+      SELECT s.node_id, s.parent_id, s.edge_id, s.depth,
+             coalesce(e.name, n.name) AS name
+      FROM subtree s
+      JOIN node n ON n.node_id = s.node_id
+      LEFT JOIN edge e ON e.edge_id = s.edge_id
+      WHERE s.root_id = :root
+      ORDER BY s.depth, s.edge_id, s.node_id
     params: { root: "NodeId at the top of the subtree (depth 0 = root itself)" }
-    returns: "[{ node_id, parent_id, edge_id, depth }] top-down canonical order"
+    returns: "[{ node_id, parent_id, edge_id, depth, name }] top-down canonical order"
     consumed_by: [copy, pack, "remove_recursive (alternative to set archive)"]
     notes: >
       ACTIVE edges only (the detached graveyard is excluded). The canonical order
@@ -910,6 +913,16 @@ recursive:
       this order and mint new ids in it, so two implementations produce identical
       new-id sequences. The host loops these rows, using the old->new id map so a
       copied child attaches to its copied parent.
+
+      `name` is the EFFECTIVE name at this placement — coalesce(edge.name,
+      node.name), the same rule resolution and directory_listing use. It is
+      returned here rather than read from get_node because a walk enumerates
+      PLACEMENTS, and a hardlinked node appears once per placement, each of
+      which may carry its own name (D-5/EXT-4). Reading the node's own name
+      instead gives every placement of one node the same name, so copy and
+      pack collapse them into a NODE-5 collision and hide all but one.
+      The LEFT JOIN is for the root, whose edge_id is NULL: it falls back to
+      node.name, which is what the caller overrides anyway.
 
   archive_subtree:
     sql: |

@@ -1098,7 +1098,11 @@ def copy(db: Db, mount: MountId, src: str, dst: str) -> NodeId:
         for r in rows:
             info = db.one("resolution.get_node", {"node": r["node_id"]})
             is_root = r["parent_id"] is None
-            name = dst_name if is_root else info["name"]
+            # The EFFECTIVE name at this placement (D-5). A hardlinked node is
+            # enumerated once per placement and each may be named differently;
+            # info["name"] is only the node's own default, so using it gave
+            # every placement the same name and collapsed them under NODE-5.
+            name = dst_name if is_root else r["name"]
             parent = dst_parent if is_root else idmap[r["parent_id"]]
             ntype = NodeType(info["type"])
             # get_node returns metadata as a JSON string; _new_node re-serializes
@@ -1197,7 +1201,8 @@ def pack(db: Db, mount: MountId, path: str) -> NodeId:
             entry: dict[str, Any] = {
                 "p": -1 if r["parent_id"] is None else index[r["parent_id"]],
                 "t": info["type"],
-                "n": info["name"],
+                # effective name at this placement, as for copy above
+                "n": r["name"],
                 "c": info["created_at"],
                 "m": info["modified_at"],
             }

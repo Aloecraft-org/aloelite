@@ -112,3 +112,65 @@ scenarios:
       - op: link
         args: {"from": /a, to: /b}
         raises: already_exists
+
+  - scenario: copy-preserves-each-placements-own-name
+    requirements: [OP-4, NODE-3, EXT-4, PI-1, NODE-5]
+    description: >
+      A SUBTREE WALK ENUMERATES PLACEMENTS, NOT NODES, and each placement of a
+      hardlinked node may carry its own name (D-5/EXT-4). An implementation
+      that takes the name from the node instead of the edge gives every
+      placement the node's own name, so the copies collide on one name and
+      NODE-5 hides all but one — a copy that silently contains fewer visible
+      files than its source. This is the POSIX reading: a file's name is a
+      property of where it sits, not of the file.
+    steps:
+      - op: create_container
+        args: {path: /src}
+      - op: create_entry
+        args: {path: /src/f.txt, data: {utf8: "payload"}}
+      - op: link
+        args: {"from": /src/f.txt, to: /src/g.txt}
+      - op: rename
+        args: {path: /src/g.txt, name: renamed.txt}
+      - op: copy
+        args: {"from": /src, to: /dst}
+      - op: list
+        args: {path: /dst}
+        expect:
+          - {name: f.txt, visible: true}
+          - {name: renamed.txt, visible: true}
+      - op: read_all
+        args: {path: /dst/renamed.txt}
+        expect: {utf8: "payload"}
+
+  - scenario: pack-preserves-each-placements-own-name
+    requirements: [OP-6, OP-7, NODE-3, EXT-4, NODE-5]
+    description: >
+      The same rule through pack/unpack, which shares the walk. A pack that
+      serializes node names rather than placement names restores a tree that
+      differs from the one it consolidated — and the difference is invisible
+      until someone counts the files.
+      Hardlink IDENTITY is deliberately not asserted here: pack v1 restores
+      each placement as its own node, so nlink is 1 either side of the round
+      trip. That is a known limit of the format, not of this rule.
+    steps:
+      - op: create_container
+        args: {path: /src}
+      - op: create_entry
+        args: {path: /src/f.txt, data: {utf8: "payload"}}
+      - op: link
+        args: {"from": /src/f.txt, to: /src/g.txt}
+      - op: rename
+        args: {path: /src/g.txt, name: renamed.txt}
+      - op: pack
+        args: {path: /src}
+      - op: unpack
+        args: {path: /src}
+      - op: list
+        args: {path: /src}
+        expect:
+          - {name: f.txt, visible: true}
+          - {name: renamed.txt, visible: true}
+      - op: read_all
+        args: {path: /src/renamed.txt}
+        expect: {utf8: "payload"}
