@@ -52,40 +52,85 @@
 schema: 1
 repo: Aloecraft-org/aloelite
 
-planned:
-  - title: "0.4.0 -- schema era 2, the break-once migration"
-    branch: claude/aloelite-rust-port-assessment-732bo0
-    summary: |
-      **One era bump carrying every structural change 0.4 needs**, taken once
-      at a release boundary rather than spread over several. Era 2 is a
-      migration, not a compatible change: an era-1 file is migrated forward on
-      open, and an era-2 file is refused by an era-1 build.
-
-      - `node` gains `uid`/`gid`/`mode` (ownership: POSIX and multitenant
-        alike) and `atime`/`ctime`. `nlink` stays DERIVED from active-edge
-        count -- a maintained counter can drift, a count cannot.
-      - **Timestamps become nanoseconds end to end.** The migration multiplies
-        stored ms values by 1e6, guarded by a magnitude bound so a crash-rerun
-        cannot double-apply. The uuid7 watermark stays ms (uuid7 is ms by
-        spec).
-      - PI-1 narrows to containers: a single active parent keeps the container
-        graph a tree while entries may hold many placements -- hardlinks.
-      - D-5: `edge.name` becomes a nullable per-placement name override;
-        resolution, listings, rename and move operate on
-        `coalesce(edge.name, node.name)`.
-      - NODE-2 widens to symlink/fifo/socket (devices refused, D-3); `mount`
-        gains `access` (`ro`/`rw`) and `principal` (D-4); an `xattr` table is
-        added.
-      - Ids become host-minted, and the volume watermark becomes an attach
-        fence (D-1/D-2).
-
-      Also on that branch, and independent of the era bump: the manager split
-      into api/ui/engine, an `api-spec.yaml` HTTP contract projected by tests,
-      benchmarks (`script/benchmark.py`, `doc/BENCHMARKS.md`), and the
-      conformance suite extended with mount-level semantics and id-minting
-      vectors.
-
 releases:
+  - version: "0.4.0"
+    status: unreleased
+    stable: false
+    api_version: 2
+    summary: |
+      **Schema era 2: the break-once release.** A file written by this build
+      does not open on an older one, by design — `PRAGMA user_version` is 2
+      and a newer era is refused rather than half-read. The first open of an
+      era-1 file migrates it in place: additive columns and a millisecond ->
+      nanosecond rescale, crash-idempotent, with no other table data touched.
+
+      Era 2 is where the POSIX surface became real (ownership, hardlinks,
+      xattrs, fifos), where id generation moved out of SQL and into the host,
+      and where the cross-implementation contract grew teeth: the conformance
+      suite, the id and format vectors, and a spec that is asserted against
+      the implementation rather than describing it.
+    upgrading: |
+      **Timestamps are nanoseconds, not milliseconds** (NODE-4). Anything
+      that renders an engine timestamp must divide by 1e9. This is the one
+      change that breaks code which never mentions it: three frontends have
+      been caught dividing by 1000 and rendering the year 56,672,999.
+
+      **Era-2 files do not open on 0.3.x builds.** Export before downgrading.
+    added:
+      - |
+        **Real POSIX metadata.** `uid`/`gid`/`mode` columns, `atime`/`ctime`,
+        `link` (hardlinks, with `nlink` derived from active placements rather
+        than stored), `mknod` for fifos and sockets, symlinks as a first-class
+        node type, and `user.*` xattrs. Device nodes are refused by decision
+        (D-3), not by omission.
+      - |
+        **Host-minted ids (D-1/D-2).** Node and edge ids come from a per-mount
+        monotonic uuid7 mint fenced by the volume's high-water mark, replacing
+        SQL trigger minting. This removes the `MAX(uuid7)` read-back and with
+        it the single-owning-connection model, and it makes id generation one
+        unit-testable function per language instead of one per SQL dialect.
+      - |
+        **Mount access policy (D-4).** Mounts carry `ro`/`rw` and an optional
+        principal; by default at most one `rw` mount covers a subtree, with
+        overlap an explicit opt-in. Authorization layered above correctness,
+        not a correctness invariant.
+      - |
+        **The conformance suite is the port contract.** 91 language-agnostic
+        scenarios plus byte vectors for the id mint and the encryption ladder.
+        `tests/test_spec_projection.py` asserts the Python surface against
+        `mount-api.yaml` in both directions, including each operation's
+        `locks` flag, so an operation can no longer inherit a lock decision by
+        omission.
+    changed:
+      - |
+        **All stored timestamps are nanoseconds** (see Upgrading). The era-1
+        rescale is bounded by magnitude and is safe to re-run after a crash.
+      - |
+        **`pack`'s `ver` field is now a gate.** A blob from a newer build is
+        refused with `unsupported` instead of being read with this build's
+        field set and silently losing whatever the new version added; a blob
+        with no usable version is `corrupt`. Older versions stay readable.
+      - |
+        **PI-1 narrowed to containers.** Non-container leaves may hold several
+        active placements, which is what makes hardlinks possible; the
+        container graph is still a tree.
+    fixed:
+      - |
+        **Locks guard placement, not just content (ACC-11, D-6).** `rename`
+        and `link` were outside the excluded set, so a same-directory `mv`
+        from another mount walked past a lock that a cross-directory `mv`
+        honoured — and a WebDAV client holding a LOCK could have its next PUT
+        land in a different node with no error anywhere. `pack` and `unpack`
+        joined the set too. What a lock deliberately does NOT exclude —
+        ownership, times, xattrs, `copy` — is now recorded and pinned as
+        conformance data alongside what it does.
+      - |
+        **`copy` and `pack` name each placement, not each node.** A subtree
+        walk enumerates placements, and a hardlinked node may be named
+        differently at each one. Reading the node's own name gave every
+        placement the same name, so the copies collided and NODE-5 hid all but
+        one — a copy containing fewer visible files than its source, silently.
+
   - version: "0.3.7"
     date: 2026-08-31
     status: released
