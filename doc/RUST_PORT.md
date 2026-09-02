@@ -272,6 +272,22 @@ torn image. Tests: the file and image models natively, the image model again
 in Chromium, and the OPFS pool in a dedicated worker in Chromium; CI runs the
 same browser tests under Firefox next to the conformance suite.
 
-**Next:** the `aloelite-wasm` worker surface (a Web Lock, an OPFS pool and a
-message protocol over the Mount API), then `aloelite-fuse` and
-`aloelite-cli`.
+**`aloelite-wasm` is the browser surface, and its wire protocol is the
+spec.** `Fs.call(op, args)` runs any Mount API operation by its spec name
+with the spec's parameter names; `serve(fs, self)` answers `{id, op, args}`
+with `{id, ok}` or `{id, error: {code, message}}` over the Worker's own scope
+or a `MessageChannel`; `Pool.install` / `Pool.open(name)` is the OPFS pool
+with the Web Lock that makes a volume file single-writer (`busy`, not a
+wait, when another Worker has it). The dispatch is one table that
+`tests/projection.rs` holds against `mount-api.yaml` in both directions.
+Integers cross as `BigInt`, bytes as `Uint8Array`, absent optionals as
+`null`; an error is an `Error` with a `code`. Tests: the table natively and
+in-page; the call, the protocol and the pool in Chromium (the pool from a
+dedicated worker); CI runs the same under Firefox and generates the ES
+module and `.d.ts` with `wasm-bindgen --target web`, so a signature
+TypeScript cannot type fails there. `rust/aloelite-wasm/README.md` has the
+page-side snippet.
+
+**Next:** `aloelite-fuse` — the largest single cost in the port, every row
+of `doc/COMPATIBILITY.md` re-established by hand against a live kernel
+mount — then `aloelite-cli`, whose contract question D-7 leaves open.

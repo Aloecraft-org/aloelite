@@ -97,6 +97,10 @@ wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
 js-sys = "0.3"
 web-sys = "0.3"
+# Records cross into JavaScript through serde: objects, BigInt for every
+# integer (timestamps are nanoseconds and overflow a double), Uint8Array for
+# bytes.
+serde-wasm-bindgen = "0.6"
 
 # --- shared ---
 thiserror = "2"

@@ -15,7 +15,7 @@ decision rather than a conversation. Uses the vocabulary of
 | D-4 | POSIX byte-range locks are per mount through FUSE; engine locks arbitrate across mounts; admission defaults to one rw mount per subtree, overlap is an opt-in. | 2026-08-26, amended 08-28 | implemented |
 | D-5 | Hardlinks: a leaf may be placed many times, a placement may carry its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02 | implemented; the record was written after the fact |
 | D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
-| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, store shape settled 09-02 | in progress: engine and store done, wasm surface next |
+| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store shape; wire protocol) | in progress: engine, store and browser surface done; fuse and cli next |
 | D-8 | The pack blob format moves to v2 once, carrying uid/gid/mode, xattrs and retention; not atime, ctime or hardlink identity. v1 stays readable forever. | 2026-09-02 | implemented (Python and Rust) |
 
 How to read a record: what was decided, why, what it obliges, and what it
@@ -321,7 +321,8 @@ question, and it wants its own decision.
 ## D-7: The Rust engine is one crate on three targets; storage is the seam, not the engine
 
 **Decided 2026-09-02.** Two of the three points left open below were settled
-the same day, when `aloelite-store` was written; see "Settled since".
+the same day, when `aloelite-store` was written, and the browser surface's
+shape when `aloelite-wasm` was; see the two "Settled since" sections.
 
 `aloelite-rs` targets native, `wasm32-wasip2` and `wasm32-unknown-unknown` as
 peers. Not native-first with WebAssembly to follow: the moment WebAssembly is
@@ -439,6 +440,44 @@ storage — never what a mount, a lock, or an operation means.
   never persist a torn image. Implication: a host that forgets to checkpoint
   loses everything since the last one, and `close()` exists so the common
   case cannot forget.
+
+### Settled since (2026-09-02, when `aloelite-wasm` was written)
+
+- **The wire protocol is the Mount API itself.** The question was what a
+  page sends its Worker. The answer: the spec's operation names with the
+  spec's parameter names, as `{id, op, args}`, answered with `{id, ok}` or
+  `{id, error: {code, message}}` — and the same call is available directly
+  as `Fs.call(op, args)`, the protocol being that call with an envelope
+  around it. The dispatch is one table (`aloelite_wasm::fs::OPS`) that
+  `tests/projection.rs` holds against `mount-api.yaml` in both directions,
+  so an operation cannot be on the wire and not in the spec, or in the spec
+  and not on the wire, and a parameter name cannot drift. Implication: there
+  is no second vocabulary to document or to port; a client library is a
+  thin typed wrapper the host writes for its own language; and the one
+  extra (`resolve_volume_name`, the facade's duplicate-name rule) is
+  declared as an extra rather than smuggled in as an operation.
+- **Every integer crosses as a `BigInt`.** Timestamps are nanoseconds
+  (NODE-4) and sit near 2^60, where a JS number's spacing is 256 ns: a
+  `set_mtime` round-tripped through a double comes back changed, in
+  silence. The alternative — numbers for sizes and counts, BigInt for
+  timestamps only — is right until a consumer does arithmetic across the
+  seam. So sizes, counts, modes and timestamps are all BigInt on the way
+  out, and a Number or a BigInt is accepted on the way in, a Number beyond
+  2^53 refused as `usage` rather than rounded. Implication: JS writes
+  `Number(info.size)` where it wants a number, and cannot get a timestamp
+  wrong by 256 ns without noticing.
+- **The single-writer lock lives in the opener and answers `busy`.**
+  `Pool.open(name)` takes the Web Lock `aloelite:<directory>/<name>` with
+  `ifAvailable` and fails with `busy` when another Worker holds it, rather
+  than queueing; `close` releases it, and so does the browser if the Worker
+  dies. Without Web Locks the open fails (`unsupported`) rather than
+  proceeding unprotected. Implication: two tabs cannot corrupt one volume
+  file whatever the page's JS forgets, and a page that wants to wait does
+  so explicitly, with its own retry.
+- **Errors outside the closed set are named and finite.** `usage`,
+  `internal`, `sqlite`, `busy`, `opfs`, `io` — the surface's own failures
+  (`aloelite_wasm::value::EXTRA_CODES`), disjoint from the spec's codes by
+  test. Implication: a consumer switching on `code` can be exhaustive.
 
 ### Not decided here
 

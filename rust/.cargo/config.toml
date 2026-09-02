@@ -1,7 +1,7 @@
 # Workspace build configuration. Keep target-specific toolchain knobs HERE,
 # not in per-crate build scripts, so every crate builds identically.
 
-# Browser tests: `cargo test -p aloelite-conformance -p aloelite-store --target wasm32-unknown-unknown`
+# Browser tests: `cargo test -p aloelite-conformance -p aloelite-store -p aloelite-wasm --target wasm32-unknown-unknown`
 # hands the test binary to wasm-bindgen-test-runner, which drives a headless
 # browser. The runner must match the `wasm-bindgen` version in Cargo.lock
 # EXACTLY (the bindgen schema is unstable and it refuses a mismatch); CI reads

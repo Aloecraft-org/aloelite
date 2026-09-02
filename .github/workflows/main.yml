@@ -237,10 +237,22 @@ jobs:
     # tests; the runner is headless unless NO_HEADLESS is set. An empty test
     # binary passes, which is the guard being armed rather than fired.
     - name: Conformance in headless Firefox
-      run: cargo test -p aloelite-conformance -p aloelite-store --target wasm32-unknown-unknown
+      run: cargo test -p aloelite-conformance -p aloelite-store -p aloelite-wasm --target wasm32-unknown-unknown
       env:
         # The unlock-key vectors run Argon2id at the format's pinned factors
         # (64 MiB / 3 / 4) twice, in a debug wasm build. wasm-bindgen-test's
         # default is 20 s per test; this run is the measurement of what a
         # mount costs the Worker, so let it measure rather than time out.
         WASM_BINDGEN_TEST_TIMEOUT: "180"
+
+    # The page-facing package: the same wasm-bindgen CLI turns the cdylib
+    # into an ES module plus a .d.ts. Generating it here proves every
+    # exported signature is one wasm-bindgen can bind and TypeScript can
+    # type, which `cargo check` alone does not.
+    - name: The browser surface packages as an ES module
+      run: |
+        cargo build -p aloelite-wasm --target wasm32-unknown-unknown
+        wasm-bindgen --target web --typescript --out-dir target/aloelite-wasm-pkg \
+          target/wasm32-unknown-unknown/debug/aloelite_wasm.wasm
+        test -s target/aloelite-wasm-pkg/aloelite_wasm.d.ts
+        grep -q "class Fs" target/aloelite-wasm-pkg/aloelite_wasm.d.ts

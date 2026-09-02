@@ -118,6 +118,18 @@ releases:
         a browser, and in a dedicated worker; D-7 records why there is no
         trait over the three.
       - |
+        **`aloelite-wasm`: the browser surface.** `Fs.call(op, args)` runs
+        any Mount API operation by its spec name with the spec's parameter
+        names; `serve(fs, self)` turns that into the Worker protocol
+        (`{id, op, args}` in, `{id, ok}` or `{id, error: {code, message}}`
+        out); `Pool.install` / `Pool.open(name)` is the OPFS pool, and
+        `open` takes the Web Lock that makes a volume file single-writer
+        (`busy` when another Worker has it, never a silent wait). One
+        dispatch table, held against `mount-api.yaml` in both directions by
+        test. Integers cross as `BigInt` — timestamps are nanoseconds and do
+        not fit a double — and bytes as `Uint8Array`. CI runs the tests
+        under Firefox and packages the ES module with `wasm-bindgen`.
+      - |
         **Real POSIX metadata.** `uid`/`gid`/`mode` columns, `atime`/`ctime`,
         `link` (hardlinks, with `nlink` derived from active placements rather
         than stored), `mknod` for fifos and sockets, symlinks as a first-class
