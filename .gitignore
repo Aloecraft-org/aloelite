@@ -12,3 +12,6 @@ dist
 *.sqlite*
 build
 .venv
+
+# Rust (rust/ workspace)
+rust/target/

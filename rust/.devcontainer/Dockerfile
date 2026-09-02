@@ -36,9 +36,23 @@ RUN rustup update
 RUN rustup target add wasm32-unknown-unknown wasm32-wasip2 \
     x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
 
+# wasi-sdk: rusqlite `bundled` compiles sqlite3.c with cc-rs, which needs a
+# WASI-capable clang and sysroot for wasm32-wasip2. The host clang falls back
+# to glibc headers and fails ("'bits/libc-header-start.h' file not found").
+# The three CC/AR/CFLAGS variables are what cc-rs reads; keep them in step
+# with rust/.cargo/config.toml.
+ARG WASI_SDK_MAJOR=27
+ENV WASI_SDK_PATH=/opt/wasi-sdk
+RUN curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_MAJOR}/wasi-sdk-${WASI_SDK_MAJOR}.0-x86_64-linux.tar.gz" \
+      | tar xz -C /opt && mv /opt/wasi-sdk-${WASI_SDK_MAJOR}.0-x86_64-linux ${WASI_SDK_PATH}
+ENV CC_wasm32_wasip2=${WASI_SDK_PATH}/bin/clang \
+    AR_wasm32_wasip2=${WASI_SDK_PATH}/bin/llvm-ar \
+    CFLAGS_wasm32_wasip2=--sysroot=${WASI_SDK_PATH}/share/wasi-sysroot
+
 # 2. Install System Deps (The "Apt Box")
 RUN apt-get update && apt-get install -y \
-    firefox-esr python3-pip python3-venv
+    firefox-esr python3-pip python3-venv curl \
+    libfuse3-dev pkg-config fuse3
 
 RUN printf "[global]\nbreak-system-packages = true\nroot-user-action = ignore\n" > /etc/pip.conf
 RUN python3 -m pip install --user --upgrade pip

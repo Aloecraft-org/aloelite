@@ -1,0 +1,19 @@
+[package]
+name = "aloelite-fuse"
+description = "The Linux FUSE daemon over aloelite-core via `fuser`. Native only, by nature: there is no kernel to talk to in a browser or a WASI component."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aloelite-core = { path = "../aloelite-core" }
+aloelite-store = { path = "../aloelite-store" }
+ego_platform = { workspace = true }
+log = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { workspace = true }
+libc = { workspace = true }

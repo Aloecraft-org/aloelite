@@ -1,0 +1,90 @@
+# aloelite-rs — the Rust implementation of the Aloelite Mount API.
+#
+# One workspace, six crates, three targets. The crates split along the line
+# that keeps WebAssembly first-class rather than aspirational: aloelite-core
+# compiles to every target with zero `cfg`, and anything that cannot is by
+# definition a different crate. CI enforces that from the first commit
+# (.github/workflows/main.yml, job `rust`), which is what stops "we'll do wasm
+# later" from becoming a decision nobody made.
+#
+#   target                   crates
+#   x86_64 / aarch64 native  all six
+#   wasm32-wasip2            core, store, conformance, cli
+#   wasm32-unknown-unknown   core, store, conformance, wasm
+#
+# doc/RUST_PORT.md is the plan; doc/DECISIONS.md D-7 is the storage decision.
+
+[workspace]
+resolver = "3"
+members = [
+    "aloelite-core",
+    "aloelite-store",
+    "aloelite-conformance",
+    "aloelite-fuse",
+    "aloelite-wasm",
+    "aloelite-cli",
+]
+
+[workspace.package]
+version = "0.4.0-rc.1"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/Aloecraft-org/aloelite"
+authors = ["Michael Godfrey <michael@aloecraft.org>"]
+
+# Versions live here, once. Crates say `{ workspace = true }` and add only
+# the features they need. Crypto versions are aligned with aloecrypt_core
+# and ego-platform (chacha20poly1305 0.10, sha2 0.11, rand_core 0.10,
+# getrandom 0.2) so one copy of each lands in the wasm binary — alignment,
+# not dependency: aloecrypt_core's KDFs are not the ENC-2 ladder.
+[workspace.dependencies]
+# --- platform seam (git for now; see doc/RUST_PORT.md) ---
+ego_platform = { git = "https://github.com/Aloecraft-org/ego-platform" }
+
+# --- the engine ---
+# `bundled` statically links SQLite on native and WASI — the whole
+# sqlite-floor / bundled-sqlite apparatus of the Python side goes away.
+# On wasm32-unknown-unknown rusqlite's default `ffi-sqlite-wasm-rs` takes
+# over and `bundled` is inert. `serialize` is the memory-image path
+# (sqlite3_serialize / deserialize) that the blob-backed store needs.
+rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
+# OPFS (`sahpool`, Dedicated Worker) and IndexedDB (`relaxed-idb`) VFSes for
+# the browser. Only aloelite-store on wasm32-unknown-unknown pulls this in.
+sqlite-wasm-vfs = "0.2"
+
+# --- the ENC-2 key ladder, byte-for-byte against conformance/vectors/format-v1.json ---
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+hkdf = "0.12"
+sha2 = "0.11"
+rand_core = "0.10"
+zeroize = "1"
+
+# --- pack format (OP-6/OP-7) ---
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- conformance runner ---
+# serde_yaml is archived. serde_norway is the maintained API-compatible fork;
+# it is a test-only dependency and must carry the YAML 1.1/1.2 boolean guard
+# conformance/README.md documents (see aloelite-conformance/README.md).
+serde_norway = "0.9"
+base64 = "0.22"
+hex = "0.4"
+
+# --- native frontends ---
+fuser = "0.18"
+libc = "0.2"
+
+# --- browser ---
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen-test = "0.3"
+js-sys = "0.3"
+web-sys = "0.3"
+
+# --- shared ---
+thiserror = "2"
+log = "0.4"

@@ -1,0 +1,23 @@
+[package]
+name = "aloelite-core"
+description = "The Aloelite engine: schema, SQL templates, id mint, ENC-2 ladder, resolution, and every Mount API operation. No I/O, no platform, no cfg."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+chacha20poly1305 = { workspace = true }
+argon2 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

@@ -240,3 +240,112 @@ at a locked node's name makes the locked node invisible to path resolution
 without touching it. That predates era 2 and applies to every `create_*`
 operation; it is a NODE-5 visibility question, not an ACC-11 exclusion
 question, and it wants its own decision.
+
+---
+
+## D-7: The Rust engine is one crate on three targets; storage is the seam, not the engine
+
+**Decided 2026-09-02.**
+
+`aloelite-rs` targets native, `wasm32-wasip2` and `wasm32-unknown-unknown` as
+peers. Not native-first with WebAssembly to follow: the moment WebAssembly is
+deferred, decisions get made that make it harder to pick up, and nobody makes
+them on purpose. This decision names the mechanism that prevents that, and
+the storage model that makes it possible.
+
+### The rule
+
+**`aloelite-core` compiles to all three targets with zero `cfg`.** It
+performs no I/O of its own. It takes a `rusqlite::Connection` that something
+else opened, a `Clock`, and a `CryptoRngCore`, and it never asks which
+platform it is on. Anything that cannot meet that bar is, by definition, a
+different crate.
+
+This is enforced by CI from the first commit, not by intent: the `rust` job
+in `.github/workflows/main.yml` builds `aloelite-core` for all three targets
+on every push, and runs the conformance suite in a real browser under
+`wasm-bindgen-test`. The first commit that reaches for `std::fs` or a
+native-only crate fails there, immediately, rather than three weeks in. It is
+the same idiom this repository already trusts — `test_spec_projection.py`
+and the `sqlite-floor` job exist for exactly this reason.
+
+### Why the engine can be one thing
+
+SQLite is the entire engine, and `rusqlite` reaches every target: `bundled`
+statically links it on native and WASI, and rusqlite's default
+`ffi-sqlite-wasm-rs` feature swaps in `sqlite-wasm-rs` on
+`wasm32-unknown-unknown`. So the SQL execution layer is genuinely portable,
+and what differs per target is only **how a connection is opened** — which
+is a separate crate, `aloelite-store`, with three answers:
+
+| model | storage | targets | durability | role |
+|---|---|---|---|---|
+| **file** | a path on a filesystem | native, wasip2 | per transaction | servers, CLI, FUSE |
+| **memory image + blob** | `:memory:` loaded from and persisted to one `BlobStore` blob (`DirStore` / `IdbStore` / `MemStore`) | all three | per checkpoint | the portable shape; conformance under `wasm-bindgen-test`; tests |
+| **browser VFS** | `sqlite-wasm-vfs` `sahpool` over OPFS | wasm32-unknown-unknown, **Dedicated Worker only** | per transaction | production in the browser |
+
+The memory-image model is what makes the suite runnable everywhere with no
+platform setup; it is not what the browser ships. Aloelite's whole premise is
+*the filesystem is one file*, and `ego_platform::blobs::BlobStore`'s one hard
+promise — a put is all-or-nothing, a reader sees the old blob or the new blob
+and never a torn one — is precisely the durability primitive a whole-file
+checkpoint needs.
+
+### The browser deployment
+
+The engine runs inside a **Dedicated Worker**, and the volume lives in
+**OPFS**. This is not an implementation detail; it is what lets the browser
+run the *same* synchronous engine as native:
+
+- OPFS synchronous access handles exist only in Workers. Putting the engine
+  in one is what allows a real SQLite VFS with per-transaction durability —
+  `sqlite-wasm-vfs`'s `sahpool` is exactly this, documented for exactly this
+  context — instead of an async engine that would need every conformance
+  scenario written twice.
+- Argon2id at the format's pinned factors (64 MiB / 3 / 4, RFC 9106's
+  interactive profile) blocks the Worker for well under a second, once per
+  mount, and blocks nothing the user can see. The question of "Argon2id in
+  the browser" dissolves the moment the engine is in a Worker.
+- **One Worker owns one volume.** Two tabs are two mounts (ACC-1), there is
+  no shared SQLite between them, and two Workers each holding a `sahpool`
+  handle on one file would conflict. The browser target is therefore
+  **single-writer per volume**, taken by a Web Lock before the Worker opens
+  the file. That is D-4's admission policy, enforced by the platform rather
+  than by a mount row.
+
+The mount-row model is unchanged inside all of this. What differs per
+storage model is who owns the bytes and how often they reach durable
+storage — never what a mount, a lock, or an operation means.
+
+### Consequences
+
+- `ego-platform` supplies the platform seam — `BlobStore`, an injectable
+  `Clock`, `CryptoRngCore` entropy, `spawn`/`time`. Its `fs` module is
+  deliberately **not** used for volumes (its browser backend is
+  `localStorage`, string-typed and quota-bound; its own docs say blobs are
+  the right home for binary state). Dependency form: git, for now.
+- `aloecrypt_core` is **aligned with, not depended on**. Its KDFs are not the
+  ENC-2 ladder (a hash-iteration `pbkdf`, not Argon2id; HMAC-with-domain, not
+  RFC 5869 HKDF), and both are pinned byte-for-byte in
+  `conformance/vectors/format-v1.json`. `aloelite-core` uses the RustCrypto
+  crates directly, at the same versions aloecrypt_core and ego-platform use,
+  so one copy of each lands in the wasm binary.
+- The injectable `Clock` makes the D-2 clock-regression and high-water-fence
+  vectors deterministic instead of timing-dependent. `ManualClock` is how
+  those tests should be written.
+- `aloelite-fuse` has no portable oracle. `tests/test_posix_surface.py` and
+  `tests/test_fuse_mount.py` pin `doc/COMPATIBILITY.md` and are pytest
+  against a live kernel mount; every row is re-established in Rust by hand.
+  This is the single largest cost in the port, and it is budgeted as such
+  rather than discovered.
+
+### Not decided here
+
+- The `Store` trait's exact shape. Named as connection provisioning
+  (open on a path / a blob / a VFS, return a `Connection`); the signatures
+  wait for the first caller.
+- Checkpoint policy for the memory-image model (on unmount, every N writes,
+  on idle). It only matters once something ships on that model, and nothing
+  does — it is the test and portability shape.
+- Whether `aloelite-cli` mirrors the Python CLI verb-for-verb or writes its
+  own contract first. The Python CLI has no spec; either answer wants one.

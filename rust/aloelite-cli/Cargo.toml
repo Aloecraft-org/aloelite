@@ -1,0 +1,15 @@
+[package]
+name = "aloelite-cli"
+description = "The `aloelite` command over aloelite-core. Native and wasm32-wasip2 (a WASI component runs under wasmtime with the volume on the host filesystem)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aloelite-core = { path = "../aloelite-core" }
+aloelite-store = { path = "../aloelite-store" }
+ego_platform = { workspace = true }
+log = { workspace = true }
