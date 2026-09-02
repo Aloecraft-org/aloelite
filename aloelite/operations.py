@@ -14,9 +14,9 @@ conformance suite drives it. The two pieces with genuine host logic — path
 resolution (resolve.py) and the copy/pack/unpack subtree walk (here) — are the
 parts most worth pinning in conformance.
 
-MsgPack pack format is a CROSS-IMPLEMENTATION CONTRACT (see _PACK_* below): all
-four implementations must read and write it identically or a subtree packed on
-one platform won't unpack on another.
+MsgPack pack format is a CROSS-IMPLEMENTATION CONTRACT (see pack.py): all four
+implementations must read and write it identically or a subtree packed on one
+platform won't unpack on another.
 """
 
 from __future__ import annotations
@@ -25,9 +25,8 @@ import json
 import time
 from typing import Any
 
-import msgpack
-
 from . import crypto
+from . import pack as packfmt
 from .db import Db, split_chunks
 from .descriptor import Descriptor
 from .errors import (
@@ -1149,22 +1148,10 @@ def copy(db: Db, mount: MountId, src: str, dst: str) -> NodeId:
 
 
 # --- MsgPack pack format (CROSS-IMPLEMENTATION CONTRACT) --------------------
-# A packed subtree is a msgpack map:
-#   { "fmt": "aloefs.pack", "ver": 1, "nodes": [ <node>, ... ] }
-# nodes are in TOP-DOWN canonical order (parents before children); each node:
-#   { "p": <parent index or -1 for the root>,
-#     "t": "container" | "entry",
-#     "n": <name>, "c": <created_at>, "m": <modified_at>,
-#     "d": <payload bytes>  (entries only; omitted/None for containers) }
-#
-# VERSIONING. `ver` is a gate, not decoration: unpack refuses a blob written by
-# a newer build rather than reading the fields it happens to recognise and
-# dropping the rest. That silent-partial-read is the failure this exists to
-# prevent, and it is the same rule db.py applies to a newer schema era. Older
-# versions stay readable — every field added since v1 is optional on read, so a
-# v1 blob restores exactly as well as it ever did.
-_PACK_FMT = "aloefs.pack"
-_PACK_VER = 1
+# The blob layout, its version gate and its byte rules live in pack.py next to
+# the codec, pinned by conformance/vectors/pack-v1.json. What lives HERE is the
+# walk that feeds the codec: enumerate_subtree in canonical order, one entry
+# per placement, and the id remapping on the way back in.
 
 
 def pack(db: Db, mount: MountId, path: str) -> NodeId:
@@ -1215,10 +1202,7 @@ def pack(db: Db, mount: MountId, path: str) -> NodeId:
                 entry["d"] = db.read_content_bytes(r["node_id"])
             packed_nodes.append(entry)
 
-        blob = msgpack.packb(
-            {"fmt": _PACK_FMT, "ver": _PACK_VER, "nodes": packed_nodes},
-            use_bin_type=True,
-        )
+        blob = packfmt.encode(packed_nodes)
         # supersede: archive the original subtree, then place the packed entry.
         # The blob flows through the chunker like any payload (Option A), so the
         # blob-size ceiling disappears for free.
@@ -1243,21 +1227,9 @@ def unpack(db: Db, mount: MountId, path: str) -> None:
         if db.scalar("validation.check_lock_held", {"node": node, "mount": mount}):
             raise LockHeld(node=node)
         blob = db.read_content_bytes(node)
-        doc = msgpack.unpackb(blob, raw=False)
-        if not isinstance(doc, dict) or doc.get("fmt") != _PACK_FMT:
-            raise Corrupt("not an aloefs pack blob", node=node)
-        ver = doc.get("ver")
-        if not isinstance(ver, int) or isinstance(ver, bool) or ver < 1:
-            raise Corrupt(f"pack blob has no usable version ({ver!r})", node=node)
-        if ver > _PACK_VER:
-            # Same posture as db.py's schema-era gate: refuse loudly rather
-            # than half-read. Reading a newer blob with this build's field set
-            # would silently drop whatever the new version added.
-            raise Unsupported(
-                f"pack was written by a newer aloelite (pack format v{ver}; "
-                f"this build understands v{_PACK_VER}). Upgrade aloelite to "
-                f"unpack it."
-            )
+        # The version gate lives in the codec (pack.decode): a newer blob is
+        # unsupported, a malformed one corrupt, before a single node is read.
+        nodes = packfmt.decode(blob, node=node)
 
         placement = db.one("resolution.get_active_parent", {"node": node})
         if placement is None:
@@ -1266,7 +1238,7 @@ def unpack(db: Db, mount: MountId, path: str) -> None:
 
         db.rowcount("mutation.archive_edge", {"edge": placement["edge_id"]})
         idmap: dict[int, NodeId] = {}
-        for i, pn in enumerate(doc["nodes"]):
+        for i, pn in enumerate(nodes):
             ntype = NodeType(pn["t"])
             target_parent = parent if pn["p"] == -1 else idmap[pn["p"]]
             # NODE-6: tolerant read — a blob written before metadata existed has

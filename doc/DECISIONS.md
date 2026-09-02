@@ -349,3 +349,78 @@ storage — never what a mount, a lock, or an operation means.
   does — it is the test and portability shape.
 - Whether `aloelite-cli` mirrors the Python CLI verb-for-verb or writes its
   own contract first. The Python CLI has no spec; either answer wants one.
+
+## D-8: The pack format moves to v2 once, carrying what v1 drops, before any further port writes a pack
+
+**Decided 2026-09-02.** Scope decided here; implementation pending, Python
+first, Rust second, in the same release.
+
+### Where v1 stands
+
+A pack (OP-6/OP-7, TX-2) is one MsgPack map, `{fmt: "aloefs.pack", ver: 1,
+nodes: [...]}`, with one entry per PLACEMENT in the `subtree` view's
+canonical order and each entry carrying `p t n c m x? d?` (parent index,
+type, effective placement name, created/modified ns, metadata, payload).
+The codec is `aloelite/pack.py` and `aloelite-core/src/pack.rs`, byte-identical
+and pinned by `conformance/vectors/pack-v1.json`; the version gate refuses a
+newer blob (`unsupported`) and a malformed one (`corrupt`). That `ver: 1` is
+the only pack version that has ever existed. It is unrelated to the schema
+era: both implementations are era 2 and both write pack v1.
+
+What v1 drops, found while making `ver` a gate and fixing placement names:
+
+| lost | consequence after unpack |
+|---|---|
+| `uid` / `gid` / `mode` | ownership and permissions revert to unset |
+| `atime` | reverts to the modified-time fallback |
+| xattrs (`user.*`) | gone |
+| `retention_keep` | policy reverts to keep-all |
+| hardlink identity | a node with k placements comes back as k nodes, each `nlink` 1 |
+
+`ctime` is deliberately not on the list: the `edge_touch_ctime` trigger stamps
+it on every placement insert, so no writer can restore it, by design. Content
+history is not on the list either: a pack carries the committed bytes only.
+
+### Decision
+
+1. **`ver` becomes 2**, in one bump carrying both tiers below. Any new key
+   forces a bump — a v1 reader would otherwise drop it silently, which is
+   exactly what the gate exists to refuse — and hardlink identity changes the
+   entry shape, so splitting the two would cost two bumps for one release.
+
+2. **Tier 2: POSIX metadata rides as optional keys** on a data-carrying
+   entry, omitted when unset, in this emission order after `m`:
+   `u` uid, `g` gid, `o` mode, `at` atime ns, then `x` metadata, `xa` xattrs
+   (map name → bin, keys sorted bytewise), `rk` retention_keep, then `d`.
+   Restoring them uses templates that already exist (`set_owner`,
+   `set_atime`, `xattr_set`, `set_retention_keep`): no schema change, no era
+   bump.
+
+3. **Tier 3: hardlink identity via blob-local indices.** The walk still emits
+   one entry per placement in canonical order. The FIRST placement of a node
+   carries its data; every later placement of the same node is a link entry,
+   `{p, n, l}`, where `l` is the index of the entry that carried the data and
+   `n` is this placement's name. Unpack creates the node at its first entry
+   and places it again for each `l` entry, with a placement-name override
+   where the name differs. Fresh ids are minted on unpack (OP-4); `l` indices
+   never leave the blob.
+
+4. **Byte rules are unchanged**: MsgPack, keys in the stated order, absent
+   optionals omitted, smallest integer encoding, str for text, bin for bytes,
+   `x`/`xa` keys sorted. `pack-v2.json` vectors, generated from the Python
+   reference, pin them before Rust follows.
+
+5. **v1 stays readable forever.** A v2 reader treats every v2 key as optional,
+   so a v1 blob decodes unchanged and restores exactly as it does today. The
+   gate then refuses `ver > 2`. No stored pack is rewritten.
+
+6. **Sequencing.** Python ships the v2 writer and reader with the vectors;
+   Rust follows in the same release. Until then Rust writes v1, which is
+   fine: v1 is readable under any v2. What is NOT fine is a third writer:
+   no other port (JS, Kotlin) implements pack before v2 lands, so the switch
+   stays two implementations and zero migrations.
+
+### Not decided here
+
+Compression of `d`, and the per-node content hash the `proof` column reserves
+(EXT-2). Both would be a v3 and neither is blocked by this shape.

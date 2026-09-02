@@ -28,6 +28,18 @@ the implementation rather than describing it.
 
 ### Added
 
+- **Pack format vectors.** `conformance/vectors/pack-v1.json` pins the
+  pack blob codec byte-for-byte in both directions, generated from the
+  reference (`script/gen_pack_vectors.py`) and run by the Python and
+  Rust suites; the codec itself moved into `aloelite/pack.py`. A
+  scenario restores a reference-produced pack end to end. The v2 scope
+  (POSIX metadata, xattrs, retention, hardlink identity) is decided in
+  D-8 and lands Python-first, before any further port writes a pack.
+- **Spec: encryption parameters.** `mount-api.yaml` now declares
+  `chunk_size`, `pin` and `enc_mode` on `create_volume`, `pin` on
+  `mount`, and the `bad_key` / `encryption_required` outcomes on
+  `mount` and `change_pin` — what the reference has taken since ENC-2
+  shipped, and what a port needs to run the encryption harnesses.
 - **`rust/` — the Rust workspace.** Six crates on three targets (native,
   `wasm32-wasip2`, `wasm32-unknown-unknown`). `aloelite-core` compiles to
   every target with zero `cfg`, and a CI job enforces that on every push
@@ -74,6 +86,9 @@ the implementation rather than describing it.
 
 ### Fixed
 
+- `unpack` answers `corrupt` for a garbage or malformed pack blob (bad
+  MsgPack, a top-level array, a node without a type) instead of
+  escaping a raw decoder exception.
 - Mounting or resolving a volume BY NAME with duplicates now picks the
   most recently created volume (`created_at`, then id). It picked the
   greatest id, and volume ids are stateless uuid7s (D-1: no ordering

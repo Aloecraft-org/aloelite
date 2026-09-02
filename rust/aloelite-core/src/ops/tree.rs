@@ -8,23 +8,19 @@
 //! walk order is a CONFORMANCE REQUIREMENT — every implementation must walk
 //! it identically so new-id sequences (and future merkle hashes) match.
 //!
-//! The MsgPack pack format is a CROSS-IMPLEMENTATION CONTRACT: a packed
-//! subtree is a map `{fmt: "aloefs.pack", ver: 1, nodes: [...]}`, nodes in
-//! canonical order, each `{p: parent index or -1, t: type, n: name,
-//! c: created_at, m: modified_at, x?: metadata map, d?: payload bytes}`
-//! (`x` only when non-empty, `d` only for leaves). `ver` is a GATE: a blob
-//! written by a newer build is `unsupported` rather than read with this
-//! build's field set, which would silently drop whatever the new version
-//! added. Older versions stay readable — fields added after v1 are optional
-//! on read. A malformed or absent version is `corrupt`.
+//! The MsgPack pack blob is a CROSS-IMPLEMENTATION CONTRACT whose layout,
+//! version gate and byte rules live in [`crate::pack`], pinned by
+//! `conformance/vectors/pack-v1.json`. What lives here is the walk that
+//! feeds the codec — one entry per placement, canonical order — and the id
+//! remapping on the way back in.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use rusqlite::named_params;
-use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 use crate::errors::{FsError, Result};
+use crate::pack::{self as packfmt, PackNode};
 use crate::records::NodeInfo;
 use crate::resolve::{resolve, resolve_parent};
 use crate::templates::mutation::{
@@ -40,9 +36,6 @@ use super::{link_child, lock_held, new_node, put_initial_content, require_mount,
 // ---------------------------------------------------------------------------
 // surface
 // ---------------------------------------------------------------------------
-
-pub const PACK_FMT: &str = "aloefs.pack";
-pub const PACK_VER: u32 = 1;
 
 /// Detach a leaf or empty container: archive the placement the path walked
 /// (OP-5). Refuses a non-empty container with `not_empty`.
@@ -198,12 +191,7 @@ pub fn pack(db: &mut Db, mount: &MountId, path: &str) -> Result<NodeId> {
                 },
             });
         }
-        let blob = rmp_serde::to_vec_named(&PackDoc {
-            fmt: PACK_FMT,
-            ver: PACK_VER,
-            nodes,
-        })
-        .map_err(|e| FsError::internal(format!("pack encode: {e}")))?;
+        let blob = packfmt::encode(&nodes);
 
         // supersede: archive the original subtree, then place the packed
         // entry. The blob flows through the chunker like any payload, so
@@ -232,14 +220,16 @@ pub fn unpack(db: &mut Db, mount: &MountId, path: &str) -> Result<()> {
             return Err(FsError::LockHeld { node: node.0 });
         }
         let blob = db.read_content_bytes(&node)?;
-        let doc = decode_pack(&blob, &node)?;
+        // the version gate lives in the codec: a newer blob is unsupported,
+        // a malformed one corrupt, before a single node is read
+        let nodes = packfmt::decode(&blob)?;
 
         let placement = active_parent(db, &node)?.ok_or_else(|| {
             FsError::not_found(format!("packed entry {node} has no active placement"))
         })?;
         db.run(ARCHIVE_EDGE, named_params! { ":edge": placement.edge })?;
-        let mut idmap: Vec<NodeId> = Vec::with_capacity(doc.nodes.len());
-        for pn in &doc.nodes {
+        let mut idmap: Vec<NodeId> = Vec::with_capacity(nodes.len());
+        for pn in &nodes {
             let kind = NodeType::parse(&pn.t).ok_or_else(|| {
                 FsError::corrupt(format!("pack node has unknown type {:?}", pn.t))
             })?;
@@ -320,179 +310,5 @@ fn subtree_unlocked(db: &mut Db, root: &NodeId, mount: &MountId) -> Result<()> {
     match locked {
         Some(node) => Err(FsError::LockHeld { node: node.0 }),
         None => Ok(()),
-    }
-}
-
-#[derive(Serialize)]
-struct PackDoc<'a> {
-    fmt: &'a str,
-    ver: u32,
-    nodes: Vec<PackNode>,
-}
-
-/// Field order is serialization order and part of the byte contract.
-#[derive(Serialize, Deserialize)]
-struct PackNode {
-    p: i64,
-    t: String,
-    n: String,
-    #[serde(default)]
-    c: Option<i64>,
-    #[serde(default)]
-    m: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    x: Option<BTreeMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
-    d: Option<Vec<u8>>,
-}
-
-/// The version gate, read before anything else so a newer blob's unknown
-/// fields never turn into a decode error that masquerades as corruption.
-#[derive(Deserialize)]
-struct PackHead {
-    #[serde(default)]
-    fmt: Option<String>,
-    #[serde(default)]
-    ver: Option<i64>,
-}
-
-#[derive(Deserialize)]
-struct PackBody {
-    nodes: Vec<PackNode>,
-}
-
-fn decode_pack(blob: &[u8], node: &NodeId) -> Result<PackBody> {
-    let head: PackHead = rmp_serde::from_slice(blob)
-        .map_err(|_| FsError::corrupt(format!("{node} is not an aloefs pack blob")))?;
-    if head.fmt.as_deref() != Some(PACK_FMT) {
-        return Err(FsError::corrupt(format!(
-            "{node} is not an aloefs pack blob"
-        )));
-    }
-    let ver = match head.ver {
-        Some(v) if v >= 1 => v,
-        other => {
-            return Err(FsError::corrupt(format!(
-                "pack blob {node} has no usable version ({other:?})"
-            )));
-        }
-    };
-    if ver > i64::from(PACK_VER) {
-        return Err(FsError::unsupported(format!(
-            "pack was written by a newer aloelite (pack format v{ver}; this build understands v{PACK_VER}). Upgrade aloelite to unpack it."
-        )));
-    }
-    rmp_serde::from_slice(blob).map_err(|e| FsError::corrupt(format!("pack blob {node}: {e}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pack_bytes_match_the_reference_encoder() {
-        // msgpack.packb({"fmt": "aloefs.pack", "ver": 1, "nodes": [
-        //   {"p": -1, "t": "container", "n": "d", "c": 5, "m": 5},
-        //   {"p": 0, "t": "entry", "n": "f", "c": 6, "m": 7, "x": {"k": "v"}, "d": b"hi"}]},
-        //   use_bin_type=True)
-        let doc = PackDoc {
-            fmt: PACK_FMT,
-            ver: PACK_VER,
-            nodes: vec![
-                PackNode {
-                    p: -1,
-                    t: "container".into(),
-                    n: "d".into(),
-                    c: Some(5),
-                    m: Some(5),
-                    x: None,
-                    d: None,
-                },
-                PackNode {
-                    p: 0,
-                    t: "entry".into(),
-                    n: "f".into(),
-                    c: Some(6),
-                    m: Some(7),
-                    x: Some([("k".to_owned(), "v".to_owned())].into_iter().collect()),
-                    d: Some(b"hi".to_vec()),
-                },
-            ],
-        };
-        let bytes = rmp_serde::to_vec_named(&doc).unwrap();
-        let expected = concat!(
-            "83",
-            "a3666d74",
-            "ab616c6f6566732e7061636b",
-            "a3766572",
-            "01",
-            "a56e6f646573",
-            "92",
-            "85",
-            "a170",
-            "ff",
-            "a174",
-            "a9636f6e7461696e6572",
-            "a16e",
-            "a164",
-            "a163",
-            "05",
-            "a16d",
-            "05",
-            "87",
-            "a170",
-            "00",
-            "a174",
-            "a5656e747279",
-            "a16e",
-            "a166",
-            "a163",
-            "06",
-            "a16d",
-            "07",
-            "a178",
-            "81",
-            "a16b",
-            "a176",
-            "a164",
-            "c4026869",
-        );
-        assert_eq!(hex::encode(&bytes), expected);
-        let body = decode_pack(&bytes, &NodeId("n".into())).unwrap();
-        assert_eq!(body.nodes.len(), 2);
-        assert_eq!(body.nodes[1].d.as_deref(), Some(&b"hi"[..]));
-    }
-
-    #[test]
-    fn the_version_gate_runs_before_the_body_is_parsed() {
-        // {"fmt": "aloefs.pack", "ver": 2, "nodes": [{"zz": 1}]} -- a v2 node shape we cannot read
-        let newer = hex::decode(
-            "83a3666d74ab616c6f6566732e7061636ba3766572 02a56e6f64657391 81a27a7a01"
-                .replace(' ', ""),
-        )
-        .unwrap();
-        assert_eq!(
-            decode_pack(&newer, &NodeId("n".into()))
-                .err()
-                .unwrap()
-                .code(),
-            Some("unsupported")
-        );
-        // {"fmt": "aloefs.pack", "nodes": []} -- no version at all
-        let versionless = hex::decode("82a3666d74ab616c6f6566732e7061636ba56e6f64657390").unwrap();
-        assert_eq!(
-            decode_pack(&versionless, &NodeId("n".into()))
-                .err()
-                .unwrap()
-                .code(),
-            Some("corrupt")
-        );
-        assert_eq!(
-            decode_pack(b"not msgpack", &NodeId("n".into()))
-                .err()
-                .unwrap()
-                .code(),
-            Some("corrupt")
-        );
     }
 }

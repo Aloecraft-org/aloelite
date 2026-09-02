@@ -118,3 +118,50 @@ scenarios:
       - op: unpack
         args: {path: /versionless.pack}
         raises: corrupt
+
+  - scenario: unpack-restores-a-pack-written-by-the-reference
+    requirements: [OP-7, TX-2]
+    description: >
+      CROSS-IMPLEMENTATION READ. The literal below is the `reference-tree`
+      case of conformance/vectors/pack-v1.json: a v1 pack produced by the
+      Python reference, so every port restores bytes it did not write rather
+      than only its own. It carries every node type, metadata, an empty
+      payload and a symlink target. Timestamps travel in the blob, so
+      created_at and modified_at are asserted exactly — unpack restores what
+      pack recorded (OP-4's preservation, seen from the other side).
+    steps:
+      - op: create_entry
+        args:
+          path: /ref.pack
+          data: {base64: "g6NmbXSrYWxvZWZzLnBhY2ujdmVyAaVub2Rlc5eFoXD/oXSpY29udGFpbmVyoW6hZKFjzxeXnP42KgAAoW3PF5ec/nHEygCHoXAAoXSlZW50cnmhbqFmoWPPF5ec/jYqAAGhbc8Xl5z+ccTKAaF4gqFroXamc3RhdHVzpWRyYWZ0oWTEAmhphaFwAKF0qWNvbnRhaW5lcqFuo3N1YqFjzxeXnP42KgACoW3PF5ec/nHEygKGoXACoXSlZW50cnmhbqVlbXB0eaFjzxeXnP42KgADoW3PF5ec/nHEygOhZMQAhqFwAKF0p3N5bWxpbmuhbqRsaW5roWPPF5ec/jYqAAShbc8Xl5z+ccTKBKFkxAkuLi90YXJnZXSGoXAAoXSkZmlmb6FupHBpcGWhY88Xl5z+NioABaFtzxeXnP5xxMoFoWTEAIahcAChdKZzb2NrZXShbqRzb2NroWPPF5ec/jYqAAahbc8Xl5z+ccTKBqFkxAA="}
+      - op: unpack
+        args: {path: /ref.pack}
+      - op: exists
+        args: {path: /ref.pack}
+        expect: false
+      - op: stat
+        args: {path: /d}
+        expect: {type: container, name: d, created_at: 1700000000000000000, modified_at: 1700000001000000000}
+      - op: list
+        args: {path: /d}
+        expect:
+          - {name: f, type: entry, visible: true}
+          - {name: sub, type: container, visible: true}
+          - {name: link, type: symlink, visible: true}
+          - {name: pipe, type: fifo, visible: true}
+          - {name: sock, type: socket, visible: true}
+      - op: read_all
+        args: {path: /d/f}
+        expect: {utf8: "hi"}
+      - op: stat
+        args: {path: /d/f}
+        expect: {size: 2, metadata: {k: v, status: draft}, created_at: 1700000000000000001, modified_at: 1700000001000000001}
+      - op: read_all
+        args: {path: /d/sub/empty}
+        expect: {utf8: ""}
+      - op: read_all
+        args: {path: /d/link}
+        expect: {utf8: "../target"}
+      - op: stat
+        args: {path: /d/sock}
+        expect: {type: socket, size: 0}

@@ -23,6 +23,7 @@ pub mod descriptor;
 pub mod errors;
 pub mod ids;
 pub mod ops;
+pub mod pack;
 pub mod platform;
 pub mod records;
 pub mod resolve;

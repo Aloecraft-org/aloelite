@@ -139,24 +139,36 @@ operations:
       params:  { fs: FsHandle }
       returns: void
     create_volume:
-      params:  { fs: FsHandle, name: "string?" }
+      params:  { fs: FsHandle, name: "string?", chunk_size: "int = 1048576",
+                 pin: "bytes?", enc_mode: "string = convergent" }
       returns: VolumeInfo
       flags:   { mutates: true, atomic: true, locks: false }
-      note:    "creates volume + its root container, links root (bootstrap)"
+      note: >
+        creates volume + its root container, links root (bootstrap).
+        chunk_size is CV-1's per-volume chunk size, fixed here and immutable.
+        With a pin the volume is encrypted (ENC-2): a random volume key K_v
+        is sealed under K_u = Argon2id(pin, H_v) on the volume row, and the
+        pin itself is never stored; enc_mode then selects 'convergent'
+        (dedup preserved) or 'random' (dedup sacrificed for zero equality
+        leakage). Without a pin the volume is 'none' whatever enc_mode says.
+        Nothing here raises bad_key or encryption_required: at creation
+        there is no key to be wrong and no requirement to violate.
     change_pin:
       params:  { fs: FsHandle, volume: VolumeId, old_pin: bytes, new_pin: bytes }
       returns: none
       flags:   { mutates: true, atomic: true, locks: false }
+      raises:  [not_found, encryption_required, bad_key]
       note:    "PIN rotation: unwrap K_v with old K_u, re-wrap under new K_u (fresh N_wrap). K_v immutable; EncryptionRequired on 'none', BadKey on wrong old pin. Live mounts unaffected."
     list_volumes:
       params:  { fs: FsHandle }
       returns: [VolumeInfo]
     mount:
       params:  { fs: FsHandle, volume: VolumeId, at: "Path?", ttl_ms: "int?",
-                 access: "string?", principal: "string?", allow_overlap: "bool?" }
+                 pin: "bytes?", access: "string?", principal: "string?",
+                 allow_overlap: "bool?" }
       returns: MountId
       flags:   { mutates: true, atomic: true, locks: false }
-      raises:  [not_found, mount_conflict]
+      raises:  [not_found, mount_conflict, bad_key, encryption_required]
       note: >
         `at` defaults to the volume root; ttl per ACC-3. Era 2 (D-4): access
         is 'rw' (default) or 'ro'; principal is an optional tenant/user
@@ -165,12 +177,20 @@ operations:
         contained by a valid rw mount's point raises mount_conflict unless
         allow_overlap is passed. Overlap is authorization policy only: id
         correctness never depends on it (D-1/D-2) and entry write locks
-        arbitrate write-write conflicts.
+        arbitrate write-write conflicts. An encrypted volume needs `pin`
+        (ENC-2): it derives K_u, unwraps the volume key and installs the
+        chunk cipher on this CONNECTION for the life of the mount; a wrong
+        pin is bad_key. A pin on an unencrypted volume, or none on an
+        encrypted one, is encryption_required (ENC-3), and because the
+        cipher is connection-scoped every later operation re-checks it
+        against its volume: mounting a second volume replaces the cipher,
+        so a stale mount on the first now fails with encryption_required
+        rather than reading ciphertext as plaintext.
     unmount:
       params:  { mount: MountId }
       returns: void
       flags:   { mutates: true, atomic: true, locks: false }
-      note:    "marks mount invalid; lock reclamation deferred to prune (ACC-10)"
+      note:    "marks mount invalid; lock reclamation deferred to prune (ACC-10); tears down the connection's session cipher if this mount installed it"
     renew_mount:
       params:  { mount: MountId, ttl_ms: "int?" }
       returns: MountInfo

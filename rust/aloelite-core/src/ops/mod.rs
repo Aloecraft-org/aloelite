@@ -29,6 +29,7 @@ use crate::types::{Access, EdgeId, MountId, NodeId, NodeType, VolumeId};
 // surface: the operations, in mount-api.yaml's groups
 // ---------------------------------------------------------------------------
 
+pub use crate::pack::{PACK_FMT, PACK_VER};
 pub use content::{append, truncate, write_all, write_range};
 pub use locking::{lock, renew_lock, unlock};
 pub use maintenance::{health_check, prune, prune_content, verify};
@@ -42,7 +43,7 @@ pub use structural::{
     create_container, create_entry, create_special, get_xattr, link, list_xattrs, move_,
     remove_xattr, rename, set_atime, set_metadata, set_mtime, set_owner, set_retention, set_xattr,
 };
-pub use tree::{PACK_FMT, PACK_VER, copy, pack, remove, remove_recursive, unpack};
+pub use tree::{copy, pack, remove, remove_recursive, unpack};
 
 mod content;
 mod locking;
