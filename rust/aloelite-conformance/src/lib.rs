@@ -17,24 +17,31 @@
 //! - **It carries the YAML boolean guard.** YAML 1.1 (PyYAML) reads a bare
 //!   `on`/`off`/`yes`/`no` key as a boolean; YAML 1.2 (serde_norway) reads
 //!   it as a string. The Python runner's `test_no_scenario_key_is_a_yaml_boolean`
-//!   must have an equivalent here, or the same fixture means two things in
-//!   two implementations — the exact failure conformance/ exists to prevent.
+//!   has its equivalent in `tests/fixtures.rs`, or the same fixture means
+//!   two things in two implementations — the exact failure conformance/
+//!   exists to prevent.
+//!
+//! Layout: [`scenarios`] embeds the fixtures and the spec, [`harness`]
+//! builds the named starting states, [`runner`] executes steps and matches
+//! results, [`scratch`] is the one platform seam (where a scenario's
+//! database file lives). `build.rs` mints one test per scenario into
+//! `tests/scenarios.rs`.
 //!
 //! See doc/RUST_PORT.md for the plan and what exists.
 
-/// The conformance data, embedded at compile time so the same bytes reach
-/// every target — there is no filesystem to read them from in a browser, and
-/// a runner that loads files at run time is a runner whose inputs can drift
-/// from the tree it was built from.
-///
-/// Paths are relative to this file: `rust/aloelite-conformance/src/` up to
-/// the repository root, then into `conformance/`.
+pub mod harness;
+pub mod runner;
+pub mod scenarios;
+pub mod scratch;
+
+/// The conformance vectors, embedded at compile time so the same bytes reach
+/// every target.
 pub mod vectors {
     /// D-1/D-2: the uuid7 layout's deterministic prefix and the
     /// `MonotonicMint` state machine. Runner: `tests/ids_vectors.rs`.
     pub const IDS_V1: &str = include_str!("../../../conformance/vectors/ids-v1.json");
 
     /// CV-1/CV-2 and the ENC-2 key ladder: fixed inputs to exact bytes.
-    /// Runner: not yet written.
+    /// Runner: `tests/format_vectors.rs`.
     pub const FORMAT_V1: &str = include_str!("../../../conformance/vectors/format-v1.json");
 }

@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[build-dependencies]
+serde_norway = { workspace = true }
+
 [dependencies]
 rusqlite = { workspace = true }
 chacha20poly1305 = { workspace = true }
@@ -17,6 +20,7 @@ sha2 = { workspace = true }
 rand_core = { workspace = true }
 zeroize = { workspace = true }
 rmp-serde = { workspace = true }
+serde_bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -202,7 +202,11 @@ impl Cipher {
 
     /// Seal one chunk. `rng` is consumed only in random mode; identity and
     /// convergent are deterministic and ignore it.
-    pub fn encrypt_chunk<R: Rng + CryptoRng>(&self, plaintext: &[u8], rng: &mut R) -> Sealed {
+    pub fn encrypt_chunk<R: Rng + CryptoRng + ?Sized>(
+        &self,
+        plaintext: &[u8],
+        rng: &mut R,
+    ) -> Sealed {
         match self {
             Cipher::Identity => Sealed {
                 ciphertext: plaintext.to_vec(),
@@ -303,7 +307,7 @@ pub fn chunk_key(volume_key: &[u8; KEY_LEN], volume_id: &str) -> Key32 {
 /// `S_vk = AEAD(K_u, N_wrap, K_v)` → `(wrapped_key = ct || tag, wrap_nonce)`.
 /// A fresh random nonce every call, which is why there is no vector for it;
 /// [`unwrap_volume_key`] covers the same ladder deterministically.
-pub fn wrap_volume_key<R: Rng + CryptoRng>(
+pub fn wrap_volume_key<R: Rng + CryptoRng + ?Sized>(
     unlock_key: &[u8; KEY_LEN],
     volume_key: &[u8; KEY_LEN],
     rng: &mut R,
@@ -329,7 +333,7 @@ pub fn session_kek(token: &[u8], mount_nonce: &[u8]) -> Key32 {
 
 /// `mount_secret = AEAD(session_kek(T, N_m), N_sess, K_v)`. Memory-only;
 /// `T + N_m + mount_secret` reconstruct `K_v` without the PIN.
-pub fn seal_mount_secret<R: Rng + CryptoRng>(
+pub fn seal_mount_secret<R: Rng + CryptoRng + ?Sized>(
     token: &[u8],
     mount_nonce: &[u8],
     volume_key: &[u8; KEY_LEN],
@@ -349,21 +353,21 @@ pub fn open_mount_secret(
 }
 
 /// A fresh `K_v`.
-pub fn new_volume_key<R: Rng + CryptoRng>(rng: &mut R) -> Key32 {
+pub fn new_volume_key<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Key32 {
     let mut k = Zeroizing::new([0u8; KEY_LEN]);
     rng.fill_bytes(k.as_mut());
     k
 }
 
 /// A fresh `T`.
-pub fn new_token<R: Rng + CryptoRng>(rng: &mut R) -> [u8; TOKEN_LEN] {
+pub fn new_token<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> [u8; TOKEN_LEN] {
     let mut t = [0u8; TOKEN_LEN];
     rng.fill_bytes(&mut t);
     t
 }
 
 /// A fresh `N_m`.
-pub fn new_mount_nonce<R: Rng + CryptoRng>(rng: &mut R) -> [u8; MOUNT_NONCE_LEN] {
+pub fn new_mount_nonce<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> [u8; MOUNT_NONCE_LEN] {
     let mut n = [0u8; MOUNT_NONCE_LEN];
     rng.fill_bytes(&mut n);
     n
@@ -400,7 +404,7 @@ fn aead(key: &[u8; KEY_LEN]) -> ChaCha20Poly1305 {
 }
 
 /// Seal `plaintext` under `key` with a fresh nonce → `(ct || tag, nonce)`.
-fn aead_wrap<R: Rng + CryptoRng>(
+fn aead_wrap<R: Rng + CryptoRng + ?Sized>(
     key: &[u8; KEY_LEN],
     plaintext: &[u8],
     rng: &mut R,

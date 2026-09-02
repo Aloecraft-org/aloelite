@@ -42,6 +42,23 @@ The wasm test run needs `wasm-bindgen-test-runner` at **exactly** the
 the runner refuses a mismatch. The devcontainer pins it; CI reads it from the
 lockfile.
 
+Without Firefox, Chromium works too. The runner treats any stderr from the
+WebDriver binary as a failed start, and chromedriver prints an IPv6 warning
+in containers without IPv6, so silence it:
+
+```sh
+CHROMEDRIVER=/path/to/chromedriver CHROMEDRIVER_ARGS=--silent \
+  cargo test -p aloelite-conformance --target wasm32-unknown-unknown
+```
+
+A `webdriver.json` next to the crate can point at a Chrome binary
+(`{"goog:chromeOptions": {"binary": "..."}}`); the runner adds `headless`
+and `no-sandbox` itself.
+
 ## Status
 
-Scaffold. Manifests, READMEs and the CI guard exist; no engine code does.
+`aloelite-core` implements the whole Mount API and passes the conformance
+suite natively: 91 scenarios, every harness, every vector. `aloelite-store`
+carries the clock adapter the engine needs; its three storage models, and
+the wasm, fuse and cli crates, are next. `doc/RUST_PORT.md` "Standing" has
+the detail.

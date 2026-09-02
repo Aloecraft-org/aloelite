@@ -187,27 +187,68 @@ instantly what broke.
 
 ## Standing
 
-*2026-09-02.* All six crates type-check natively; the four browser crates
-type-check for `wasm32-unknown-unknown` — including rusqlite via
-`sqlite-wasm-rs` and the OPFS VFS, which is the fact the browser story rests
-on; `wasm32-wasip2` type-checks with wasi-sdk on the path.
+*2026-09-02.* **The engine passes the conformance suite natively.** All 91
+scenarios in `conformance/scenarios/`, the 7 fixture checks the Python
+runner carries (declared operations, implemented harnesses, the YAML boolean
+guard, declared errors, unique names, cited requirements, plus the error
+enum projected onto the spec in both directions), and the 16 vector cases.
+Every one of the seven harnesses is implemented, including the two-connection
+`two_mounts_one_volume` and the four encryption harnesses. The same crate passes
+**in a browser**: every scenario and vector under headless Chromium via
+`wasm-bindgen-test` (5.6 s for the 91 scenarios, two-connection harness and
+encrypted harnesses included, on `sqlite-wasm-rs`'s in-memory VFS); CI runs
+the identical binary under headless Firefox. `wasm32-wasip2` type-checks the
+engine and the runner with its tests.
 
-**Engine modules landed, each byte-for-byte against its vectors:**
+**Engine modules, all under `aloelite-core/src/`, zero `cfg`:**
 
-- `ids.rs` — the id mint (D-1/D-2), against `ids-v1.json`.
-- `content.rs` — chunk addressing and splitting (CV-1/CV-2), against
-  `format-v1.json`'s `chunk_address` / `chunk_split`.
-- `crypto.rs` — the whole ENC-2 ladder and the `Cipher` seam, against every
-  other section of `format-v1.json`: `volume_hash`, Argon2id `unlock_key`,
-  `chunk_key`, `encrypt_chunk_convergent` (nonce, ciphertext, tag, and the
-  pool address over the ciphertext), `unwrap_volume_key`, `session_kek`.
+- `platform.rs` — `Clock` and `CryptoRngCore`, the two things the engine
+  takes from the host. `aloelite-store/src/clock.rs` adapts ego-platform's.
+- `types.rs` / `records.rs` — the spec's scalars, enums and records. Ids are
+  newtypes that bind and read directly; records serialize, which is what the
+  runner compares against and what a wasm binding will hand to JavaScript.
+- `errors.rs` — the closed set as one enum; `code()` is the spec name. Three
+  engine-side variants carry no code: `Sqlite`, `Internal`, and `Usage`
+  (closed descriptor, negative seek — the reference's `ValueError`).
+- `templates.rs` + `build.rs` — the sixty-four templates as `const &str`,
+  generated from `sql-templates.yaml` at build time. A template name is a
+  compile error, not a run-time `KeyError`, and the shipped engine carries no
+  YAML parser. `schema.sql` is `include_str!`.
+- `db.rs` — the substrate, mirroring `db.py`: capability probe, journal-mode
+  probe with the PERSIST fallback, era gate, era-1→2 migration, derived-object
+  refresh, the mint with its fenced high-water mark flushed per write
+  transaction, `txn`, and the chunk staging/reassembly primitives.
+- `resolve.rs` — the one-query walk; `.`/`..` are ordinary names.
+- `descriptor.rs` — the streaming descriptor with bounded memory; each call
+  takes the `Db` it was opened on (the flat `read(fd, len)` shape).
+- `ops/` — every operation, function-for-function with `operations.py`, split
+  by the spec's groups (`session`, `read`, `structural`, `content`, `tree`,
+  `locking`, `streaming`, `maintenance`).
 
-The runners (`aloelite-conformance/tests/{ids,format}_vectors.rs`) embed the
-files with `include_str!` and carry a `conformance_test!` macro that is
-`#[test]` everywhere and `#[wasm_bindgen_test]` in the browser — the
-cross-target pattern every later runner follows. Two dependency facts
-settled on the way: `hkdf 0.13` is the `digest 0.11` line `sha2 0.11` needs
-(0.12 will not accept it), and argon2's `alloc` feature drags in a second
-`rand_core`; the engine allocates Argon2's blocks itself and the graph holds
-exactly one `rand_core`. Next: the schema, the templates, and a connection
-seam — the point at which the 91 scenarios start to run.
+**Settled on the way:**
+
+- rand_core 0.10's `DerefMut` blanket makes `Box<dyn CryptoRngCore + Send>`
+  itself an `Rng + CryptoRng`; the generic crypto and id functions take
+  `R: ?Sized`, so the engine's boxed source passes straight through.
+- The pack codec is `rmp_serde::to_vec_named` + `serde_bytes`, byte-identical
+  to `msgpack.packb(use_bin_type=True)`; a unit test pins the bytes against a
+  hand-encoded sample, and the version gate is read before the body so a v2
+  blob's unknown fields can never masquerade as corruption.
+- `profile.dev` optimizes `argon2`/`blake2` alone; the encrypted harnesses
+  would otherwise dominate the browser run.
+- The runner mints one test per scenario at build time (`<file>_<scenario>`),
+  so both `cargo test` and the browser report scenarios individually. Its
+  only `cfg` is where a scenario's database file lives: the temp directory
+  natively, a name in `sqlite-wasm-rs`'s in-memory VFS in the browser, where
+  `std::env::temp_dir()` panics.
+
+**Parity notes against the reference:** the spec's `move` is `ops::move_`;
+`stat_by_id` is the only `*_by_id` variant, as in `operations.py`; `mount`
+takes a `MountOptions` struct for its six optional parameters.
+
+**Next:** `aloelite-store` (file / memory image + `BlobStore` / OPFS
+sahpool), then the `aloelite-wasm` worker surface, `aloelite-fuse`,
+`aloelite-cli`. Still owed before pack interop is claimed across
+implementations: pack byte vectors under `conformance/vectors/` (today the
+Rust bytes are pinned to a hand-encoded sample, not to a shared file) and
+the v2 format decision.

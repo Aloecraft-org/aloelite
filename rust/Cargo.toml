@@ -72,6 +72,7 @@ zeroize = "1"
 # --- pack format (OP-6/OP-7) ---
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 serde_json = "1"
 
 # --- conformance runner ---
@@ -96,3 +97,11 @@ web-sys = "0.3"
 # --- shared ---
 thiserror = "2"
 log = "0.4"
+
+# Argon2id at the pinned 64 MiB / t=3 is the one hot loop in the test suite;
+# unoptimized it costs seconds per derivation (and tens of seconds under the
+# browser runner). Optimize just that crate in dev builds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

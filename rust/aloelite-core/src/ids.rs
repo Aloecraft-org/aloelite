@@ -54,7 +54,7 @@ const VARIANT: &[u8; 4] = b"89ab";
 /// condition: every caller in this crate either draws `seq` below the limit
 /// or holds the [`MonotonicMint`] invariant that keeps it there. The Python
 /// reference raises `ValueError` at the same point, and nothing catches it.
-pub fn format_uuid7(ts_ms: u64, seq: u16, rng: &mut impl Rng) -> String {
+pub fn format_uuid7<R: Rng + ?Sized>(ts_ms: u64, seq: u16, rng: &mut R) -> String {
     assert!(seq < SEQ_LIMIT, "seq {seq} outside 12-bit space");
     let t = format!("{:012x}", ts_ms & 0xFFFF_FFFF_FFFF);
     let variant = VARIANT[(rng.next_u32() % 4) as usize] as char;
@@ -75,7 +75,7 @@ pub fn format_uuid7(ts_ms: u64, seq: u16, rng: &mut impl Rng) -> String {
 }
 
 /// A fresh non-monotonic uuid7 (volume / mount / lock ids).
-pub fn stateless_uuid7(now_ms: u64, rng: &mut impl Rng) -> String {
+pub fn stateless_uuid7<R: Rng + ?Sized>(now_ms: u64, rng: &mut R) -> String {
     let seq = (rng.next_u32() % u32::from(SEQ_LIMIT)) as u16;
     format_uuid7(now_ms, seq, rng)
 }
@@ -117,7 +117,7 @@ impl MonotonicMint {
     /// the fence. Clock regression is absorbed: a `now` at or below the
     /// current timestamp advances the sequence (borrowing 1 ms forward on
     /// overflow) instead of ever reusing or reversing `(ts, seq)`.
-    pub fn mint(&mut self, now_ms: u64, rng: &mut impl Rng) -> String {
+    pub fn mint<R: Rng + ?Sized>(&mut self, now_ms: u64, rng: &mut R) -> String {
         let (ts, seq) = match self.state {
             Some((ts, _)) if now_ms > ts => (now_ms, 0),
             Some((ts, seq)) if seq + 1 < SEQ_LIMIT => (ts, seq + 1),

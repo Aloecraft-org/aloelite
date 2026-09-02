@@ -18,4 +18,17 @@
 
 pub mod content;
 pub mod crypto;
+pub mod db;
+pub mod descriptor;
+pub mod errors;
 pub mod ids;
+pub mod ops;
+pub mod platform;
+pub mod records;
+pub mod resolve;
+pub mod templates;
+pub mod types;
+
+pub use db::Db;
+pub use descriptor::Descriptor;
+pub use errors::{FsError, Result};

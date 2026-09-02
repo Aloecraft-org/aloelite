@@ -18,4 +18,8 @@
 //! The mount-row model (ACC-1, D-4) is unchanged inside all three; what
 //! differs is who owns the bytes and how often they reach durable storage.
 //!
-//! Scaffold: no code yet. See doc/RUST_PORT.md.
+//! What exists so far is the platform glue the engine needs before any
+//! storage model: [`clock`]. The three models above are the next work. See
+//! doc/RUST_PORT.md.
+
+pub mod clock;
