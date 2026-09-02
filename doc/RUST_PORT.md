@@ -252,10 +252,10 @@ apply the same rule when it exists.
 **Pack interop is proven, not reasoned:** `conformance/vectors/pack-v1.json`
 pins the codec (`aloelite_core::pack`, `aloelite/pack.py`) byte-for-byte in
 both directions, and `coherence.yaml` restores a reference-produced pack end
-to end through the API in both runners. The v2 scope is decided in D-8 and
-lands Python-first; until then Rust writes v1, which stays readable under
+to end through the API in both runners. The v2 scope is proposed in D-8 and
+awaits a decision; until then Rust writes v1, which stays readable under
 any v2.
 
 **Next:** `aloelite-store` (file / memory image + `BlobStore` / OPFS
 sahpool), then the `aloelite-wasm` worker surface, `aloelite-fuse`,
-`aloelite-cli`. Pack v2 (D-8) in Rust follows the Python implementation.
+`aloelite-cli`. Pack v2 (D-8), if chosen, follows the Python implementation.

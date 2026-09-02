@@ -33,8 +33,9 @@ the implementation rather than describing it.
   reference (`script/gen_pack_vectors.py`) and run by the Python and
   Rust suites; the codec itself moved into `aloelite/pack.py`. A
   scenario restores a reference-produced pack end to end. The v2 scope
-  (POSIX metadata, xattrs, retention, hardlink identity) is decided in
-  D-8 and lands Python-first, before any further port writes a pack.
+  (POSIX metadata, xattrs, retention, hardlink identity) is proposed in
+  D-8, to land Python-first if chosen, before any further port writes a
+  pack.
 - **Spec: encryption parameters.** `mount-api.yaml` now declares
   `chunk_size`, `pin` and `enc_mode` on `create_volume`, `pin` on
   `mount`, and the `bad_key` / `encryption_required` outcomes on

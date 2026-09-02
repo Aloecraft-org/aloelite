@@ -16,7 +16,7 @@ decision rather than a conversation. Uses the vocabulary of
 | D-5 | Hardlinks: a leaf may be placed many times, a placement may carry its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02 | implemented; the record was written after the fact |
 | D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
 | D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02 | in progress: engine done, store next |
-| D-8 | The pack blob format moves to v2 once, carrying POSIX metadata, xattrs, retention and hardlink identity; v1 stays readable; Python first, and no third port writes packs before it lands. | 2026-09-02 | scope decided; not yet implemented |
+| D-8 | The pack blob format moves to v2 once, carrying POSIX metadata, xattrs, retention and hardlink identity; v1 stays readable; Python first, and no third port writes packs before it lands. | proposed 2026-09-02 | awaiting decision; not implemented |
 
 How to read a record: what was decided, why, what it obliges, and what it
 deliberately leaves open. The "decided" date is the decision, not the
@@ -427,8 +427,13 @@ storage — never what a mount, a lock, or an operation means.
 
 ## D-8: The pack format moves to v2 once, carrying what v1 drops, before any further port writes a pack
 
-**Decided 2026-09-02.** Scope decided here; implementation pending, Python
-first, Rust second, in the same release.
+**Proposed 2026-09-02; awaiting the owner's decision.** This record is the
+proposal in full. The question it answers is whether a folder that is packed
+and later unpacked comes back exactly, or whether "same files, same bytes,
+same names" is enough. Options: **A**, extend the blob so it carries what era
+2 added (this record); **B**, keep pack as a content snapshot and document the
+loss; **C**, defer A, at the cost that every pack written meanwhile stays
+lossy. Nothing below is implemented until A is chosen.
 
 **In short.** A pack is the single MsgPack blob that `pack` writes when it
 folds a directory into one entry, and that `unpack` reads back. Today's
