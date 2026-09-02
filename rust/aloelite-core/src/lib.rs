@@ -16,4 +16,6 @@
 //!
 //! See doc/RUST_PORT.md for the plan and what exists.
 
+pub mod content;
+pub mod crypto;
 pub mod ids;

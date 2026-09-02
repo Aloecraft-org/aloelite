@@ -54,9 +54,17 @@ rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
 sqlite-wasm-vfs = "0.2"
 
 # --- the ENC-2 key ladder, byte-for-byte against conformance/vectors/format-v1.json ---
-chacha20poly1305 = "0.10"
-argon2 = "0.5"
-hkdf = "0.12"
+# `alloc` only: the engine generates its own nonces and keys from the
+# caller's rng, so the crates' `getrandom`/`rand`/`rand_core` defaults would
+# add nothing but a second copy of rand_core (0.6) to every binary.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# No features at all: argon2's `alloc` enables `password-hash`, whose default
+# is rand_core 0.6. The engine supplies the memory blocks itself through
+# hash_password_into_with_memory instead, and password-hash never loads.
+argon2 = { version = "0.5", default-features = false }
+# 0.13 is the digest-0.11 / hmac-0.13 line — the same one sha2 0.11 and
+# aloecrypt_core are on. 0.12 is digest 0.10 and will not accept sha2 0.11.
+hkdf = "0.13"
 sha2 = "0.11"
 rand_core = "0.10"
 zeroize = "1"

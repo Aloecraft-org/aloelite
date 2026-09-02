@@ -192,11 +192,22 @@ type-check for `wasm32-unknown-unknown` — including rusqlite via
 `sqlite-wasm-rs` and the OPFS VFS, which is the fact the browser story rests
 on; `wasm32-wasip2` type-checks with wasi-sdk on the path.
 
-**First engine module landed: the id mint** (`aloelite-core/src/ids.rs`),
-byte-for-byte against `conformance/vectors/ids-v1.json`. The vector runner
-(`aloelite-conformance/tests/ids_vectors.rs`) embeds the file with
-`include_str!`, drives the mint with a seeded `ego_platform` rng, and
-carries a `conformance_test!` macro that is `#[test]` everywhere and
-`#[wasm_bindgen_test]` in the browser — the cross-target pattern every
-later runner follows. Next: the ENC-2 ladder against `format-v1.json`,
-`encrypt_chunk_convergent` first.
+**Engine modules landed, each byte-for-byte against its vectors:**
+
+- `ids.rs` — the id mint (D-1/D-2), against `ids-v1.json`.
+- `content.rs` — chunk addressing and splitting (CV-1/CV-2), against
+  `format-v1.json`'s `chunk_address` / `chunk_split`.
+- `crypto.rs` — the whole ENC-2 ladder and the `Cipher` seam, against every
+  other section of `format-v1.json`: `volume_hash`, Argon2id `unlock_key`,
+  `chunk_key`, `encrypt_chunk_convergent` (nonce, ciphertext, tag, and the
+  pool address over the ciphertext), `unwrap_volume_key`, `session_kek`.
+
+The runners (`aloelite-conformance/tests/{ids,format}_vectors.rs`) embed the
+files with `include_str!` and carry a `conformance_test!` macro that is
+`#[test]` everywhere and `#[wasm_bindgen_test]` in the browser — the
+cross-target pattern every later runner follows. Two dependency facts
+settled on the way: `hkdf 0.13` is the `digest 0.11` line `sha2 0.11` needs
+(0.12 will not accept it), and argon2's `alloc` feature drags in a second
+`rand_core`; the engine allocates Argon2's blocks itself and the graph holds
+exactly one `rand_core`. Next: the schema, the templates, and a connection
+seam — the point at which the 91 scenarios start to run.
