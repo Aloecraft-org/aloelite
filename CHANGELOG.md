@@ -28,12 +28,13 @@ the implementation rather than describing it.
 
 ### Added
 
-- **`rust/` — the Rust workspace, scaffolded.** Six crates on three
-  targets (native, `wasm32-wasip2`, `wasm32-unknown-unknown`), manifests
-  and contracts only, no engine code. `aloelite-core` compiles to every
-  target with zero `cfg`, and a CI job enforces that from this commit
-  forward — including running the conformance suite in a headless
-  browser. `doc/RUST_PORT.md` is the plan; D-7 is the storage decision.
+- **`rust/` — the Rust workspace.** Six crates on three targets (native,
+  `wasm32-wasip2`, `wasm32-unknown-unknown`). `aloelite-core` compiles to
+  every target with zero `cfg`, and a CI job enforces that on every push
+  — including running the conformance suite in a headless browser. The
+  first engine module is the host id mint (D-1/D-2), byte-for-byte
+  against `conformance/vectors/ids-v1.json` on all three targets.
+  `doc/RUST_PORT.md` is the plan; D-7 is the storage decision.
 - **Real POSIX metadata.** `uid`/`gid`/`mode` columns, `atime`/`ctime`,
   `link` (hardlinks, with `nlink` derived from active placements rather
   than stored), `mknod` for fifos and sockets, symlinks as a first-class

@@ -50,6 +50,7 @@ dependencies = [
  "aloelite-core",
  "aloelite-store",
  "base64",
+ "ego_platform",
  "hex",
  "serde",
  "serde_json",

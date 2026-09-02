@@ -20,4 +20,21 @@
 //!   must have an equivalent here, or the same fixture means two things in
 //!   two implementations — the exact failure conformance/ exists to prevent.
 //!
-//! Scaffold: no runner yet. See doc/RUST_PORT.md.
+//! See doc/RUST_PORT.md for the plan and what exists.
+
+/// The conformance data, embedded at compile time so the same bytes reach
+/// every target — there is no filesystem to read them from in a browser, and
+/// a runner that loads files at run time is a runner whose inputs can drift
+/// from the tree it was built from.
+///
+/// Paths are relative to this file: `rust/aloelite-conformance/src/` up to
+/// the repository root, then into `conformance/`.
+pub mod vectors {
+    /// D-1/D-2: the uuid7 layout's deterministic prefix and the
+    /// `MonotonicMint` state machine. Runner: `tests/ids_vectors.rs`.
+    pub const IDS_V1: &str = include_str!("../../../conformance/vectors/ids-v1.json");
+
+    /// CV-1/CV-2 and the ENC-2 key ladder: fixed inputs to exact bytes.
+    /// Runner: not yet written.
+    pub const FORMAT_V1: &str = include_str!("../../../conformance/vectors/format-v1.json");
+}

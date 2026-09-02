@@ -14,4 +14,6 @@
 //! Anything that cannot meet that bar belongs in another crate. CI checks it
 //! on every push.
 //!
-//! Scaffold: no engine code yet. See doc/RUST_PORT.md.
+//! See doc/RUST_PORT.md for the plan and what exists.
+
+pub mod ids;

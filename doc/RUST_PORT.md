@@ -187,9 +187,16 @@ instantly what broke.
 
 ## Standing
 
-*2026-09-02.* Scaffold only. All six crates type-check natively and the four
-browser crates type-check for `wasm32-unknown-unknown` — including rusqlite
-via `sqlite-wasm-rs` and the OPFS VFS, which is the fact the browser story
-rests on. `wasm32-wasip2` type-checks with wasi-sdk on the path (recorded
-in `rust/.cargo/config.toml`; the devcontainer and CI install it). No engine
-code exists; `aloelite-rs` has never been run.
+*2026-09-02.* All six crates type-check natively; the four browser crates
+type-check for `wasm32-unknown-unknown` — including rusqlite via
+`sqlite-wasm-rs` and the OPFS VFS, which is the fact the browser story rests
+on; `wasm32-wasip2` type-checks with wasi-sdk on the path.
+
+**First engine module landed: the id mint** (`aloelite-core/src/ids.rs`),
+byte-for-byte against `conformance/vectors/ids-v1.json`. The vector runner
+(`aloelite-conformance/tests/ids_vectors.rs`) embeds the file with
+`include_str!`, drives the mint with a seeded `ego_platform` rng, and
+carries a `conformance_test!` macro that is `#[test]` everywhere and
+`#[wasm_bindgen_test]` in the browser — the cross-target pattern every
+later runner follows. Next: the ENC-2 ladder against `format-v1.json`,
+`encrypt_chunk_convergent` first.
