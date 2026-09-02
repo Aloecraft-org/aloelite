@@ -31,11 +31,14 @@ the implementation rather than describing it.
 - **`rust/` — the Rust workspace.** Six crates on three targets (native,
   `wasm32-wasip2`, `wasm32-unknown-unknown`). `aloelite-core` compiles to
   every target with zero `cfg`, and a CI job enforces that on every push
-  — including running the conformance suite in a headless browser. The
-  id mint (D-1/D-2), content addressing (CV-1/CV-2) and the full ENC-2
-  key ladder are implemented, each byte-for-byte against
-  `conformance/vectors/` on all three targets. `doc/RUST_PORT.md` is the
-  plan; D-7 is the storage decision.
+  — including running the conformance suite in a headless browser.
+  `aloelite-core` implements the whole Mount API — schema and era
+  migration, the sixty-four templates as compile-time constants, the id
+  mint (D-1/D-2), the ENC-2 ladder, resolution, the streaming
+  descriptor, and every operation function-for-function with
+  `operations.py` — and passes all 91 conformance scenarios and every
+  vector natively. `doc/RUST_PORT.md` is the plan; D-7 is the storage
+  decision.
 - **Real POSIX metadata.** `uid`/`gid`/`mode` columns, `atime`/`ctime`,
   `link` (hardlinks, with `nlink` derived from active placements rather
   than stored), `mknod` for fifos and sockets, symlinks as a first-class
