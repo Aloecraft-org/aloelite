@@ -2,24 +2,31 @@
 //!
 //! `aloelite-core` executes SQL against a `rusqlite::Connection` and never
 //! asks how it was opened. This crate is the answer to that question, once
-//! per storage model (doc/DECISIONS.md D-7):
+//! per storage model (doc/DECISIONS.md D-7), and it is the one place in the
+//! port where `cfg` is allowed:
 //!
-//! - **file** — a path on a real filesystem. Native and `wasm32-wasip2`.
-//!   The production shape for servers, the CLI, and the FUSE daemon.
-//! - **memory image + blob** — the whole volume held in a `:memory:`
-//!   database, loaded and persisted as one atomic blob through
-//!   `ego_platform::blobs::BlobStore` (`DirStore` natively, `IdbStore` in
-//!   the browser, `MemStore` in tests). Every target. The portable shape,
-//!   and what the conformance runner uses under `wasm-bindgen-test`.
-//! - **browser VFS** — `sqlite-wasm-vfs`'s `sahpool` over OPFS from inside
-//!   a Dedicated Worker: real file semantics, per-transaction durability.
-//!   `wasm32-unknown-unknown` only. The production shape in the browser.
+//! | model | module | targets | durability |
+//! |---|---|---|---|
+//! | **file** — a path on a real filesystem | [`file`] | native, `wasm32-wasip2` | per transaction |
+//! | **memory image + blob** — the whole volume in a `:memory:` database, loaded from and checkpointed back to one `BlobStore` blob | [`image`] | every target | per checkpoint |
+//! | **OPFS pool** — `sqlite-wasm-vfs`'s `sahpool` over the Origin Private File System | [`opfs`] | `wasm32-unknown-unknown`, from a Dedicated Worker only | per transaction |
 //!
-//! The mount-row model (ACC-1, D-4) is unchanged inside all three; what
-//! differs is who owns the bytes and how often they reach durable storage.
-//!
-//! What exists so far is the platform glue the engine needs before any
-//! storage model: [`clock`]. The three models above are the next work. See
-//! doc/RUST_PORT.md.
+//! Each opener returns an [`aloelite_core::Db`] ready for the operations in
+//! `aloelite_core::ops`, built on the platform clock and entropy from
+//! ego-platform; every opener also has a `_with` form that takes an
+//! injected clock and generator, which is how a test drives expiry. The
+//! mount-row model is the same inside all three; what differs is who owns
+//! the bytes and how often they reach durable storage.
 
 pub mod clock;
+pub mod error;
+pub mod image;
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub mod file;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub mod opfs;
+
+pub use aloelite_core::Db;
+pub use error::{Result, StoreError};

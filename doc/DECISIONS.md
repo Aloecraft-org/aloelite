@@ -15,7 +15,7 @@ decision rather than a conversation. Uses the vocabulary of
 | D-4 | POSIX byte-range locks are per mount through FUSE; engine locks arbitrate across mounts; admission defaults to one rw mount per subtree, overlap is an opt-in. | 2026-08-26, amended 08-28 | implemented |
 | D-5 | Hardlinks: a leaf may be placed many times, a placement may carry its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02 | implemented; the record was written after the fact |
 | D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
-| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02 | in progress: engine done, store next |
+| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, store shape settled 09-02 | in progress: engine and store done, wasm surface next |
 | D-8 | The pack blob format moves to v2 once, carrying uid/gid/mode, xattrs and retention; not atime, ctime or hardlink identity. v1 stays readable forever. | 2026-09-02 | implemented (Python and Rust) |
 
 How to read a record: what was decided, why, what it obliges, and what it
@@ -320,7 +320,8 @@ question, and it wants its own decision.
 
 ## D-7: The Rust engine is one crate on three targets; storage is the seam, not the engine
 
-**Decided 2026-09-02.**
+**Decided 2026-09-02.** Two of the three points left open below were settled
+the same day, when `aloelite-store` was written; see "Settled since".
 
 `aloelite-rs` targets native, `wasm32-wasip2` and `wasm32-unknown-unknown` as
 peers. Not native-first with WebAssembly to follow: the moment WebAssembly is
@@ -414,14 +415,33 @@ storage — never what a mount, a lock, or an operation means.
   This is the single largest cost in the port, and it is budgeted as such
   rather than discovered.
 
+### Settled since (2026-09-02, when `aloelite-store` was written)
+
+- **There is no `Store` trait; there are three concrete openers.** The
+  question was what shape the seam takes. The answer, once there was a
+  caller: the three models share nothing a caller could be generic over
+  (`file` is synchronous and takes a path; the image is `async` and takes a
+  `BlobStore` and a key; the OPFS pool is `async` to install and synchronous
+  to open), and every consumer knows at compile time which one it is on.
+  So `aloelite-store` exposes `file::open`, `image::Image::open` and
+  `opfs::Pool::open`, each returning the same `aloelite_core::Db`, each with
+  a `_with` form taking an injected `Clock` and `CryptoRngCore`. A trait can
+  be laid over them the day a caller needs to be generic; nothing has to be
+  undone for that. Implication: the wasm, fuse and cli crates each name the
+  one opener they use, and a new storage model is a new module, not a new
+  impl of something.
+- **Checkpoint policy belongs to the host; the store keeps it explicit.**
+  `Image` exposes `checkpoint()` and `close()` (which checkpoints first) and
+  runs nothing on a timer. When to checkpoint — on unmount, every N writes,
+  on idle — depends on the host's write pattern and its cost of a lost
+  second, which the store cannot know. The one policy the store does
+  enforce: a snapshot is refused inside a transaction, so a checkpoint can
+  never persist a torn image. Implication: a host that forgets to checkpoint
+  loses everything since the last one, and `close()` exists so the common
+  case cannot forget.
+
 ### Not decided here
 
-- The `Store` trait's exact shape. Named as connection provisioning
-  (open on a path / a blob / a VFS, return a `Connection`); the signatures
-  wait for the first caller.
-- Checkpoint policy for the memory-image model (on unmount, every N writes,
-  on idle). It only matters once something ships on that model, and nothing
-  does — it is the test and portability shape.
 - Whether `aloelite-cli` mirrors the Python CLI verb-for-verb or writes its
   own contract first. The Python CLI has no spec; either answer wants one.
 

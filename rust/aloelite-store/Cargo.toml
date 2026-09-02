@@ -1,6 +1,6 @@
 [package]
 name = "aloelite-store"
-description = "Connection provisioning for aloelite-core: how a SQLite connection is opened on each target. File-backed, memory-image + BlobStore, and browser VFS (OPFS sahpool, IndexedDB)."
+description = "Connection provisioning for aloelite-core: how a SQLite connection is opened on each target. File-backed, memory-image + BlobStore, and the browser's OPFS pool."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,14 @@ ego_platform = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 
-# The browser VFSes exist only for the browser target; the file-backed and
-# memory-image paths compile everywhere.
+# The OPFS pool exists only for the browser target; the file and
+# memory-image models compile everywhere.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 sqlite-wasm-vfs = { workspace = true }
+sqlite-wasm-rs = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }

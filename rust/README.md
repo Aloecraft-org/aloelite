@@ -30,11 +30,13 @@ that bar is a different crate.
 ## Build
 
 ```sh
-cargo check                                                        # native, everything
-cargo check -p aloelite-core --target wasm32-unknown-unknown       # the rule, checked
-cargo check -p aloelite-core --target wasm32-wasip2
-cargo test                                                         # native
-cargo test -p aloelite-conformance --target wasm32-unknown-unknown # in Firefox, headless
+cargo check                                                    # native, everything
+cargo check -p aloelite-core -p aloelite-store \
+  --target wasm32-unknown-unknown                              # the rule, checked
+cargo check -p aloelite-core -p aloelite-store --target wasm32-wasip2
+cargo test                                                     # native
+cargo test -p aloelite-conformance -p aloelite-store \
+  --target wasm32-unknown-unknown                              # in Firefox, headless
 ```
 
 The wasm test run needs `wasm-bindgen-test-runner` at **exactly** the
@@ -48,7 +50,7 @@ in containers without IPv6, so silence it:
 
 ```sh
 CHROMEDRIVER=/path/to/chromedriver CHROMEDRIVER_ARGS=--silent \
-  cargo test -p aloelite-conformance --target wasm32-unknown-unknown
+  cargo test -p aloelite-conformance -p aloelite-store --target wasm32-unknown-unknown
 ```
 
 A `webdriver.json` next to the crate can point at a Chrome binary
@@ -58,7 +60,8 @@ and `no-sandbox` itself.
 ## Status
 
 `aloelite-core` implements the whole Mount API and passes the conformance
-suite natively: 91 scenarios, every harness, every vector. `aloelite-store`
-carries the clock adapter the engine needs; its three storage models, and
-the wasm, fuse and cli crates, are next. `doc/RUST_PORT.md` "Standing" has
-the detail.
+suite natively and in a browser: 94 scenarios, every harness, every vector.
+`aloelite-store` opens a connection three ways — a file, a memory image
+checkpointed to a `BlobStore` blob, and the browser's OPFS pool — and each
+is tested where it runs. The wasm, fuse and cli crates are next.
+`doc/RUST_PORT.md` "Standing" has the detail.

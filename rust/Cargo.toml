@@ -52,6 +52,10 @@ rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
 # OPFS (`sahpool`, Dedicated Worker) and IndexedDB (`relaxed-idb`) VFSes for
 # the browser. Only aloelite-store on wasm32-unknown-unknown pulls this in.
 sqlite-wasm-vfs = "0.2"
+# Only for the `WasmOsCallback` type the OPFS pool's install needs; the
+# engine reaches sqlite-wasm-rs through rusqlite's ffi feature, and cargo
+# unifies the two on one version.
+sqlite-wasm-rs = { version = "0.5", default-features = false }
 
 # --- the ENC-2 key ladder, byte-for-byte against conformance/vectors/format-v1.json ---
 # `alloc` only: the engine generates its own nonces and keys from the
@@ -96,6 +100,7 @@ web-sys = "0.3"
 
 # --- shared ---
 thiserror = "2"
+futures = "0.3"
 log = "0.4"
 
 # Argon2id at the pinned 64 MiB / t=3 is the one hot loop in the test suite;

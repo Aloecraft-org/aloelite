@@ -83,7 +83,7 @@ a reference rather than a product. What a second implementation inherits:
 | `aloelite/config/mount-api.yaml` | ~50 operations, closed error set, records, enums, and a per-op `locks` flag that is asserted, not documented |
 | `aloelite/config/sql-templates.yaml` | 60 static SQL templates with named binds, written for rusqlite among others. The host owns only what is *between* templates; the `host_only:` section names exactly those four things |
 | `aloelite/sql/schema.sql` | 8 tables, ~12 triggers, ~13 views. Plain SQLite; ports verbatim |
-| `conformance/scenarios/` | 91 scenarios, pure data. The Rust runner reads the same files the Python one does |
+| `conformance/scenarios/` | 94 scenarios, pure data. The Rust runner reads the same files the Python one does |
 | `conformance/vectors/` | byte-exact: the uuid7 mint state machine (`ids-v1.json`), chunk addressing and the whole ENC-2 ladder (`format-v1.json`) |
 | `doc/REQUIREMENTS.md`, `doc/DECISIONS.md` | the contract and why it is shaped that way |
 
@@ -167,7 +167,7 @@ same.
 
 1. **Scaffold and guard** — this commit. Manifests, contracts, the three-
    target CI job. No engine code.
-2. **`aloelite-core`, SQLite-only**, driven by the 91 scenarios and the two
+2. **`aloelite-core`, SQLite-only**, driven by the 94 scenarios and the two
    vector files. The piece with a complete oracle and no unknowns: schema,
    templates, ids (`ids-v1.json` first — byte-for-byte before anything
    ships), crypto (`format-v1.json`; `encrypt_chunk_convergent` is the one
@@ -187,7 +187,7 @@ instantly what broke.
 
 ## Standing
 
-*2026-09-02.* **The engine passes the conformance suite natively.** All 91
+*2026-09-02.* **The engine passes the conformance suite natively.** All 94
 scenarios in `conformance/scenarios/`, the 7 fixture checks the Python
 runner carries (declared operations, implemented harnesses, the YAML boolean
 guard, declared errors, unique names, cited requirements, plus the error
@@ -195,8 +195,8 @@ enum projected onto the spec in both directions), and the 16 vector cases.
 Every one of the seven harnesses is implemented, including the two-connection
 `two_mounts_one_volume` and the four encryption harnesses. The same crate passes
 **in a browser**: every scenario and vector under headless Chromium via
-`wasm-bindgen-test` (5.6 s for the 91 scenarios, two-connection harness and
-encrypted harnesses included, on `sqlite-wasm-rs`'s in-memory VFS); CI runs
+`wasm-bindgen-test` (about six seconds for the 94 scenarios, two-connection
+harness and encrypted harnesses included, on `sqlite-wasm-rs`'s in-memory VFS); CI runs
 the identical binary under headless Firefox. `wasm32-wasip2` type-checks the
 engine and the runner with its tests.
 
@@ -256,6 +256,22 @@ byte-for-byte in both directions, `pack-v1.json` pins that v1 blobs still
 read, and `coherence.yaml` plus `pack.yaml` restore packs end to end through
 the API in both runners.
 
-**Next:** `aloelite-store` (file / memory image + `BlobStore` / OPFS
-sahpool), then the `aloelite-wasm` worker surface, `aloelite-fuse`,
+**`aloelite-store` is the one place `cfg` is allowed, and it holds three
+openers rather than a trait** (D-7, "Settled since"). `file::open` and
+`file::open_existing` take a path, on native and WASI. `image::Image` holds
+the whole volume in a `:memory:` database loaded from and checkpointed back
+to one `BlobStore` blob, on every target. `opfs::Pool` is `sqlite-wasm-vfs`'s
+`sahpool` over OPFS, browser only, from a Dedicated Worker, with export,
+import, delete and capacity administration. Each returns the same
+`aloelite_core::Db`, and each has a `_with` form that takes an injected clock
+and generator. The image's durability is per checkpoint and the policy stays
+explicit — `checkpoint()` and `close()`, nothing on a timer — because when to
+checkpoint is the host's decision; the one rule the store enforces is that a
+snapshot is refused inside a transaction, so a checkpoint can never persist a
+torn image. Tests: the file and image models natively, the image model again
+in Chromium, and the OPFS pool in a dedicated worker in Chromium; CI runs the
+same browser tests under Firefox next to the conformance suite.
+
+**Next:** the `aloelite-wasm` worker surface (a Web Lock, an OPFS pool and a
+message protocol over the Mount API), then `aloelite-fuse` and
 `aloelite-cli`.

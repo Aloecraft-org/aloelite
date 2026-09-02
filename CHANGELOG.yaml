@@ -103,9 +103,20 @@ releases:
         migration, the sixty-four templates as compile-time constants, the id
         mint (D-1/D-2), the ENC-2 ladder, resolution, the streaming
         descriptor, and every operation function-for-function with
-        `operations.py` — and passes all 91 conformance scenarios and every
-        vector natively. `doc/RUST_PORT.md` is the plan; D-7 is the storage
+        `operations.py` — and passes all 94 conformance scenarios and every
+        vector natively and in a headless browser. `doc/RUST_PORT.md` is the plan; D-7 is the storage
         decision.
+      - |
+        **`aloelite-store`: how a connection is opened, per target.** Three
+        openers, each returning the same engine handle: a file path (native
+        and WASI, durability per transaction), a memory image loaded from and
+        checkpointed back to one `BlobStore` blob (every target; durability
+        per explicit `checkpoint()` / `close()`, never on a timer, and a
+        snapshot is refused inside a transaction), and the browser's OPFS
+        pool from a Dedicated Worker, with export, import and delete. It is
+        the one crate in the port where `cfg` is allowed. Tested natively, in
+        a browser, and in a dedicated worker; D-7 records why there is no
+        trait over the three.
       - |
         **Real POSIX metadata.** `uid`/`gid`/`mode` columns, `atime`/`ctime`,
         `link` (hardlinks, with `nlink` derived from active placements rather
@@ -124,7 +135,7 @@ releases:
         overlap an explicit opt-in. Authorization layered above correctness,
         not a correctness invariant.
       - |
-        **The conformance suite is the port contract.** 91 language-agnostic
+        **The conformance suite is the port contract.** 94 language-agnostic
         scenarios plus byte vectors for the id mint and the encryption ladder.
         `tests/test_spec_projection.py` asserts the Python surface against
         `mount-api.yaml` in both directions, including each operation's
