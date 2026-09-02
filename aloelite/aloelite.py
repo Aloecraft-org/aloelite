@@ -130,10 +130,20 @@ class Aloelite:
         ops.change_pin(self._db, volume, old_pin, new_pin)
 
     def resolve_volume_name(self, name: str) -> VolumeId | None:
-        """VolumeId for `name`, or None. On duplicates the greatest (latest)
-        id wins — mirroring NODE-5's greatest-uuid7-is-visible convention."""
-        ids = [v.id for v in ops.list_volumes(self._db) if v.name == name]
-        return max(ids) if ids else None
+        """VolumeId for `name`, or None. On duplicates the most recently
+        CREATED volume wins: greatest created_at, then greatest id as the
+        tiebreak.
+
+        Not "greatest id": volume ids are stateless uuid7s with no ordering
+        promise (D-1), so two volumes created inside one millisecond order by
+        their random bits. The greatest-uuid7 convention NODE-5 uses for nodes
+        holds only because node ids come from the monotonic mint. The
+        nanosecond creation stamp is what "latest" actually means here, and
+        every port's facade applies the same rule."""
+        matches = [v for v in ops.list_volumes(self._db) if v.name == name]
+        if not matches:
+            return None
+        return max(matches, key=lambda v: (v.created_at, v.id)).id
 
     def list_volumes(self) -> builtins.list[VolumeInfo]:
         return ops.list_volumes(self._db)

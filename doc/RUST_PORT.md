@@ -244,7 +244,10 @@ engine and the runner with its tests.
 
 **Parity notes against the reference:** the spec's `move` is `ops::move_`;
 `stat_by_id` is the only `*_by_id` variant, as in `operations.py`; `mount`
-takes a `MountOptions` struct for its six optional parameters.
+takes a `MountOptions` struct for its six optional parameters. Resolving a
+volume by NAME is a facade rule, not a Mount API operation: the most
+recently created volume wins (`created_at`, then id) — the Rust facade must
+apply the same rule when it exists.
 
 **Next:** `aloelite-store` (file / memory image + `BlobStore` / OPFS
 sahpool), then the `aloelite-wasm` worker surface, `aloelite-fuse`,

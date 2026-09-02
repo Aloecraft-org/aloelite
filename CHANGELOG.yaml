@@ -128,6 +128,13 @@ releases:
         container graph is still a tree.
     fixed:
       - |
+        Mounting or resolving a volume BY NAME with duplicates now picks the
+        most recently created volume (`created_at`, then id). It picked the
+        greatest id, and volume ids are stateless uuid7s (D-1: no ordering
+        promise), so two same-named volumes created inside one millisecond
+        resolved by their random bits — a coin flip `test_path.py` lost on a
+        fast CI runner.
+      - |
         **Locks guard placement, not just content (ACC-11, D-6).** `rename`
         and `link` were outside the excluded set, so a same-directory `mv`
         from another mount walked past a lock that a cross-directory `mv`
