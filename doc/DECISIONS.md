@@ -5,6 +5,24 @@ decision rather than a conversation. Uses the vocabulary of
 `doc/REQUIREMENTS.md`; background and the option analysis live in
 `doc/HANDOFF-0.4.md` §5.
 
+## The decisions, one line each
+
+| id | decides | decided | status |
+|---|---|---|---|
+| D-1 | Ids are minted by the host program, never by SQL triggers. | 2026-08-26 | implemented (era 2) |
+| D-2 | Node and edge ids are strictly ordered within a mount, and a per-volume high-water mark stops a new session minting below anything the volume has seen. Volume, mount and lock ids are stateless and promise no order. | 2026-08-26 | implemented |
+| D-3 | Node types widen to symlink, fifo and socket; device nodes are refused. | 2026-08-26 | implemented |
+| D-4 | POSIX byte-range locks are per mount through FUSE; engine locks arbitrate across mounts; admission defaults to one rw mount per subtree, overlap is an opt-in. | 2026-08-26, amended 08-28 | implemented |
+| D-5 | Hardlinks: a leaf may be placed many times, a placement may carry its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02 | implemented; the record was written after the fact |
+| D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
+| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02 | in progress: engine done, store next |
+| D-8 | The pack blob format moves to v2 once, carrying POSIX metadata, xattrs, retention and hardlink identity; v1 stays readable; Python first, and no third port writes packs before it lands. | 2026-09-02 | scope decided; not yet implemented |
+
+How to read a record: what was decided, why, what it obliges, and what it
+deliberately leaves open. The "decided" date is the decision, not the
+implementation. When code, schema or spec cites `D-n`, this file is the text
+it means.
+
 ---
 
 ## D-1: Ids are host-minted (resolves HANDOFF-0.4 §5.1)
@@ -141,7 +159,7 @@ Accordingly, the 4.3 default mount policy is **one rw mount per subtree**;
 overlapping rw mounts are an explicit admin opt-in. The compatibility table
 states the per-mount lock scope plainly.
 
-## Consequence for mount policy (HANDOFF-0.4 §4.3)
+### Consequence for mount policy (HANDOFF-0.4 §4.3)
 
 With D-1 + D-2, id correctness no longer depends on writer exclusivity.
 "At most one rw mount per volume" is **not** a system invariant and must not
@@ -150,6 +168,63 @@ while tenants mount subtrees, concurrently) are supported by the engine, with
 entry write locks arbitrating write-write conflicts. Mount policy — access
 mode (ro/rw), principal, per-subtree exclusivity where an admin wants it — is
 authorization, configured per deployment, layered above correctness.
+
+---
+
+## D-5: Hardlinks — a leaf may be placed many times, a placement may carry its own name, and rename edits the placement
+
+**Decided during the era-2 work (2026-08-26 to 08-28); recorded 2026-09-02.**
+
+This record was written after the fact. The decision has been cited as D-5
+by `doc/REQUIREMENTS.md` (NODE-3, EDGE-2, PI-1, EXT-1, EXT-4), by
+`schema.sql`, `sql-templates.yaml` and `mount-api.yaml`, by both
+implementations, and by the 0.4.0rc1 handoff's list of recorded decisions,
+but the section itself was never committed. What follows is the decision as
+those artifacts state it, not a new one.
+
+What was decided:
+
+1. **PI-1 narrows to containers.** A container has at most one active
+   parent, so the container graph stays a tree and PI-4's cycle argument
+   holds. Leaves — entry, symlink, fifo, socket — may hold several active
+   placements at once: hardlinks, which is EXT-1's reserved relaxation,
+   exercised. `nlink` is DERIVED as the count of active placements and never
+   stored; a maintained counter can drift, a count over the active edges
+   cannot.
+2. **Enforcement moved from an index to guard triggers.** The era-1 partial
+   unique index could not consult the node's type. The
+   `edge_guard_single_parent` trigger pair refuses a second active placement
+   of a container and nothing else; the era-2 migration drops the index.
+3. **A placement may carry its own name** (`edge.name`, NULL meaning "the
+   node's own name" — EXT-4). The effective name everywhere a name is read
+   — resolution, listings, the subtree walk, pack — is
+   `coalesce(edge.name, node.name)`. A leaf's `node.name` is therefore only
+   the default for placements without an override.
+4. **Rename is a placement operation**, as in POSIX, where it edits a
+   directory entry and not the inode: it sets the walked edge's name and
+   refreshes `node.name` only while that edge is the node's sole active
+   placement, so the single-placement case is era-1-identical. `remove` and
+   `move` likewise act on THE placement the caller's path walked, identified
+   by (parent, node, effective name), so unlinking one name of a hardlinked
+   file leaves the others in place.
+5. **`link` refuses containers** (the tree guarantee above) and refuses an
+   occupied destination with `already_exists`, as `link(2)` does.
+
+Why: an inode has no name; names live in directory entries, and a hardlink
+is a second entry pointing at the same inode. FUSE's `link(2)` and
+`rename(2)` need exactly that model, and the guarantee the rest of the
+design leans on — that containers form a tree — is untouched by granting it
+to leaves only.
+
+Consequences that landed elsewhere: copy and pack enumerate placements and
+take the effective name (fixed 2026-08-31, after the first cut read
+`node.name` and collapsed same-node placements under NODE-5); ACC-11 covers
+`link` and `rename` (D-6); pack v1 still fans a hardlinked node out into
+separate nodes on unpack, which D-8 fixes.
+
+Not decided here: multiple placements for containers (EXT-1's general graph)
+— no, and nothing in era 2 prepares for it; and NODE-5 sibling shadowing,
+carried in D-6.
 
 ---
 
@@ -354,6 +429,16 @@ storage — never what a mount, a lock, or an operation means.
 
 **Decided 2026-09-02.** Scope decided here; implementation pending, Python
 first, Rust second, in the same release.
+
+**In short.** A pack is the single MsgPack blob that `pack` writes when it
+folds a directory into one entry, and that `unpack` reads back. Today's
+blob, format v1, forgets a file's owner and mode, its atime, its xattrs, its
+retention policy, and the fact that two names were one hardlinked file. This
+decision says: change the blob format once, to v2, so it carries all of
+that; keep reading v1 forever; do it in Python first and Rust second in the
+same release; and let no third implementation write packs until then.
+Nothing changes for existing volumes on disk, and none of this is the schema
+era — the pack version and the schema era are different numbers.
 
 ### Where v1 stands
 
