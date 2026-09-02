@@ -249,13 +249,13 @@ volume by NAME is a facade rule, not a Mount API operation: the most
 recently created volume wins (`created_at`, then id) — the Rust facade must
 apply the same rule when it exists.
 
-**Pack interop is proven, not reasoned:** `conformance/vectors/pack-v1.json`
-pins the codec (`aloelite_core::pack`, `aloelite/pack.py`) byte-for-byte in
-both directions, and `coherence.yaml` restores a reference-produced pack end
-to end through the API in both runners. The v2 scope is proposed in D-8 and
-awaits a decision; until then Rust writes v1, which stays readable under
-any v2.
+**Pack interop is proven, not reasoned:** both implementations write pack
+format v2 (D-8: ownership, xattrs and retention travel; atime, ctime and
+hardlink identity do not). `conformance/vectors/pack-v2.json` pins the writer
+byte-for-byte in both directions, `pack-v1.json` pins that v1 blobs still
+read, and `coherence.yaml` plus `pack.yaml` restore packs end to end through
+the API in both runners.
 
 **Next:** `aloelite-store` (file / memory image + `BlobStore` / OPFS
 sahpool), then the `aloelite-wasm` worker surface, `aloelite-fuse`,
-`aloelite-cli`. Pack v2 (D-8), if chosen, follows the Python implementation.
+`aloelite-cli`.

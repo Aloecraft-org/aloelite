@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Regenerate conformance/vectors/pack-v1.json from the reference implementation.
+"""Regenerate conformance/vectors/pack-v1.json and pack-v2.json.
 
 Run from the repo root:  python script/gen_pack_vectors.py
 
 The pack blob (aloelite/pack.py) is the one cross-implementation BYTE contract
-besides the chunk format: a subtree packed on one platform must unpack on
-every other, and identical trees must pack to identical bytes. This file pins
-both directions at the codec level, below the database walk (whose canonical
-order the scenarios pin), so the timestamps a real pack takes from its nodes
-can be fixed here.
+besides the chunk format. Two files pin it at the codec level, below the
+database walk (whose canonical order the scenarios pin):
 
-Every `encode` blob is produced by aloelite.pack.encode; every `decode` blob is
-raw msgpack built here to exercise the gate and the tolerance rules. Payload
-bytes appear as `d_hex` in the JSON view of a node. Regenerating should be a
-no-op diff; a non-empty diff means the pack format moved — see
+  pack-v2.json  the WRITER's contract: `encode` cases are node lists with the
+                exact blob aloelite.pack.encode produces, byte for byte, and
+                `decode` cases are raw blobs with the error the gate must
+                answer or the nodes a tolerant read must produce.
+  pack-v1.json  the READER's compatibility contract: `read` cases are v1
+                blobs, built here by a frozen v1 encoder that no shipping
+                writer has any more, with the nodes every reader must recover
+                from them. v1 is readable forever (D-8).
+
+Payload bytes appear as `d_hex`, xattr values as `xa_hex`. Regenerating should
+be a no-op diff; a non-empty diff means the pack format moved — see
 conformance/vectors/README.md and doc/DECISIONS.md D-8.
 """
 
@@ -29,32 +33,48 @@ import msgpack  # noqa: E402
 
 from aloelite import pack  # noqa: E402
 
-OUT = (
-    pathlib.Path(__file__).resolve().parent.parent / "conformance/vectors/pack-v1.json"
-)
+VECTORS = pathlib.Path(__file__).resolve().parent.parent / "conformance/vectors"
 
 # Fixed era-2 nanosecond stamps: 2023-11-14T22:13:20Z and one second later.
 C0 = 1_700_000_000_000_000_000
 M0 = 1_700_000_001_000_000_000
+FMT = pack.PACK_FMT
+VER = pack.PACK_VER
 
 
-def node(p: int, t: str, n: str, c: int = C0, m: int = M0, x=None, d=None) -> dict:
-    """A node entry with its keys in the emission order pack.py documents."""
+def node(p: int, t: str, n: str, c: int = C0, m: int = M0, **opt) -> dict:
+    """A node entry with its keys in the emission order pack.py documents.
+    Optional keys (u, g, o, x, xa, rk, d) are emitted only when given; zero is
+    a value, None is absence."""
     e: dict = {"p": p, "t": t, "n": n, "c": c, "m": m}
-    if x:
-        e["x"] = dict(sorted(x.items()))
-    if d is not None:
-        e["d"] = d
+    for key in ("u", "g", "o"):
+        if opt.get(key) is not None:
+            e[key] = opt[key]
+    if opt.get("x"):
+        e["x"] = dict(sorted(opt["x"].items()))
+    if opt.get("xa"):
+        e["xa"] = dict(sorted(opt["xa"].items()))
+    if opt.get("rk") is not None:
+        e["rk"] = opt["rk"]
+    if opt.get("d") is not None:
+        e["d"] = opt["d"]
     return e
 
 
 def view(nodes: list[dict]) -> list[dict]:
-    """The JSON view of a node list: bytes as hex under d_hex, None dropped."""
+    """The JSON view of a node list: bytes as hex, None dropped."""
     out = []
     for e in nodes:
-        v = {k: e[k] for k in ("p", "t", "n", "c", "m") if e.get(k) is not None}
+        v = {}
+        for k in ("p", "t", "n", "c", "m", "u", "g", "o"):
+            if e.get(k) is not None:
+                v[k] = e[k]
         if e.get("x"):
             v["x"] = e["x"]
+        if e.get("xa"):
+            v["xa_hex"] = {k: val.hex() for k, val in e["xa"].items()}
+        if e.get("rk") is not None:
+            v["rk"] = e["rk"]
         if e.get("d") is not None:
             v["d_hex"] = e["d"].hex()
         out.append(v)
@@ -63,6 +83,11 @@ def view(nodes: list[dict]) -> list[dict]:
 
 def mp(obj) -> bytes:
     return msgpack.packb(obj, use_bin_type=True)
+
+
+def encode_v1(nodes: list[dict]) -> bytes:
+    """The frozen v1 writer: identical to pack.encode before v2 existed."""
+    return mp({"fmt": FMT, "ver": 1, "nodes": nodes})
 
 
 def reference_tree() -> list[dict]:
@@ -77,6 +102,28 @@ def reference_tree() -> list[dict]:
         node(0, "fifo", "pipe", C0 + 5, M0 + 5, d=b""),
         node(0, "socket", "sock", C0 + 6, M0 + 6, d=b""),
     ]
+
+
+def reference_tree_v2() -> list[dict]:
+    """The same tree carrying what v2 added: ownership on the container and
+    the entry, xattrs on the entry, a retention policy on the entry."""
+    nodes = reference_tree()
+    nodes[0] = node(-1, "container", "d", o=0o750, xa={"user.owner": b"root"})
+    nodes[1] = node(
+        0,
+        "entry",
+        "f",
+        C0 + 1,
+        M0 + 1,
+        u=1000,
+        g=1001,
+        o=0o640,
+        x={"status": "draft", "k": "v"},
+        xa={"user.b": b"bee", "user.a": b"\x00\xff"},
+        rk=3,
+        d=b"hi",
+    )
+    return nodes
 
 
 def marker_boundaries() -> list[dict]:
@@ -98,35 +145,87 @@ def marker_boundaries() -> list[dict]:
     return nodes
 
 
-ENCODE = [
+def integer_markers() -> list[dict]:
+    return [
+        node(-1, "container", "d", c=5, m=127),
+        node(0, "entry", "f", c=2**31, m=2**32, d=b"x"),
+        node(0, "entry", "g", c=2**63 - 1, m=255, d=b"y"),
+    ]
+
+
+UNICODE = [
+    node(-1, "container", "répertoire"),
+    node(
+        0,
+        "entry",
+        "日本語.txt",
+        x={"ключ": "значение", "emoji": "🙂"},
+        d="ünïcödé".encode(),
+    ),
+]
+
+# v1 blobs every reader must still recover. The first five are the writer
+# cases as they were pinned when v1 was the current format.
+READ_V1 = [
     ("container-alone", [node(-1, "container", "d")]),
     ("reference-tree", reference_tree()),
-    (
-        "unicode-names-and-metadata",
-        [
-            node(-1, "container", "répertoire"),
-            node(
-                0,
-                "entry",
-                "日本語.txt",
-                x={"ключ": "значение", "emoji": "🙂"},
-                d="ünïcödé".encode(),
-            ),
-        ],
-    ),
+    ("unicode-names-and-metadata", UNICODE),
     ("marker-boundaries", marker_boundaries()),
+    ("integer-markers", integer_markers()),
+]
+TOLERANT_V1 = [
     (
-        "integer-markers",
+        "optional-fields-absent",
+        mp({"fmt": FMT, "ver": 1, "nodes": [{"p": -1, "t": "entry", "n": "bare"}]}),
+        [{"p": -1, "t": "entry", "n": "bare"}],
+    ),
+    (
+        "null-timestamps",
+        mp(
+            {
+                "fmt": FMT,
+                "ver": 1,
+                "nodes": [{"p": -1, "t": "container", "n": "d", "c": None, "m": None}],
+            }
+        ),
+        [{"p": -1, "t": "container", "n": "d"}],
+    ),
+    (
+        "unknown-keys-ignored",
+        mp(
+            {
+                "fmt": FMT,
+                "ver": 1,
+                "nodes": [
+                    {"p": -1, "t": "container", "n": "d", "c": C0, "m": M0, "zz": 9}
+                ],
+            }
+        ),
+        [{"p": -1, "t": "container", "n": "d", "c": C0, "m": M0}],
+    ),
+]
+
+ENCODE_V2 = [
+    ("container-alone", [node(-1, "container", "d")]),
+    ("reference-tree", reference_tree()),
+    ("reference-tree-with-ownership-xattrs-retention", reference_tree_v2()),
+    (
+        "zero-is-a-value",
+        [node(-1, "container", "d", u=0, g=0, o=0), node(0, "entry", "f", rk=0, d=b"")],
+    ),
+    ("unicode-names-and-metadata", UNICODE),
+    ("marker-boundaries", marker_boundaries()),
+    ("integer-markers", integer_markers()),
+    (
+        "mode-markers",
         [
-            node(-1, "container", "d", c=5, m=127),
-            node(0, "entry", "f", c=2**31, m=2**32, d=b"x"),
-            node(0, "entry", "g", c=2**63 - 1, m=255, d=b"y"),
+            node(-1, "container", "d", o=0o777),
+            node(0, "entry", "f", o=0o7777, u=65534, g=2**32 - 2, d=b"z"),
         ],
     ),
 ]
 
-FMT, VER = pack.PACK_FMT, pack.PACK_VER
-DECODE = [
+DECODE_V2 = [
     (
         "newer-version",
         mp({"fmt": FMT, "ver": VER + 1, "nodes": []}),
@@ -134,7 +233,7 @@ DECODE = [
     ),
     ("versionless", mp({"fmt": FMT, "nodes": []}), {"error": "corrupt"}),
     ("wrong-fmt", mp({"fmt": "nope", "ver": VER, "nodes": []}), {"error": "corrupt"}),
-    ("ver-as-string", mp({"fmt": FMT, "ver": "1", "nodes": []}), {"error": "corrupt"}),
+    ("ver-as-string", mp({"fmt": FMT, "ver": "2", "nodes": []}), {"error": "corrupt"}),
     ("ver-as-bool", mp({"fmt": FMT, "ver": True, "nodes": []}), {"error": "corrupt"}),
     ("ver-zero", mp({"fmt": FMT, "ver": 0, "nodes": []}), {"error": "corrupt"}),
     ("top-level-array", mp([FMT, VER, []]), {"error": "corrupt"}),
@@ -149,21 +248,70 @@ DECODE = [
         mp({"fmt": FMT, "ver": VER, "nodes": [{"p": "0", "t": "entry", "n": "f"}]}),
         {"error": "corrupt"},
     ),
-    ("truncated", pack.encode(reference_tree())[:-7], {"error": "corrupt"}),
+    (
+        "payload-as-string",
+        mp(
+            {
+                "fmt": FMT,
+                "ver": VER,
+                "nodes": [{"p": -1, "t": "entry", "n": "f", "d": "text"}],
+            }
+        ),
+        {"error": "corrupt"},
+    ),
+    (
+        "mode-as-string",
+        mp(
+            {
+                "fmt": FMT,
+                "ver": VER,
+                "nodes": [{"p": -1, "t": "entry", "n": "f", "o": "644"}],
+            }
+        ),
+        {"error": "corrupt"},
+    ),
+    (
+        "xattr-value-as-string",
+        mp(
+            {
+                "fmt": FMT,
+                "ver": VER,
+                "nodes": [{"p": -1, "t": "entry", "n": "f", "xa": {"user.a": "text"}}],
+            }
+        ),
+        {"error": "corrupt"},
+    ),
+    ("truncated", pack.encode(reference_tree_v2())[:-7], {"error": "corrupt"}),
     ("garbage", b"not msgpack at all", {"error": "corrupt"}),
     ("empty", b"", {"error": "corrupt"}),
+    (
+        "v1-blob-reads-under-v2",
+        encode_v1(reference_tree()),
+        {"nodes": view(reference_tree())},
+    ),
     (
         "optional-fields-absent",
         mp({"fmt": FMT, "ver": VER, "nodes": [{"p": -1, "t": "entry", "n": "bare"}]}),
         {"nodes": [{"p": -1, "t": "entry", "n": "bare"}]},
     ),
     (
-        "null-timestamps",
+        "null-optionals",
         mp(
             {
                 "fmt": FMT,
                 "ver": VER,
-                "nodes": [{"p": -1, "t": "container", "n": "d", "c": None, "m": None}],
+                "nodes": [
+                    {
+                        "p": -1,
+                        "t": "container",
+                        "n": "d",
+                        "c": None,
+                        "m": None,
+                        "u": None,
+                        "o": None,
+                        "rk": None,
+                    }
+                ],
             }
         ),
         {"nodes": [{"p": -1, "t": "container", "n": "d"}]},
@@ -184,25 +332,52 @@ DECODE = [
 ]
 
 
+def write(path: pathlib.Path, doc: dict) -> None:
+    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    print(f"wrote {path.relative_to(pathlib.Path.cwd())}")
+
+
 def main() -> None:
-    doc = {
-        "format": "aloelite-pack-vectors",
-        "version": 1,
-        "note": "generated by script/gen_pack_vectors.py; see README.md",
-        "pack_fmt": FMT,
-        "pack_ver": VER,
-        "encode": [
-            {"name": name, "nodes": view(nodes), "blob": pack.encode(nodes).hex()}
-            for name, nodes in ENCODE
-        ],
-        "decode": [
-            {"name": name, "blob": blob.hex(), **expect}
-            for name, blob, expect in DECODE
-        ],
-    }
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
-    print(f"wrote {OUT.relative_to(pathlib.Path.cwd())}")
+    VECTORS.mkdir(parents=True, exist_ok=True)
+    write(
+        VECTORS / "pack-v1.json",
+        {
+            "format": "aloelite-pack-vectors",
+            "version": 1,
+            "note": (
+                "generated by script/gen_pack_vectors.py; see README.md. "
+                "v1 blobs are read, never written, since format v2."
+            ),
+            "pack_fmt": FMT,
+            "pack_ver": 1,
+            "read": [
+                {"name": name, "blob": encode_v1(nodes).hex(), "nodes": view(nodes)}
+                for name, nodes in READ_V1
+            ]
+            + [
+                {"name": name, "blob": blob.hex(), "nodes": nodes}
+                for name, blob, nodes in TOLERANT_V1
+            ],
+        },
+    )
+    write(
+        VECTORS / "pack-v2.json",
+        {
+            "format": "aloelite-pack-vectors",
+            "version": 1,
+            "note": "generated by script/gen_pack_vectors.py; see README.md",
+            "pack_fmt": FMT,
+            "pack_ver": VER,
+            "encode": [
+                {"name": name, "nodes": view(nodes), "blob": pack.encode(nodes).hex()}
+                for name, nodes in ENCODE_V2
+            ],
+            "decode": [
+                {"name": name, "blob": blob.hex(), **expect}
+                for name, blob, expect in DECODE_V2
+            ],
+        },
+    )
 
 
 if __name__ == "__main__":

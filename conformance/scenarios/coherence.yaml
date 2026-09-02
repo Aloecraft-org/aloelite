@@ -89,15 +89,15 @@ scenarios:
       and report success. That is the silent-partial-read this gate exists to
       prevent, and it is the same posture the schema era takes toward a file
       written by a newer build.
-      The literal below is msgpack for {"fmt": "aloefs.pack", "ver": 2,
+      The literal below is msgpack for {"fmt": "aloefs.pack", "ver": 3,
       "nodes": []} — a minimal well-formed pack claiming a version no shipped
-      build understands. It is a fixed byte string precisely so every port
+      build understands (v2 is current; D-8). It is a fixed byte string precisely so every port
       tests the same input.
     steps:
       - op: create_entry
         args:
           path: /future.pack
-          data: {base64: "g6NmbXSrYWxvZWZzLnBhY2ujdmVyAqVub2Rlc5A="}
+          data: {base64: "g6NmbXSrYWxvZWZzLnBhY2ujdmVyA6Vub2Rlc5A="}
       - op: unpack
         args: {path: /future.pack}
         raises: unsupported

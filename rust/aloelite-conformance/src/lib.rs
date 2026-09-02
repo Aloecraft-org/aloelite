@@ -45,7 +45,11 @@ pub mod vectors {
     /// Runner: `tests/format_vectors.rs`.
     pub const FORMAT_V1: &str = include_str!("../../../conformance/vectors/format-v1.json");
 
-    /// OP-6/OP-7: the pack blob codec, byte-exact on encode and gated on
-    /// decode. Runner: `tests/pack_vectors.rs`.
+    /// OP-6/OP-7: v1 pack blobs every reader must still recover (D-8: v1 is
+    /// readable forever). Runner: `tests/pack_vectors.rs`.
     pub const PACK_V1: &str = include_str!("../../../conformance/vectors/pack-v1.json");
+
+    /// OP-6/OP-7: the pack writer's contract, byte-exact on encode and gated
+    /// on decode. Runner: `tests/pack_vectors.rs`.
+    pub const PACK_V2: &str = include_str!("../../../conformance/vectors/pack-v2.json");
 }

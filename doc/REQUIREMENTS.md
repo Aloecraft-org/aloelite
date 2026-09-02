@@ -87,7 +87,7 @@ Each requirement is identified by a stable prefix and number for reference. Requ
 - **OP-4** : Copy produces a new node with a fresh uuid7 whose `created_at` is preserved from the source, with content duplicated. Copying a container into its own subtree copies the source as it existed at the start of the operation.
     + **OP-4r1** : Copy produces a new node with a fresh uuid7 whose created_at and metadata are preserved from the source, with content duplicated. Copying a container into its own subtree copies the source as it existed at the start of the operation.
 - **OP-5** : Delete removes a node's active placement. Deleting a container detaches its children, which become volatile per PI-3 unless re-homed. Hard removal of a node and its content is a separate, explicit step.
-- **OP-6** : Pack consolidates a subtree into a portable serialized form (MsgPack), realized as an Entry whose payload is that serialized form, and supersedes the original placement.
+- **OP-6** : Pack consolidates a subtree into a portable serialized form (MsgPack), realized as an Entry whose payload is that serialized form, and supersedes the original placement. Era 2 (D-8): the serialized form is pack format v2, carrying per placement the type, effective name, created/modified times, NODE-6 metadata, uid/gid/mode, xattrs, retention policy and bytes; v1 blobs remain readable and a newer version is refused rather than half-read.
 - **OP-7** : Unpack is the inverse of Pack: it restores a packed subtree from its serialized form and supersedes the packed Entry.
 - **OP-8** : Mount and Unmount are operations whose structure and lifecycle are defined under Access (ACC-1 through ACC-5).
 

@@ -1193,12 +1193,33 @@ def pack(db: Db, mount: MountId, path: str) -> NodeId:
                 "c": info["created_at"],
                 "m": info["modified_at"],
             }
+            # v2 (D-8): ownership and mode, only when set. FUSE stamps a mode
+            # on every file it creates, so dropping these was the visible
+            # loss of a pack/unpack cycle.
+            for key, col in (("u", "uid"), ("g", "gid"), ("o", "mode")):
+                if info[col] is not None:
+                    entry[key] = info[col]
             # NODE-6: carry metadata when present (key "x"); omit for the common
             # empty case to keep the blob small. Stored in the pack as a map.
             meta = json.loads(info["metadata"]) if info["metadata"] is not None else {}
             if meta:
                 entry["x"] = meta
+            # v2: xattrs, in the template's name order (bytewise) so the blob
+            # is canonical across implementations
+            names = [
+                x["name"] for x in db.all("mutation.xattr_list", {"node": r["node_id"]})
+            ]
+            if names:
+                entry["xa"] = {
+                    name: db.one(
+                        "mutation.xattr_get", {"node": r["node_id"], "name": name}
+                    )["value"]
+                    for name in names
+                }
             if info["type"] != NodeType.CONTAINER.value:
+                cmeta = db.one("resolution.get_content_meta", {"node": r["node_id"]})
+                if cmeta is not None and cmeta["retention_keep"] is not None:
+                    entry["rk"] = cmeta["retention_keep"]  # v2
                 entry["d"] = db.read_content_bytes(r["node_id"])
             packed_nodes.append(entry)
 
@@ -1256,6 +1277,28 @@ def unpack(db: Db, mount: MountId, path: str) -> None:
             if ntype is not NodeType.CONTAINER:
                 _put_initial_content(db, m, new_id, pn.get("d") or b"")
             _link(db, m, target_parent, new_id)
+            # v2 fields (D-8), absent in a v1 blob: restore through the same
+            # templates the live operations use, so the touch triggers behave
+            # as they would for chown/setxattr on a fresh node
+            if any(pn.get(k) is not None for k in ("u", "g", "o")):
+                mode = pn.get("o")
+                db.rowcount(
+                    "mutation.set_owner",
+                    {
+                        "node": new_id,
+                        "uid": pn.get("u"),
+                        "gid": pn.get("g"),
+                        "mode": mode & 0o7777 if mode is not None else None,
+                    },
+                )
+            for name, value in (pn.get("xa") or {}).items():
+                db.rowcount(
+                    "mutation.xattr_set", {"node": new_id, "name": name, "value": value}
+                )
+            if pn.get("rk") is not None and ntype is not NodeType.CONTAINER:
+                db.rowcount(
+                    "mutation.set_retention_keep", {"node": new_id, "keep": pn["rk"]}
+                )
 
 
 # ===========================================================================

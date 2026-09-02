@@ -20,11 +20,12 @@ use rusqlite::named_params;
 
 use crate::db::Db;
 use crate::errors::{FsError, Result};
-use crate::pack::{self as packfmt, PackNode};
+use crate::pack::{self as packfmt, Bin, PackNode};
 use crate::records::NodeInfo;
 use crate::resolve::{resolve, resolve_parent};
 use crate::templates::mutation::{
-    ARCHIVE_EDGE, ARCHIVE_PLACEMENT, COPY_CHUNK_REFS, CREATE_CONTENT,
+    ARCHIVE_EDGE, ARCHIVE_PLACEMENT, COPY_CHUNK_REFS, CREATE_CONTENT, SET_OWNER,
+    SET_RETENTION_KEEP, XATTR_GET, XATTR_LIST, XATTR_SET,
 };
 use crate::templates::recursive::{ARCHIVE_SUBTREE, ENUMERATE_SUBTREE};
 use crate::templates::resolution::{GET_ACTIVE_PARENT, GET_CONTENT_META, GET_NODE};
@@ -174,6 +175,35 @@ pub fn pack(db: &mut Db, mount: &MountId, path: &str) -> Result<NodeId> {
                     FsError::corrupt("subtree walk saw a child before its parent")
                 })?,
             };
+            // v2 (D-8): xattrs in the template's name order (bytewise), the
+            // retention policy for leaves; ownership only when set
+            let names: Vec<String> =
+                db.all(XATTR_LIST, named_params! { ":node": r.node_id }, |row| {
+                    Ok(row.get("name")?)
+                })?;
+            let mut xa = std::collections::BTreeMap::new();
+            for name in names {
+                let value: Option<Vec<u8>> = db.one(
+                    XATTR_GET,
+                    named_params! { ":node": r.node_id, ":name": name },
+                    |row| Ok(row.get("value")?),
+                )?;
+                if let Some(value) = value {
+                    xa.insert(name, Bin(value));
+                }
+            }
+            let (rk, d) = if info.kind.is_leaf() {
+                let rk: Option<i64> = db
+                    .one(
+                        GET_CONTENT_META,
+                        named_params! { ":node": r.node_id },
+                        |row| Ok(row.get::<_, Option<i64>>("retention_keep")?),
+                    )?
+                    .flatten();
+                (rk, Some(Bin(db.read_content_bytes(&r.node_id)?)))
+            } else {
+                (None, None)
+            };
             nodes.push(PackNode {
                 p,
                 t: info.kind.as_str().to_owned(),
@@ -181,14 +211,15 @@ pub fn pack(db: &mut Db, mount: &MountId, path: &str) -> Result<NodeId> {
                 n: r.name.clone(),
                 c: Some(info.created_at),
                 m: Some(info.modified_at),
+                u: info.uid,
+                g: info.gid,
+                o: info.mode,
                 // NODE-6: carry metadata when present; omit the common empty
                 // case to keep the blob small
                 x: (!info.metadata.is_empty()).then(|| info.metadata.clone()),
-                d: if info.kind.is_leaf() {
-                    Some(db.read_content_bytes(&r.node_id)?)
-                } else {
-                    None
-                },
+                xa: (!xa.is_empty()).then_some(xa),
+                rk,
+                d,
             });
         }
         let blob = packfmt::encode(&nodes);
@@ -251,6 +282,34 @@ pub fn unpack(db: &mut Db, mount: &MountId, path: &str) -> Result<()> {
                 put_initial_content(db, &m, &new_id, pn.d.as_deref().unwrap_or(&[]))?;
             }
             link_child(db, &m, &target_parent, &new_id, None)?;
+            // v2 fields (D-8), absent in a v1 blob: restored through the same
+            // templates the live operations use, so the touch triggers behave
+            // as they would for chown/setxattr on a fresh node
+            if pn.u.is_some() || pn.g.is_some() || pn.o.is_some() {
+                db.run(
+                    SET_OWNER,
+                    named_params! {
+                        ":node": new_id,
+                        ":uid": pn.u,
+                        ":gid": pn.g,
+                        ":mode": pn.o.map(|o| o & 0o7777),
+                    },
+                )?;
+            }
+            if let Some(xa) = &pn.xa {
+                for (name, value) in xa {
+                    db.run(
+                        XATTR_SET,
+                        named_params! { ":node": new_id, ":name": name, ":value": &value.0 },
+                    )?;
+                }
+            }
+            if let (Some(rk), true) = (pn.rk, kind.is_leaf()) {
+                db.run(
+                    SET_RETENTION_KEEP,
+                    named_params! { ":node": new_id, ":keep": rk },
+                )?;
+            }
             idmap.push(new_id);
         }
         Ok(())

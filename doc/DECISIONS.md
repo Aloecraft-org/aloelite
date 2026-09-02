@@ -16,7 +16,7 @@ decision rather than a conversation. Uses the vocabulary of
 | D-5 | Hardlinks: a leaf may be placed many times, a placement may carry its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02 | implemented; the record was written after the fact |
 | D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
 | D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02 | in progress: engine done, store next |
-| D-8 | The pack blob format moves to v2 once, carrying POSIX metadata, xattrs, retention and hardlink identity; v1 stays readable; Python first, and no third port writes packs before it lands. | proposed 2026-09-02 | awaiting decision; not implemented |
+| D-8 | The pack blob format moves to v2 once, carrying uid/gid/mode, xattrs and retention; not atime, ctime or hardlink identity. v1 stays readable forever. | 2026-09-02 | implemented (Python and Rust) |
 
 How to read a record: what was decided, why, what it obliges, and what it
 deliberately leaves open. The "decided" date is the decision, not the
@@ -427,23 +427,22 @@ storage — never what a mount, a lock, or an operation means.
 
 ## D-8: The pack format moves to v2 once, carrying what v1 drops, before any further port writes a pack
 
-**Proposed 2026-09-02; awaiting the owner's decision.** This record is the
-proposal in full. The question it answers is whether a folder that is packed
-and later unpacked comes back exactly, or whether "same files, same bytes,
-same names" is enough. Options: **A**, extend the blob so it carries what era
-2 added (this record); **B**, keep pack as a content snapshot and document the
-loss; **C**, defer A, at the cost that every pack written meanwhile stays
-lossy. Nothing below is implemented until A is chosen.
+**Decided 2026-09-02.** The owner laid out the purpose and delegated the
+call; the scope below is narrower than the first proposal, and the reason
+for each cut is recorded.
 
 **In short.** A pack is the single MsgPack blob that `pack` writes when it
-folds a directory into one entry, and that `unpack` reads back. Today's
-blob, format v1, forgets a file's owner and mode, its atime, its xattrs, its
-retention policy, and the fact that two names were one hardlinked file. This
-decision says: change the blob format once, to v2, so it carries all of
-that; keep reading v1 forever; do it in Python first and Rust second in the
-same release; and let no third implementation write packs until then.
-Nothing changes for existing volumes on disk, and none of this is the schema
-era — the pack version and the schema era are different numbers.
+folds a directory into one entry, and that `unpack` reads back. Pack exists,
+in the owner's words, because node data — names, structure, sizes — is
+visible even in an encrypted volume, and packing a tree into one entry puts
+all of it inside encrypted content. The blob format, v1, was designed before
+era 2 and never carried the properties era 2 added, so a pack/unpack cycle
+silently dropped a file's owner, group and mode (FUSE sets a mode on every
+file it creates), its xattrs, and its retention policy. This decision: change
+the format once, to v2, carrying those; keep reading v1 forever; Python and
+Rust ship it together; no third implementation writes packs before it. It is
+not the schema era — the pack version and the schema era are different
+numbers, and nothing changes for existing volumes on disk.
 
 ### Where v1 stands
 
@@ -473,44 +472,63 @@ history is not on the list either: a pack carries the committed bytes only.
 
 ### Decision
 
-1. **`ver` becomes 2**, in one bump carrying both tiers below. Any new key
-   forces a bump — a v1 reader would otherwise drop it silently, which is
-   exactly what the gate exists to refuse — and hardlink identity changes the
-   entry shape, so splitting the two would cost two bumps for one release.
+1. **`ver` becomes 2**, in one bump. Any new key forces a bump — a v1 reader
+   would otherwise drop it silently, which is exactly what the gate exists to
+   refuse.
 
-2. **Tier 2: POSIX metadata rides as optional keys** on a data-carrying
-   entry, omitted when unset, in this emission order after `m`:
-   `u` uid, `g` gid, `o` mode, `at` atime ns, then `x` metadata, `xa` xattrs
-   (map name → bin, keys sorted bytewise), `rk` retention_keep, then `d`.
-   Restoring them uses templates that already exist (`set_owner`,
-   `set_atime`, `xattr_set`, `set_retention_keep`): no schema change, no era
-   bump.
+2. **v2 carries, per entry, as optional keys omitted when unset:** `u` uid,
+   `g` gid, `o` mode (after `m`); `xa` xattrs, a map name → bytes with keys
+   sorted bytewise (after `x`); `rk` retention_keep, leaves only. Emission
+   order: `p t n c m u g o x xa rk d`. Restoring them uses templates that
+   already exist (`set_owner`, `xattr_set`, `set_retention_keep`): no schema
+   change, no era bump. Zero is a value; absence stays absence, so a node
+   that never had ownership set comes back with null uid/gid/mode and the
+   host keeps falling back to its process defaults.
 
-3. **Tier 3: hardlink identity via blob-local indices.** The walk still emits
-   one entry per placement in canonical order. The FIRST placement of a node
-   carries its data; every later placement of the same node is a link entry,
-   `{p, n, l}`, where `l` is the index of the entry that carried the data and
-   `n` is this placement's name. Unpack creates the node at its first entry
-   and places it again for each `l` entry, with a placement-name override
-   where the name differs. Fresh ids are minted on unpack (OP-4); `l` indices
-   never leave the blob.
+3. **Not carried, and why.** `atime`: noatime semantics, and `get_node`
+   coalesces it to the modified time, so a writer cannot tell set from unset
+   without a new template — not worth one for a value nothing depends on.
+   `ctime`: the placement trigger stamps it on every insert; no writer can
+   restore it. **Hardlink identity**: it changes the entry shape (a link
+   entry `{p, n, l}` pointing at the entry that carried the data), it is rare
+   in the trees pack is for, and the pool dedups the bytes either way — each
+   placement restores as its own node, which the `links.yaml` scenarios pin.
+   The link-entry shape stays here as the sketch for a v3 if it is ever
+   wanted; the gate makes that bump as cheap as this one.
 
 4. **Byte rules are unchanged**: MsgPack, keys in the stated order, absent
-   optionals omitted, smallest integer encoding, str for text, bin for bytes,
-   `x`/`xa` keys sorted. `pack-v2.json` vectors, generated from the Python
-   reference, pin them before Rust follows.
+   optionals omitted, smallest integer encoding, str for text, bin for bytes
+   (and ONLY bin for bytes — a str where bytes belong is `corrupt`), `x`/`xa`
+   keys sorted. `conformance/vectors/pack-v2.json` pins the writer;
+   `pack-v1.json` pins that v1 blobs still read; `scenarios/pack.yaml` pins
+   the round trip through the API.
 
-5. **v1 stays readable forever.** A v2 reader treats every v2 key as optional,
-   so a v1 blob decodes unchanged and restores exactly as it does today. The
-   gate then refuses `ver > 2`. No stored pack is rewritten.
+5. **v1 stays readable forever.** Every v2 key is optional on read, so a v1
+   blob decodes unchanged and restores exactly as it always did. The gate
+   refuses `ver > 2`. No stored pack is rewritten.
 
-6. **Sequencing.** Python ships the v2 writer and reader with the vectors;
-   Rust follows in the same release. Until then Rust writes v1, which is
-   fine: v1 is readable under any v2. What is NOT fine is a third writer:
-   no other port (JS, Kotlin) implements pack before v2 lands, so the switch
-   stays two implementations and zero migrations.
+6. **Sequencing.** Python and Rust shipped the v2 writer and reader together
+   with the vectors, so there is no window in which the two disagree. No
+   other port (JS, Kotlin) implements pack from anything but v2.
 
-### Not decided here
+### Found while deciding, and not decided here
 
-Compression of `d`, and the per-node content hash the `proof` column reserves
-(EXT-2). Both would be a v3 and neither is blocked by this shape.
+**Pack does not yet conceal anything from someone holding the file.** The
+owner's stated purpose for pack is concealment: node rows are plaintext even
+in an encrypted volume, so folding a tree into one blob was meant to move
+names and structure inside encrypted content. But `pack` runs
+`archive_subtree`, which flips the tree's EDGES to archived and nothing else.
+Every packed node's `node` row (name, type, timestamps, uid/gid/mode,
+metadata), its `content` row (size, version), its `content_version`
+manifest and its `xattr` rows remain in the file, in plaintext, indefinitely:
+PI-7 keeps archived edges for recoverability, `prune` removes only nodes with
+no edge at all, and no purge of a detached subtree exists. Concealment
+therefore needs a deliberate second step — a `purge`/`expunge` of a detached
+subtree that opts out of PI-7 for that subtree, which is a requirements-level
+change and a D-9 candidate. Separately, `content_chunk.length` and
+`content.size` are plaintext, so sizes leak regardless; one blob reduces that
+to one size.
+
+Also open: compression of `d`, and the per-node content hash the `proof`
+column reserves (EXT-2). Both would be a v3 and neither is blocked by this
+shape.

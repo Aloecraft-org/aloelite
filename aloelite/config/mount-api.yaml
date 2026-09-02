@@ -390,6 +390,12 @@ operations:
         serialized child order must match the walk so unpack reproduces it.
         ACC-11 is checked TRANSITIVELY, as for remove_recursive: pack archives
         every member of the subtree, so a lock anywhere below refuses it.
+        Pack format v2 (D-8) carries, per placement: type, effective name,
+        created/modified time, NODE-6 metadata, uid/gid/mode, xattrs, the
+        retention policy, and the bytes. It does not carry atime, ctime, or
+        hardlink identity (each placement restores as its own node). The
+        original nodes are archived, not deleted: their rows remain in the
+        file until a purge exists (see D-8's open question).
     unpack:
       params:  { mount: MountId, path: Path }
       returns: void

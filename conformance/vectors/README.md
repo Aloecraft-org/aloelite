@@ -8,26 +8,27 @@ high-water-mark fence). Runner: tests/test_ids.py::test_conformance_id_vectors.
 `format-v1.json` pins the byte-level contract: content addressing, chunking,
 and the ENC-2 key ladder. Fixed inputs in, exact bytes out.
 
-`pack-v1.json` pins the pack blob codec (OP-6/OP-7, `aloelite/pack.py`): the
+`pack-v2.json` pins the pack blob codec (OP-6/OP-7, `aloelite/pack.py`): the
 one cross-implementation byte contract besides the chunk format. `encode`
 cases are node lists with the exact blob the reference produces — every node
-type, metadata, unicode, and the MsgPack marker boundaries (fixstr/str8,
-bin8/16/32, fixmap/map16, fixarray/array16, the integer widths). `decode`
-cases are raw blobs with the error code the gate must answer (newer version,
-missing version, wrong `fmt`, a top-level array, malformed nodes, truncation)
-or the node list a tolerant read must produce (absent optional fields, null
-timestamps, unknown keys). Payload bytes appear as `d_hex`. The walk order
-that feeds the codec is pinned by the scenarios, and
-`coherence.yaml::unpack-restores-a-pack-written-by-the-reference` restores
-the `reference-tree` case end to end through the API. Runners:
+type, metadata, ownership and mode, xattrs, retention, unicode, and the
+MsgPack marker boundaries (fixstr/str8, bin8/16/32, fixmap/map16,
+fixarray/array16, the integer widths). `decode` cases are raw blobs with the
+error code the gate must answer (newer version, missing version, wrong `fmt`,
+a top-level array, malformed nodes, a str where bytes belong, truncation) or
+the node list a tolerant read must produce (absent optional fields, null
+values, unknown keys, and a v1 blob). Payload bytes appear as `d_hex`, xattr
+values as `xa_hex`.
+
+`pack-v1.json` is the reader's compatibility contract: v1 blobs, produced by
+a frozen v1 encoder that no shipping writer has any more, with the nodes
+every reader must recover from them (D-8: v1 is readable forever).
+
+The walk order that feeds the codec is pinned by the scenarios;
+`coherence.yaml` restores a reference-produced v1 pack end to end, and
+`pack.yaml` pins the v2 round trip through the API. Runners:
 `tests/test_pack_vectors.py` and
 `rust/aloelite-conformance/tests/pack_vectors.rs`.
-
-These exist so a second implementation can be written *independently* and still
-be known to agree. That is the point — four implementations are worth having
-because they cross-check each other, which they only do if each one derives the
-format itself rather than calling into shared code. Vectors give agreement
-without giving up independence.
 
 ## Sections
 
