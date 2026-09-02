@@ -1,0 +1,9 @@
+alias xp='xtrpatch x.patch'
+alias xs='xtrshow -o x.md'
+alias ctb="cargo test --target=wasm32-unknown-unknown"
+alias ctw="cargo test --target=wasm32-wasip2"
+alias ct="cargo test"
+alias crb="cargo run --target=wasm32-unknown-unknown"
+alias crw="cargo run --target=wasm32-wasip2"
+alias cr="cargo run"
+alias qf="RUSTFLAGS=\"-Awarnings\""
