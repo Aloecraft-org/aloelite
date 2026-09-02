@@ -26,6 +26,7 @@ Templates are loaded once and addressed as "group.name" (e.g.
 from __future__ import annotations
 
 import hashlib
+import sys
 from contextlib import contextmanager
 from pathlib import Path as _FsPath
 from typing import Any, Iterator, Mapping
@@ -128,12 +129,30 @@ def _check_sqlite_capabilities(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         subsec_ok = False
     if not subsec_ok:
+        floor = ".".join(map(str, MIN_SQLITE))
+        # The rescue differs by platform, and naming the wrong one wastes the
+        # reader's time in the worst way: `bundled-sqlite` resolves to
+        # pysqlite3-binary, which publishes manylinux wheels ONLY (the marker
+        # in pyproject says platform_system == 'Linux'). On Windows that extra
+        # installs nothing at all, so telling a Windows user to run it sends
+        # them round the same loop with no change and no error.
+        if sys.platform == "win32":
+            fixes = (
+                "Fixes: install a CPython whose bundled sqlite3.dll is >= "
+                f'{floor} (check with: python -c "import sqlite3; '
+                'print(sqlite3.sqlite_version)"), or replace the sqlite3.dll in '
+                "your Python installation's DLLs directory with a current one "
+                "from sqlite.org. The 'bundled-sqlite' extra is Linux-only and "
+                "will not help here."
+            )
+        else:
+            fixes = (
+                "Fixes: pip install 'aloelite[bundled-sqlite]', or provide "
+                f"libsqlite3 >= {floor}."
+            )
         raise Unsupported(
             f"host sqlite {sqlite3.sqlite_version} is too old for aloelite "
-            f"(needs jsonb + unixepoch subsec, sqlite >= "
-            f"{'.'.join(map(str, MIN_SQLITE))}). Fixes: pip install "
-            f"'aloelite[bundled-sqlite]', or provide libsqlite3 >= "
-            f"{'.'.join(map(str, MIN_SQLITE))}."
+            f"(needs jsonb + unixepoch subsec, sqlite >= {floor}). {fixes}"
         )
 
 

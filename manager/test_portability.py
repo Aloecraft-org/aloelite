@@ -13,6 +13,8 @@ nothing in a Linux CI run notices.
 from __future__ import annotations
 
 import os
+import pathlib
+import sys
 
 import pytest
 
@@ -75,7 +77,16 @@ def test_no_posix_only_calls_on_the_startup_import_path():
     banned = ("os.geteuid", "os.getuid", "os.setsid", "os.fork", "os.killpg")
     root = pathlib.Path(__file__).resolve().parent
     offenders = []
-    for name in ("web.py", "__main__.py", "api.py", "dav.py", "davlock.py", "tls.py"):
+    for name in (
+        "web.py",
+        "__main__.py",
+        "api.py",
+        "dav.py",
+        "davlock.py",
+        "tls.py",
+        "s3.py",
+        "sigv4.py",
+    ):
         text = (root / name).read_text()
         for call in banned:
             # A hasattr guard may wrap onto its own line, so the check is
@@ -86,6 +97,63 @@ def test_no_posix_only_calls_on_the_startup_import_path():
     assert not offenders, "POSIX-only calls on the startup path: " + "; ".join(
         offenders
     )
+
+
+def test_sqlite_floor_message_names_a_fix_that_exists_on_this_platform(monkeypatch):
+    """The rescue differs by platform and the wrong one is worse than none.
+
+    `aloelite[bundled-sqlite]` resolves to pysqlite3-binary, which pyproject
+    markers to platform_system == 'Linux' because it publishes manylinux
+    wheels only. Telling a Windows user to run it sends them round the loop
+    again with nothing installed, no error, and the same refusal.
+    """
+    import aloelite.db as db
+
+    class _Conn:
+        def execute(self, sql):
+            raise db.sqlite3.OperationalError("no such function: jsonb")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(db.Unsupported) as e:
+        db._check_sqlite_capabilities(_Conn())
+    msg = str(e.value)
+    assert "bundled-sqlite" not in msg or "Linux-only" in msg
+    assert "sqlite3.dll" in msg, "the Windows message must name the Windows fix"
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(db.Unsupported) as e:
+        db._check_sqlite_capabilities(_Conn())
+    assert "aloelite[bundled-sqlite]" in str(e.value)
+
+
+@pytest.mark.parametrize("module", ["aloelite", "aloelite.cli", "manager.web"])
+def test_module_entry_points_run(module):
+    """`python -m <module> --version` must work for every documented entry.
+
+    The console scripts (`aloelite`, `aloelite-web`) land in the interpreter's
+    Scripts/ directory, which on Windows is routinely not on PATH -- so the
+    first thing a fresh install does is fail with "not recognized". The
+    obvious recovery is `python -m aloelite`, and that used to fail too:
+
+        No module named aloelite.__main__; 'aloelite' is a package and
+        cannot be directly executed
+
+    Two dead ends on a working install. Run as SUBPROCESSES because that is
+    the only thing that proves -m dispatch; importing the module would pass
+    whether or not __main__.py exists.
+    """
+    import subprocess
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        [sys.executable, "-m", module, "--version"],
+        capture_output=True,
+        text=True,
+        cwd=str(root),
+        timeout=60,
+    )
+    assert out.returncode == 0, f"{module}: rc={out.returncode} {out.stderr}"
+    assert "aloelite" in out.stdout.lower(), out.stdout
 
 
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>

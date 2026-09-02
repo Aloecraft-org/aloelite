@@ -122,6 +122,34 @@ def _wal_checkpoint_truncate(sqlite_path: str) -> tuple[int, int]:
         con.close()
 
 
+def _s3_credentials_from_env() -> dict:
+    """One access key from the environment, for the common single-job case.
+
+    The secret is read from ALOELITE_S3_SECRET_KEY, or from the file named by
+    ALOELITE_S3_SECRET_FILE -- the file form exists so a deployment can hand
+    the secret over without it appearing in the process environment, where
+    anything that can read /proc can see it.
+    """
+    from .sigv4 import Credentials
+
+    key = os.environ.get("ALOELITE_S3_ACCESS_KEY", "").strip()
+    secret = os.environ.get("ALOELITE_S3_SECRET_KEY", "")
+    secret_file = os.environ.get("ALOELITE_S3_SECRET_FILE", "").strip()
+    if secret_file and not secret:
+        try:
+            with open(secret_file) as f:
+                secret = f.read().strip()
+        except OSError as e:
+            raise RuntimeError(
+                "ALOELITE_S3_SECRET_FILE %r could not be read: %s" % (secret_file, e)
+            ) from e
+    if not key or not secret:
+        return {}
+    scope = [b.strip() for b in os.environ.get("ALOELITE_S3_BUCKETS", "").split(",")]
+    buckets = {b for b in scope if b} or None
+    return {key: Credentials(secret, buckets)}
+
+
 def create_app(
     store: VolumeStore,
     supervisor,
@@ -131,6 +159,8 @@ def create_app(
     host_mnt_prefix: str = HOST_MNT_PREFIX,
     auth_mode: str | None = None,
     webdav: bool | None = None,
+    s3: bool | None = None,
+    s3_credentials: dict | None = None,
 ) -> Flask:
     from .ui import STATIC_DIR, TEMPLATES_DIR
 
@@ -1093,6 +1123,40 @@ def create_app(
 
         app.register_blueprint(create_dav_blueprint(store, registry))
     app.config["WEBDAV"] = bool(webdav)
+
+    # -- S3 (opt-in) --------------------------------------------------------
+    # Same posture as WebDAV, and one step stricter: it needs credentials to
+    # mean anything, so an enabled-but-unconfigured S3 surface is a startup
+    # error rather than an endpoint that authenticates nobody.
+    if s3 is None:
+        s3 = os.environ.get("ALOELITE_S3", "") not in ("", "0")
+    if s3:
+        from .s3 import create_s3_blueprint
+        from .sigv4 import Credentials
+
+        creds = s3_credentials
+        if creds is None:
+            creds = _s3_credentials_from_env()
+        if not creds:
+            raise RuntimeError(
+                "S3 is enabled but no credentials are configured. Set "
+                "ALOELITE_S3_ACCESS_KEY and ALOELITE_S3_SECRET_KEY (optionally "
+                "ALOELITE_S3_BUCKETS as a comma-separated scope), or pass "
+                "s3_credentials= to create_app."
+            )
+        creds = {
+            k: (v if isinstance(v, Credentials) else Credentials(**v))
+            for k, v in creds.items()
+        }
+        app.register_blueprint(
+            create_s3_blueprint(
+                store,
+                registry,
+                credentials=creds,
+                virtual_host_suffix=os.environ.get("ALOELITE_S3_VHOST_SUFFIX") or None,
+            )
+        )
+    app.config["S3"] = bool(s3)
 
     @app.get("/admin")
     def admin():

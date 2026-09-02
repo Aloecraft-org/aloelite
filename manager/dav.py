@@ -581,10 +581,38 @@ def create_dav_blueprint(
             store.put(rec)
 
     def _require_volume(vid: str) -> VolumeRecord:
+        """Resolve a volume by ID, or failing that by NAME.
+
+        The id is authoritative and is tried first, so nothing that worked
+        before changes. The name fallback exists because a DAV URL is
+        something a person types once into a Map Network Drive dialog and
+        then has to recognise later, and
+
+            http://host:7081/dav/ca678c06bfaa41928ea9d01d45234ee5
+
+        is not a URL anyone can remember, check, or paste from memory -- while
+        the S3 frontend on this same manager addresses the same volumes by
+        name. One product should not disagree with itself about that.
+
+        Names are unique only WITHIN a filesystem (api.py checks
+        `volumes_of(fs_id)`), so two filesystems may each hold a "backups".
+        An ambiguous name is refused by name rather than resolved to whichever
+        record happens to sort first: silently mounting the wrong volume is a
+        far worse outcome than a 409 that says which ids to choose between.
+        """
         rec = store.get(vid)
-        if rec is None:
-            raise DavFault(404, "no such volume")
-        return rec
+        if rec is not None:
+            return rec
+        matches = [r for r in store.list() if r.name == vid]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise DavFault(
+                409,
+                "%r names %d volumes (ids: %s); use the id"
+                % (vid, len(matches), ", ".join(sorted(r.id for r in matches))),
+            )
+        raise DavFault(404, "no such volume")
 
     # -- properties ---------------------------------------------------------
     def _propstat(
@@ -1042,16 +1070,13 @@ def create_dav_blueprint(
         except aerr.NotFound as e:
             raise DavFault(409, "parent collection does not exist") from e
 
-        # An INTERRUPTED PUT COMMITS WHAT ARRIVED, replacing the previous
-        # content. That is not a choice made here so much as one the engine
-        # makes: Descriptor.close() commits unconditionally and there is no
-        # abort, so the alternative -- skipping close() on the error path --
-        # would strand the write lock on the node until prune reclaimed it,
-        # leaving the resource unwritable rather than merely truncated. It
-        # matches what the FUSE frontend does with a partial write, and
-        # test_dav.py pins it so it stays a known property. A clean fix needs
-        # an engine-level descriptor abort (discard staged chunks, release the
-        # lock, leave the committed pointer alone).
+        # An INTERRUPTED PUT LEAVES THE PREVIOUS CONTENT INTACT. The engine
+        # makes that choice, not this handler: Descriptor.__exit__ commits on a
+        # clean exit and aborts when the block is unwinding, so the partial
+        # bytes are discarded and the committed pointer never moves. The lock
+        # is released either way, so a dead transfer cannot wedge the node.
+        # test_dav.py::test_interrupted_put_is_atomic_and_does_not_wedge pins
+        # both halves.
         with handle as writer:
             stream = request.stream
             while True:

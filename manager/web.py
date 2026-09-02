@@ -67,9 +67,10 @@ def main() -> int:
         "--webdav",
         action="store_true",
         help="serve every volume over WebDAV at /dav/<volume-id> (RFC 4918 "
-        "class 1: no locking, so macOS Finder mounts read-only). Off by "
-        "default; encrypted volumes authenticate with HTTP Basic where the "
-        "password is the PIN, so serving this off loopback requires TLS "
+        "class 2: LOCK/UNLOCK, so macOS Finder mounts read-write and the "
+        "Windows redirector survives its first save). Off by default; "
+        "encrypted volumes authenticate with HTTP Basic where the password "
+        "is the PIN, so serving this off loopback requires TLS "
         "(--tls-self-signed or --tls-cert/--tls-key).",
     )
     ap.add_argument(
@@ -143,3 +144,13 @@ def main() -> int:
     from .__main__ import main as _main
 
     return _main()
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    # `python -m manager.web`, for the same reason aloelite/__main__.py
+    # exists: on Windows the console scripts land in a Scripts\ directory
+    # that is often not on PATH, and this is the server people actually
+    # need to start.
+    import sys
+
+    sys.exit(main())

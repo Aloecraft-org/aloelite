@@ -45,6 +45,11 @@ bundled-sqlite = [
 ]
 test = [
     "pytest",
+    # Drives manager/test_s3.py as a REAL S3 client. The S3 frontend exists so
+    # that an SDK can talk to it, and a request we signed ourselves would only
+    # test the verifier against its own canonicalisation. Skipped gracefully
+    # (pytest.importorskip) when absent.
+    "botocore",
 ]
 lint = [
     "ruff==0.15.8",

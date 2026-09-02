@@ -1,0 +1,392 @@
+# Changelog
+
+All notable changes to Aloelite are recorded here.
+
+Generated from `CHANGELOG.yaml`, which is the source of truth --
+edit that file, then run `script/changelog.py generate`.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+`schema era` is the volume's on-disk `api_version`: a file written by
+one era is readable by a build of that era, and an era bump is a
+migration rather than a compatible change.
+
+## Planned
+
+### 0.4.0 -- schema era 2, the break-once migration
+
+Not on `main`. Lives on `claude/aloelite-rust-port-assessment-732bo0`.
+
+**One era bump carrying every structural change 0.4 needs**, taken once
+at a release boundary rather than spread over several. Era 2 is a
+migration, not a compatible change: an era-1 file is migrated forward on
+open, and an era-2 file is refused by an era-1 build.
+
+- `node` gains `uid`/`gid`/`mode` (ownership: POSIX and multitenant
+  alike) and `atime`/`ctime`. `nlink` stays DERIVED from active-edge
+  count -- a maintained counter can drift, a count cannot.
+- **Timestamps become nanoseconds end to end.** The migration multiplies
+  stored ms values by 1e6, guarded by a magnitude bound so a crash-rerun
+  cannot double-apply. The uuid7 watermark stays ms (uuid7 is ms by
+  spec).
+- PI-1 narrows to containers: a single active parent keeps the container
+  graph a tree while entries may hold many placements -- hardlinks.
+- D-5: `edge.name` becomes a nullable per-placement name override;
+  resolution, listings, rename and move operate on
+  `coalesce(edge.name, node.name)`.
+- NODE-2 widens to symlink/fifo/socket (devices refused, D-3); `mount`
+  gains `access` (`ro`/`rw`) and `principal` (D-4); an `xattr` table is
+  added.
+- Ids become host-minted, and the volume watermark becomes an attach
+  fence (D-1/D-2).
+
+Also on that branch, and independent of the era bump: the manager split
+into api/ui/engine, an `api-spec.yaml` HTTP contract projected by tests,
+benchmarks (`script/benchmark.py`, `doc/BENCHMARKS.md`), and the
+conformance suite extended with mount-level semantics and id-minting
+vectors.
+
+## [0.3.7] - 2026-08-31
+
+`v0.3.7` &middot; schema era `1`
+
+**An S3 frontend, scoped to what a replication client actually calls.**
+Enough of S3 for a backup tool to ship to an aloelite volume alongside
+the AWS bucket it already uses, and no more. Off by default, like
+WebDAV, and one step stricter: enabled without credentials is a startup
+error rather than an endpoint that authenticates nobody.
+
+The surface was derived by reading litestream 0.3.13's S3 replica
+client rather than the S3 API docs, which is why it is small -- and why
+two of its shapes are not the ones an API summary would suggest.
+
+### Added
+
+- **S3 frontend (`ALOELITE_S3`), bucket = volume.** ListObjects,
+  GetObject, PutObject, multipart upload, and batch DeleteObjects,
+  served at the application root so a client's `endpoint` needs no path
+  component. Buckets are volumes created through the manager's own API;
+  there is no CreateBucket, the same posture WebDAV takes toward
+  volumes.
+- **`ListObjects` is V1, not V2.** The target client paginates with
+  `Marker`/`NextMarker`, not a continuation token, and groups
+  generations through `CommonPrefixes` with `delimiter=/`. A V2-only
+  implementation would leave it unable to enumerate a single
+  generation. Listings are sorted lexicographically because S3 promises
+  that and aloelite's own listing order is canonical (edge_id,
+  node_id), not alphabetical.
+- **Multipart upload, which is not optional.** Every write in that
+  client goes through `s3manager.Uploader`, whose default part size is
+  5 MiB: WAL segments land as a single PutObject, but any snapshot
+  past that becomes a real multipart upload with up to five concurrent
+  UploadPart requests. Parts stage in memory and are concatenated at
+  Complete, with the staging cap enforced rather than discovered.
+- **SigV4 verification (`manager/sigv4.py`)**, cross-checked against
+  botocore's own signer rather than against vectors of our own: the
+  tests sign with botocore and verify with this module, so a
+  disagreement about canonical form fails the suite. Chunked upload
+  signing (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`) is refused BY NAME
+  rather than mis-parsed as a body, because treating the chunk framing
+  as content would corrupt the object.
+- **S3 credentials are separate from the volume PIN**, and scopable to
+  a set of buckets, so one endpoint can serve several jobs without each
+  holding the others' data -- and so a backup job's key cannot unlock
+  the volume through every other frontend.
+- `manager/test_s3.py` drives the frontend with a real botocore client over a real socket. A request signed by our own code would only test the verifier against its own canonicalisation.
+- `script/s3_smoke.py`, which runs the same shape of check against a
+  DEPLOYED endpoint rather than a fixture -- the question someone
+  standing in front of a new install is actually asking. First run on a
+  real Windows host passed all six: put/get, a deep key's implied
+  prefixes, flat and delimited listing, a multipart upload past the
+  5 MiB part size, and a batch delete."
+- **`doc/WINDOWS.md`**, and the audit behind it. Windows is where the
+  WebDAV frontend was aimed and where aloelite has still never run, so
+  the manager's startup path was read for POSIX-only assumptions rather
+  than assumed clean. `aloelite-web` defaults to direct-only mode, which
+  skips every FUSE precondition (`/dev/fuse`, `CAP_SYS_ADMIN`,
+  `/proc/self/mountinfo`, `fusermount3`), so those never execute there.
+
+### Fixed
+
+- **A WebDAV volume can be addressed by NAME, not just by its uuid.**
+  `/dav/backups` now resolves as well as
+  `/dav/ca678c06bfaa41928ea9d01d45234ee5`. The id is authoritative and
+  still tried first, so nothing that worked before resolves differently.
+  This was a real usability wall rather than a nicety: a DAV URL is
+  typed once into a Map Network Drive dialog and has to be recognised
+  later, a 32-hex uuid is neither memorable nor checkable, and the S3
+  frontend on the SAME manager already addressed the same volumes by
+  name -- the product disagreed with itself. Names are unique only
+  within a filesystem, so an ambiguous name is refused with a 409 naming
+  the candidate ids rather than resolved to whichever sorts first;
+  silently mounting the wrong volume is the worse failure.
+- **The too-old-sqlite message named a fix that does not exist on
+  Windows.** It said `pip install 'aloelite[bundled-sqlite]'`, but that
+  extra resolves to pysqlite3-binary, which pyproject markers to
+  `platform_system == 'Linux'` because it publishes manylinux wheels
+  only. On Windows the command installs nothing, reports no error, and
+  the next run refuses in exactly the same way -- so the message sent a
+  reader round a loop with no exit. The Windows branch now names the
+  fixes that exist there (a newer CPython, or replacing `sqlite3.dll`)
+  and says the extra will not help.
+- `aloelite-web --webdav`'s help still described RFC 4918 class 1 and macOS Finder mounting read-only. Class 2 shipped in 0.3.6, and mounting read-write is the whole point of it.
+- `manager/test_portability.py`'s guard against POSIX-only calls on the startup path did not cover the new `s3.py` and `sigv4.py`, which are on it. Both are now included, and the sqlite message's platform branches are pinned.
+- **A fresh Windows install hit two dead ends in a row.** `pip install`
+  puts the console scripts in the interpreter's `Scripts\` directory,
+  which is routinely not on PATH, so `aloelite` is "not recognized" --
+  and the obvious recovery, `python -m aloelite`, failed too with "'aloelite'
+  is a package and cannot be directly executed". `aloelite/__main__.py`
+  now makes `python -m aloelite` the console script, sub-tool dispatch
+  included (`python -m aloelite web --webdav` starts the manager), and
+  `manager/web.py` gains the `__main__` guard it was missing so
+  `python -m manager.web` works too. Pinned as subprocess tests, since
+  importing a module proves nothing about `-m` dispatch.
+- **`script/windows/Install-AloeliteTasks.ps1`**, which registers the two
+  scheduled tasks a rebootable Windows instance needs. Two rather than
+  one because they answer to different owners: the manager runs at system
+  startup as SYSTEM (backups arrive whether or not anyone is logged in,
+  which is also why `-Root` is mandatory -- SYSTEM's profile is not
+  yours), while the drive mapping is per-logon-session by construction
+  and runs at logon, as the user, unelevated. The mapping waits for
+  `/health` before it maps: a remembered mapping is restored at logon
+  BEFORE the server is listening, which is exactly how Windows ends up
+  with a dead drive marked disconnected. The S3 secret is passed by
+  `ALOELITE_S3_SECRET_FILE` so it never enters the task definition.
+
+### Known issues
+
+- An ETag here is opaque (`"<id>-<version>"`), not the object's MD5.
+  Aloelite's chunk addresses are taken over CIPHERTEXT, and storing a
+  plaintext digest beside the ciphertext would hand anyone with file
+  access an offline confirmation oracle -- exactly what a volume's
+  `random` enc_mode gives up dedup to avoid. Real S3 also returns
+  non-MD5 ETags for SSE-KMS and multipart objects, and multipart part
+  ETags are round-tripped by the client, so nothing in the target
+  client notices. A tool that verifies ETag == MD5 would.
+- Litestream does NOT infer path-style addressing from `endpoint`
+  alone: `s3.ParseHost` sets it only for hosts it recognises as a known
+  provider, and a bare `s3://bucket/prefix` URL falls through to
+  `forcePathStyle = false`. A deployment pointing litestream at this
+  frontend must set `force-path-style: true` in its replica block, or
+  configure `ALOELITE_S3_VHOST_SUFFIX` and provide wildcard DNS.
+- Multipart parts stage in memory and are not persisted, so an upload interrupted by a manager restart is abandoned. The client retries the whole object, which is the same outcome it already handles.
+- A key cannot be both an object and a prefix of other objects. S3's keyspace is flat and permits it; a tree cannot, so it is refused with InvalidRequest rather than resolved arbitrarily.
+
+
+## [0.3.6] - 2026-08-31
+
+`v0.3.6` &middot; schema era `1`
+
+**WebDAV, promoted from an assessment to a working frontend.** The
+protocol and engine work is verified here; the desktop-client behaviour
+it targets is not, because CI has no Windows or macOS runner.
+
+The frontend is off by default. It is a second, write-capable surface on
+every volume, and the one feature that tempts a deployment past
+loopback, so it does not appear by accident.
+
+### Added
+
+- **WebDAV frontend (`--webdav`), RFC 4918 compliance class 2.**
+  LOCK/UNLOCK, Depth 0 and infinity, exclusive write locks, the `If:`
+  header, and `lockdiscovery`/`supportedlock` reporting real state.
+  Class 2 is what makes Finder mount read-write instead of read-only,
+  and what stops the Windows redirector failing at first save.
+- **TLS: `--tls-cert`/`--tls-key`, or `--tls-self-signed`** generated
+  once and reused. Serving WebDAV off loopback without TLS is REFUSED,
+  not warned about: the Basic password is the volume PIN.
+- **Conditional requests on a strong ETag** built from
+  `content.version`. A weak validator can never satisfy `If-Match` or
+  `If-Range` (RFC 9110 8.8.3.2 requires strong comparison), so a weak
+  etag would have reduced both headers to permanent no-ops.
+- Engine: `lock`/`unlock`/`renew_lock` make a lock a first-class object that outlives any descriptor.
+- Engine: `Descriptor.abort()`, plus abort-on-scope-exit, so a failed write discards its staging rather than committing a partial file.
+
+### Changed
+
+- Engine locks now guard placement, existence and metadata, not only content (ACC-11).
+- `doc/WEBDAV.md` rewritten for class 2, including the correction that engine locks give no DAV-vs-DAV exclusion, because all DAV clients on a volume share one engine mount.
+
+### Fixed
+
+- **`If-Range` was splicing bytes across a change.** A resumed download
+  of a file that had changed mid-transfer spliced the new bytes onto the
+  prefix the client already held, producing a corrupt result that no
+  error reported. A live corruption path, found by writing the
+  conditional-request tests.
+- `aloelite-web` died with `AttributeError` on Windows before binding a socket (`os.geteuid`) -- on the one platform where WebDAV is the only way in.
+
+### Known issues
+
+- No Windows or macOS runner in CI, so real Finder and Windows-redirector behaviour is untested here. That is what the rc was for.
+
+
+## [0.3.5] - 2026-08-08
+
+`v0.3.5` &middot; schema era `1`
+
+**The manager learns to show you what is inside a file.** Rendering
+rather than downloading, for the formats where a round trip to the
+desktop was the only thing standing between a user and the content.
+
+### Added
+
+- Markdown rendering and syntax highlighting in the file viewer.
+- Media preview for audio and video.
+- A sketch pad: pointer/stylus input with pressure, colours, pen width, grid and dot backgrounds, undo, and SVG output.
+
+
+## [0.3.4] - 2026-08-06
+
+`v0.3.4` &middot; schema era `1`
+
+**Path resolution stops paying per segment.** The change nobody notices
+locally and everybody notices over a network, done before the language
+ports so that nobody reimplements the slow version.
+
+### Changed
+
+- **One query per path, not one per segment.** `resolve()` and
+  `resolve_parent()` folded `resolve_segment` over path components --
+  one round trip each. Locally that is nearly free, which is exactly why
+  it survived; over a network connection to a remote backend it is the
+  difference between usable and unusable, and it is woven through every
+  path-addressed operation. `resolution.resolve_path` is now a recursive
+  CTE that walks the whole path in one statement.
+- Web: explorer polished for phones, scale and consistency.
+- CI: both workflows can be dispatched manually, so a tag whose run died for reasons unrelated to the code can be retried without deleting and re-pushing the tag.
+
+### Fixed
+
+- `..` containment is pinned by tests: a path may not escape its mount.
+
+
+## [0.3.3] - 2026-08-06
+
+`v0.3.3` &middot; schema era `1`
+
+A polish and documentation release, cut the same day as 0.3.2 to get the
+web-UI fixes out behind the incident hardening that preceded them.
+
+### Added
+
+- `script/browser_check.py`: the real-browser UI check, landed as a script rather than left as a manual procedure.
+- `doc/HANDOFF-0.4.md`, recording what 0.4 needs and which decisions are still open.
+
+### Changed
+
+- Web: styled prompts, phone-size modals, and folders sorted first.
+
+
+## [0.3.2] - 2026-08-06
+
+`v0.3.2` &middot; schema era `1`
+
+**Incident hardening.** On 2026-08-03, aloelite on stock Debian 12
+(sqlite 3.40) failed mount with a `NOT NULL` IntegrityError, then failed
+file creation with `no such function: jsonb`, surfacing through FUSE as
+a bare `EIO`. Everything under Added and Fixed here exists because of
+that, and the schema era stamp is what stops the same class of failure
+recurring.
+
+This release also carries the manager's authentication rework and the
+four candidates tagged `v0.3.1rc1`..`v0.3.1rc4`.
+
+### Added
+
+- **A capability probe at open, the universal guard.** `Db.open` probes
+  `jsonb()` AND `unixepoch('subsec')` -- not the version string -- and
+  refuses with an actionable error naming the floor (>= 3.45).
+  `'subsec'` needs its own probe because an unknown modifier RETURNS
+  NULL rather than raising, which `printf` coerces to zero timestamps
+  (so `new_uuid7` would silently mint ids in the 00000000 era) and
+  `coalesce` turns into `NOT NULL` aborts.
+- **Schema era stamped into `PRAGMA user_version`, with a
+  derived-object refresh.** On open, an older or unstamped file has
+  every trigger and view dropped and re-created from the CURRENT
+  `schema.sql` -- they hold no data, so it is always safe -- and a
+  newer-era file is refused with a clear "requires newer aloelite"
+  error. Files no longer keep their creation-time derived-object text
+  forever, which is the property that shipped `subsec` triggers to hosts
+  that could not run them.
+- **One sqlite import site (`aloelite/_sqlite.py`)**, preferring
+  `pysqlite3` (the new `bundled-sqlite` extra: a statically linked
+  modern sqlite, manylinux wheels only) and falling back to stdlib.
+  Correctness rather than style: pysqlite3's exception classes are
+  distinct from stdlib's, so an `except sqlite3.Error` against the wrong
+  module never matches.
+- Manager: cookie-auth mode with one engine mount per client; sessions are explicit bearer tokens.
+- Web: a text editor and paste bin; UI assets vendored so the manager is self-contained.
+- CLI: recursive `put`/`get` behind a single `-r` flag, following `cp -r` for destination semantics.
+- CI: installs the `[fuse]` extra and runs the mounted-filesystem tests.
+- Conformance: the spec is bound, the oracle shared, and the bytes pinned.
+
+### Changed
+
+- Host-supplied timestamps, rather than trusting sqlite to produce them.
+- Manager: auth defaults off for 0.3.2; cookie mode stays opt-in until proven.
+
+### Fixed
+
+- Read descriptors track the committed pointer, so a read is coherent with what was committed rather than with what was staged. The bug was pinned as an xfail test first.
+- FUSE: dirty state is keyed by inode, not by file handle, and `forget()` is implemented.
+- Web: the 401 attach loop, and the stacked-modal PIN flow.
+- Manager: detaching a client no longer strips the surviving clients' cipher.
+
+### Security
+
+- **ENC-3: a cipher/volume mismatch is refused instead of failing open.**
+  The cipher lives on the CONNECTION and volumes live in the FILE, and
+  nothing checked that the two agreed. They could disagree two ways --
+  `attach()` binding a mount without installing any cipher, and mounting
+  a second volume replacing the cipher connection-wide. Either way an
+  encrypted volume was reachable with an identity cipher: reads returned
+  stored ciphertext as though it were content, and writes put PLAINTEXT
+  INTO AN ENCRYPTED VOLUME. Both silent, no error. This is the
+  fail-closed fix; one cipher slot per connection is still the root
+  cause, and per-mount ciphers are the real answer.
+
+
+## [0.3.1] - 2026-07-25
+
+`v0.3.1`
+
+A CLI usability release.
+
+### Changed
+
+- CLI: PIN handling and convenience calls, with the docs updated to match.
+
+
+## [0.3.0] - 2026-07-25
+
+`v0.3.0`
+
+**The web UI stops needing FUSE.** `aloelite-web` becomes an on-ramp
+that runs anywhere Python does -- no Docker, no FUSE, no sudo -- which
+is what makes a volume openable on a machine where a kernel mount is not
+available or not permitted.
+
+### Added
+
+- `aloelite-web`: a FUSE-independent web UI, direct-only by default, with argparse, a `~/.aloelite` root and a `/` redirect.
+- Web: upload progress, preview, rename/move/copy, and clean Ctrl-C port release.
+- `--version` flag.
+- `aloelite fuse ...` / `aloelite web ...` dispatch to the sub-tools before the main parser runs, with lazy imports so a missing FUSE dependency gives a clear message instead of a traceback.
+- FUSE: permission bits persisted via the NODE-6 metadata map, which is what makes a git hook script executable and keeps it so across remounts.
+
+### Changed
+
+- Web UI binds localhost rather than 0.0.0.0 by default, and confirms the PIN.
+
+### Fixed
+
+- **FUSE committed streaming writes at RELEASE, which loses data.**
+  FLUSH is delivered synchronously inside the app's `close()`; RELEASE
+  arrives asynchronously afterward. Committing only at release left a
+  window where an app had closed a file and renamed it into place while
+  the bytes were still uncommitted staging, so a daemon death silently
+  reverted the file. Found in the wild: git's ref update (write
+  `main.lock`, close, rename over `main`) lost a commit's ref while the
+  objects survived. Now committed at FLUSH, then converted to an rw
+  handle, because a dup'd fd may legally write after FLUSH.
+- Packaging: `config/` and `sql/` moved into the package and declared as package-data, so `sql-templates.yaml` and `schema.sql` ship in the wheel. Installed entry points previously resolved specs relative to site-packages and failed with `FileNotFoundError`.

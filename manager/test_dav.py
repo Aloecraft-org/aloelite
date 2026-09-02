@@ -1138,6 +1138,56 @@ def test_a_locked_file_is_still_readable(client):
     assert _propfind(client, "/", depth="1").status_code == 207
 
 
+# -- addressing a volume by name -------------------------------------------
+
+
+def test_volume_can_be_addressed_by_name(client):
+    """A DAV URL is typed once into a Map Network Drive dialog and recognised
+    later; a 32-hex uuid is not something a person can remember or check. The
+    S3 frontend on this same manager already addresses volumes by name."""
+    r = client.open("/dav/vol", method="PROPFIND", headers={"Depth": "0"})
+    assert r.status_code == 207, r.data
+
+
+def test_id_still_wins_over_name(client):
+    """The id is authoritative and tried first, so nothing that worked before
+    resolves differently now."""
+    r = client.open("/dav/v1", method="PROPFIND", headers={"Depth": "0"})
+    assert r.status_code == 207
+
+
+def test_unknown_name_is_still_404(client):
+    r = client.open("/dav/nope", method="PROPFIND", headers={"Depth": "0"})
+    assert r.status_code == 404
+
+
+def test_ambiguous_name_is_refused_not_guessed(tmp_path):
+    """Names are unique only within a filesystem, so two filesystems may each
+    hold a 'shared'. Mounting whichever sorts first would be silently wrong."""
+    store = JsonVolumeStore(str(tmp_path / "store.json"))
+    registry = DirectSessionRegistry()
+    first = _record(vid="a1", name="shared")
+    second = _record(vid="b2", name="shared")
+    registry.unlock(first, None, str(tmp_path / "a.sqlite"))
+    registry.unlock(second, None, str(tmp_path / "b.sqlite"))
+    store.put(first)
+    store.put(second)
+    app = create_app(
+        store, supervisor=None, registry=registry, auth_mode="off", webdav=True
+    )
+    app.testing = True
+    try:
+        r = app.test_client().open(
+            "/dav/shared", method="PROPFIND", headers={"Depth": "0"}
+        )
+        assert r.status_code == 409
+        assert b"a1" in r.data and b"b2" in r.data, "the error must name the ids"
+    finally:
+        registry.lock(first)
+        registry.lock(second)
+        store.close()
+
+
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
