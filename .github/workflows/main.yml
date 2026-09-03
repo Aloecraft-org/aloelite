@@ -167,6 +167,51 @@ jobs:
         print("bundled sqlite", s.sqlite_version, "on Debian 12: OK")
         EOF
 
+  # The manager UI in a real browser. A Flask test client is not a browser:
+  # per-client sessions once passed every API test while being unusable in
+  # one (the cookie was not reliably stored or sent), and two bootstrap modal
+  # races were green here too. script/browser_check.py drives the actual admin
+  # page in two separate browser profiles -- A unlocks an encrypted volume and
+  # writes; B, a fresh profile, sees 'open elsewhere', proves the PIN itself,
+  # and reads what A wrote. That is the only check covering the gap, and it
+  # ran only by hand until now. Playwright drives Chromium over CDP, so this
+  # job wants a browser rather than the WebDriver the Rust job installs.
+  manager-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        pip install playwright
+        playwright install --with-deps chromium
+
+    # ALOELITE_AUTH=cookie is what browser_check.py asserts against: the
+    # per-client session mode the manager defaults to. The volume must be
+    # encrypted for the PIN paths to exist at all.
+    - name: A manager, with an encrypted volume to unlock
+      run: |
+        ALOELITE_ROOT="$RUNNER_TEMP/checkroot" ALOELITE_API_PORT=8437 \
+          ALOELITE_AUTH=cookie aloelite-web &
+        for i in $(seq 1 30); do
+          curl -sf http://127.0.0.1:8437/volumes >/dev/null && break || sleep 1
+        done
+        curl -sf -X POST http://127.0.0.1:8437/volumes \
+          -H 'Content-Type: application/json' -H 'X-Aloelite: 1' \
+          -d '{"name":"vault","encrypted":true,"pin":"s3cret"}'
+
+    - name: Two browser profiles against the admin page
+      run: python script/browser_check.py
+
   # The Rust port (rust/). Two things this job exists to enforce, from before
   # the first line of engine code (doc/DECISIONS.md D-7):
   #   1. aloelite-core builds for ALL THREE targets — native, wasm32-wasip2,
@@ -236,12 +281,37 @@ jobs:
         echo "wasm-bindgen $WBG"
         cargo install wasm-bindgen-cli --version "$WBG" --locked
 
-    # ubuntu-latest ships Firefox and geckodriver. Browser mode is selected by
-    # wasm_bindgen_test_configure!(run_in_browser) in the conformance crate's
-    # tests; the runner is headless unless NO_HEADLESS is set. An empty test
-    # binary passes, which is the guard being armed rather than fired.
+    # The browser and its driver, named rather than inherited. ubuntu-latest
+    # has shipped both, but an image that stopped would take the only
+    # real-browser coverage in this workflow with it, and the failure would
+    # read as a wasm-bindgen problem rather than a missing browser. Installing
+    # them here also makes the job runnable on an image that never had them.
+    - uses: browser-actions/setup-firefox@latest
+    - uses: browser-actions/setup-geckodriver@latest
+    - name: Browser and driver, as installed
+      run: |
+        firefox --version
+        geckodriver --version | head -1
+
+    # Browser mode is selected by wasm_bindgen_test_configure!(run_in_browser)
+    # in the conformance crate's tests (run_in_dedicated_worker for the OPFS
+    # ones, the only place sync access handles exist); the runner is headless
+    # unless NO_HEADLESS is set.
     - name: Conformance in headless Firefox
-      run: cargo test -p aloelite-conformance -p aloelite-store -p aloelite-wasm --target wasm32-unknown-unknown
+      run: |
+        set -o pipefail
+        cargo test -p aloelite-conformance -p aloelite-store -p aloelite-wasm \
+          --target wasm32-unknown-unknown 2>&1 | tee browser-tests.log
+        # An empty test binary passes, so a dropped run_in_browser directive
+        # or a crate that stopped building tests for this target would go
+        # green in silence -- the guard armed but never fired. Count what
+        # actually ran in the browser and hold it to a floor. 143 run today
+        # (94 of them conformance scenarios); raise this when tests are added,
+        # and lower it only on purpose.
+        N=$(sed -n 's/.*test result: ok\. \([0-9]*\) passed.*/\1/p' browser-tests.log \
+            | awk '{s+=$1} END {print s+0}')
+        echo "browser tests passed: $N"
+        test "$N" -ge 140
       env:
         # The unlock-key vectors run Argon2id at the format's pinned factors
         # (64 MiB / 3 / 4) twice, in a debug wasm build. wasm-bindgen-test's

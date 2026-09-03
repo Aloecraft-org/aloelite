@@ -69,4 +69,4 @@ manager until then — one distribution through the 0.4 series, two
 afterwards. Verified by `manager/test_web_files.py`,
 `manager/engine/test_supervisor.py`, `tests/test_direct.py`,
 `tests/test_integration.py`, and the real-browser
-`script/browser_check.py`.
+`script/browser_check.py` (CI's `manager-browser` job).
