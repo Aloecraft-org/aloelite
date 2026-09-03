@@ -192,8 +192,12 @@ jobs:
       with:
         workspaces: rust
 
-    - name: System deps (fuser links libfuse3)
-      run: sudo apt-get update && sudo apt-get install -y libfuse3-dev pkg-config
+    # libfuse3-dev links fuser; fuse3 provides fusermount3, so aloelite-fuse's
+    # live-mount tests (tests/mount.rs) can mount as the unprivileged CI user.
+    # Those tests self-skip if the runner cannot mount FUSE, so this only
+    # widens coverage, never gates the job on the sandbox's mount policy.
+    - name: System deps (fuser links libfuse3; fuse3 for the mount tests)
+      run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3 pkg-config
 
     # rusqlite `bundled` compiles sqlite3.c with cc-rs, which needs a
     # WASI-capable clang and sysroot for wasm32-wasip2. Host clang falls back

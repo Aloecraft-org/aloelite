@@ -288,6 +288,20 @@ module and `.d.ts` with `wasm-bindgen --target web`, so a signature
 TypeScript cannot type fails there. `rust/aloelite-wasm/README.md` has the
 page-side snippet.
 
-**Next:** `aloelite-fuse` — the largest single cost in the port, every row
-of `doc/COMPATIBILITY.md` re-established by hand against a live kernel
-mount — then `aloelite-cli`, whose contract question D-7 leaves open.
+**`aloelite-fuse` re-establishes the compatibility table on a live kernel
+mount.** The daemon is a port of `aloelite/fuse.py` handler for handler, over
+`fuser`: the four-way handle model (streaming read, streaming write, append
+batcher, and a shared per-inode dirty-extent overlay) reproduced whole, all
+engine state behind one mutex so the single connection is never touched
+concurrently, and a background thread renewing the mount lease (ACC-3). The
+dirty-extent overlay is portable and unit-tested against the engine
+(`overlay.rs`); `tests/mount.rs` mounts a real volume and re-establishes the
+`doc/COMPATIBILITY.md` rows — cross-fd coherence, hardlinks, symlinks, fifos,
+`user.*` xattrs, real ownership and nanosecond times, sparse writes, device
+refusal — self-skipping only where the box cannot mount FUSE. `fallocate`,
+`lseek` and `getlk`/`setlk` stay at their defaults, matching the reference
+(D-7's third "Settled since"), so the table did not move. CI installs `fuse3`
+and runs the mount tests on every push.
+
+**Next:** `aloelite-cli` — the last crate, and the one the port has neither a
+contract nor an oracle for (D-7 leaves the CLI's shape open).

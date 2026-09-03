@@ -75,6 +75,16 @@ the implementation rather than describing it.
   test. Integers cross as `BigInt` — timestamps are nanoseconds and do
   not fit a double — and bytes as `Uint8Array`. CI runs the tests
   under Firefox and packages the ES module with `wasm-bindgen`.
+- **`aloelite-fuse`: the Linux FUSE daemon.** A port of
+  `aloelite/fuse.py` over `fuser`, handler for handler, including the
+  write-handle model that keeps a second fd coherent with unflushed
+  writes (the shared per-inode dirty-extent overlay). `doc/COMPATIBILITY.md`
+  is re-established against a live kernel mount by
+  `rust/aloelite-fuse/tests/mount.rs`: hardlinks, symlinks, fifos,
+  `user.*` xattrs, real ownership and nanosecond times, sparse writes,
+  and device-node refusal (D-3). POSIX locks stay kernel-arbitrated per
+  mount, as in the reference; the cross-mount upgrade is D-4. CI
+  installs `fuse3` and runs the mount tests on every push.
 - **Real POSIX metadata.** `uid`/`gid`/`mode` columns, `atime`/`ctime`,
   `link` (hardlinks, with `nlink` derived from active placements rather
   than stored), `mknod` for fifos and sockets, symlinks as a first-class

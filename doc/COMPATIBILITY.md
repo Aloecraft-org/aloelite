@@ -18,6 +18,12 @@ here is aspirational: if a row's behavior regressed, CI would go red. The
 goal is zero *surprising* asterisks — the caveats that remain are stated
 plainly, with the reason.
 
+The Rust daemon (`rust/aloelite-fuse`) re-establishes the same rows against a
+live kernel mount in `rust/aloelite-fuse/tests/mount.rs`, so the table holds
+for both implementations; it makes the same choices on `fallocate`, `lseek`
+and `getlk`/`setlk` (see `doc/DECISIONS.md` D-7), so the caveats below are
+identical.
+
 The structural background for several rows: pyfuse3 exposes no lock,
 fallocate, lseek, or copy_file_range handlers, so those syscalls never reach
 the Python daemon. The kernel fills in per-mount behavior for locks and mmap;

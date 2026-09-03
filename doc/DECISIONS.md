@@ -15,7 +15,7 @@ decision rather than a conversation. Uses the vocabulary of
 | D-4 | POSIX byte-range locks are per mount through FUSE; engine locks arbitrate across mounts; admission defaults to one rw mount per subtree, overlap is an opt-in. | 2026-08-26, amended 08-28 | implemented |
 | D-5 | Hardlinks: a leaf may be placed many times, a placement may carry its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02 | implemented; the record was written after the fact |
 | D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
-| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store shape; wire protocol) | in progress: engine, store and browser surface done; fuse and cli next |
+| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store; wire protocol; fuse) | in progress: engine, store, browser surface and FUSE daemon done; cli next |
 | D-8 | The pack blob format moves to v2 once, carrying uid/gid/mode, xattrs and retention; not atime, ctime or hardlink identity. v1 stays readable forever. | 2026-09-02 | implemented (Python and Rust) |
 
 How to read a record: what was decided, why, what it obliges, and what it
@@ -478,6 +478,29 @@ storage — never what a mount, a lock, or an operation means.
   `internal`, `sqlite`, `busy`, `opfs`, `io` — the surface's own failures
   (`aloelite_wasm::value::EXTRA_CODES`), disjoint from the spec's codes by
   test. Implication: a consumer switching on `code` can be exhaustive.
+
+### Settled since (2026-09-02, when `aloelite-fuse` was written)
+
+- **POSIX byte-range locks stay per-mount; `getlk`/`setlk` are not
+  implemented.** The question was whether the Rust daemon should answer the
+  lock handlers `fuser` exposes (which pyfuse3 did not) and route them to the
+  engine's cross-mount locks. The answer, for this port: no, not yet. The
+  moment a FUSE filesystem claims lock support, the kernel stops doing
+  intra-mount arbitration and hands *all* of it to the daemon — so answering
+  `setlk` means owning the per-mount byte-range logic the kernel gives us for
+  free today, on top of the cross-mount routing. That is a feature (the D-4
+  upgrade), not a port task; doing it half-way would regress the per-mount
+  behaviour the reference has. So `aloelite-fuse` leaves the handlers at
+  their defaults, exactly as pyfuse3 did, and `doc/COMPATIBILITY.md` reads
+  the same for both daemons. Implication: cross-mount lock coherence remains
+  the one open row, tracked at D-4, and the compatibility table did not move.
+- **The write-handle model is ported whole, not redesigned.** The reference's
+  four handle kinds and its one-overlay-per-inode sharing are the hard-won
+  answer to cross-fd coherence (the `git push` incident); `aloelite-fuse`
+  reproduces them (`overlay.rs`, unit-tested against the engine; `fs.rs`).
+  Implication: the coherence rows are re-established by the same behaviour,
+  not a new one, so a divergence would show up as a failing row rather than a
+  silent semantic drift.
 
 ### Not decided here
 

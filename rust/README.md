@@ -69,5 +69,8 @@ suite natively and in a browser: 94 scenarios, every harness, every vector.
 checkpointed to a `BlobStore` blob, and the browser's OPFS pool — and each
 is tested where it runs. `aloelite-wasm` is the browser surface over them:
 `Fs.call(op, args)`, the Worker protocol, and the OPFS pool with its Web
-Lock; `aloelite-wasm/README.md` has the page-side snippet. The fuse and cli
-crates are next. `doc/RUST_PORT.md` "Standing" has the detail.
+Lock; `aloelite-wasm/README.md` has the page-side snippet. `aloelite-fuse`
+mounts a volume as a Linux directory over `fuser`, re-establishing
+`doc/COMPATIBILITY.md` on a live kernel mount (`aloelite-fuse/README.md`).
+The cli crate is the last one. `doc/RUST_PORT.md` "Standing" has the
+detail.

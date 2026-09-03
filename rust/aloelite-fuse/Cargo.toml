@@ -8,12 +8,20 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "aloelite-fuse"
+path = "src/main.rs"
+
 [dependencies]
 aloelite-core = { path = "../aloelite-core" }
 aloelite-store = { path = "../aloelite-store" }
 ego_platform = { workspace = true }
+thiserror = { workspace = true }
 log = { workspace = true }
+libc = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { workspace = true }
-libc = { workspace = true }
+
+[dev-dependencies]
+rusqlite = { workspace = true }

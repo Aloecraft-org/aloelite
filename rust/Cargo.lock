@@ -91,6 +91,8 @@ dependencies = [
  "fuser",
  "libc",
  "log",
+ "rusqlite",
+ "thiserror",
 ]
 
 [[package]]
