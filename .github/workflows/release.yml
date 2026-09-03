@@ -1,12 +1,16 @@
 name: Release
 
 # A `v*` tag builds every format and publishes the GitHub release, with the
-# container image on GHCR. A manual dispatch builds the same artifacts from
-# any ref and, unless `publish` is set, stops there: the dry run that proves
-# the whole matrix before a tag exists (artifacts stay on the run, with a
-# manifest in the job summary). Re-running a tag's release is the dispatch
-# with the tag as `ref` and `publish` on; the release is updated in place and
-# its assets replaced, so a run that died of infrastructure needs no new tag.
+# container image on GHCR. Two other paths build the identical matrix and
+# publish nothing -- the dry run that proves the pipeline before a tag
+# exists, artifacts left on the run with a manifest in the job summary:
+# a push that changes this file (so an edit to the release pipeline tests
+# itself; `paths` filters are not applied to tag pushes, so tags still always
+# run), and a manual dispatch from any ref with `publish` off. Re-running a
+# tag's release is the dispatch with the tag as `ref` and `publish` on; the
+# release is updated in place and its assets replaced, so a run that died of
+# infrastructure needs no new tag. (A dispatch by file name works once the
+# workflow exists on the default branch, which is how GitHub registers it.)
 #
 # What a tag produces, and from where:
 #   Python wheel + sdist          `python -m build`
@@ -24,6 +28,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: ["**"]
+    paths: [".github/workflows/release.yml"]
   workflow_dispatch:
     inputs:
       ref:
@@ -65,7 +71,9 @@ jobs:
         shell: bash
         run: |
           REF="${{ inputs.ref || github.ref }}"
-          PUBLISH="${{ github.event_name == 'push' && 'true' || inputs.publish }}"
+          # Only a tag push publishes; a branch push (this file changed) and
+          # a dispatch without `publish` are dry runs.
+          PUBLISH="${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'true' || (inputs.publish == true && 'true' || 'false') }}"
           case "$REF" in
             refs/tags/v*) TAG="${REF#refs/tags/}" ;;
             v*)           TAG="$REF" ;;

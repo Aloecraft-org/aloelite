@@ -75,10 +75,18 @@ settings, before anonymous pulls work.
 
 ## Proving the matrix before a tag exists
 
-Dispatch `release.yml` from any ref with `publish` off. Every artifact is
-built exactly as a tag would build it and kept on the run, and the
-`manifest` job writes the asset list with sizes to the run summary. Nothing
-is published.
+Two ways, both building every artifact exactly as a tag would and keeping
+it on the run, where the `manifest` job writes the asset list with sizes to
+the run summary; nothing is published:
+
+- **Edit the pipeline.** A push that changes `.github/workflows/release.yml`
+  on any branch dry-runs it, so a change to the release pipeline tests
+  itself. (`paths` filters are not applied to tag pushes, so a tag always
+  runs.)
+- **Dispatch it.** `release.yml` from any ref with `publish` off. GitHub
+  registers a workflow for dispatch by name once it exists on the default
+  branch, so on a feature branch that has not merged yet, the first way is
+  the one that works.
 
 ## Re-running a release
 
