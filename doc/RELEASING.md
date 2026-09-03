@@ -84,13 +84,16 @@ the run summary; nothing is published:
   itself. (`paths` filters are not applied to tag pushes, so a tag always
   runs.)
 - **Dispatch it.** `release.yml` from any ref with `publish` off. GitHub
-  registers a workflow for dispatch by name once it exists on the default
-  branch, so on a feature branch that has not merged yet, the first way is
-  the one that works.
+  accepts a dispatch by file name once the workflow exists on the default
+  branch, and by numeric workflow id (348935098 for this repository, the
+  number in its Actions API URL) as soon as it has run once on any branch,
+  which the self-test push above provides. On a feature branch that has
+  not merged yet, dispatch by id.
 
 ## Re-running a release
 
 A tag pushes once; when its run dies of infrastructure, dispatch
-`release.yml` with the tag as `ref` and `publish` on. The release is updated
-in place and its assets replaced, so no new tag is needed. `publish.yml`
-has the same escape hatch for PyPI.
+`release.yml` (by id while it is not yet on the default branch) with the tag
+as `ref` and `publish` on. The release is updated in place and its assets
+replaced, so no new tag is needed. `publish.yml` has the same escape hatch
+for PyPI.
