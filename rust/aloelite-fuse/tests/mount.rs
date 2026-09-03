@@ -323,16 +323,14 @@ fn user_xattrs_round_trip_and_other_namespaces_are_refused() {
     assert_eq!(get_xattr(&p, "user.test"), Some(b"replaced".to_vec()));
     remove_xattr(&p, "user.test");
     assert_eq!(get_xattr(&p, "user.test"), None); // ENODATA
-    // a non-user namespace is ENOTSUP
+    // a non-user namespace is refused, like the reference's pytest.raises.
+    // The exact errno is the environment's, not ours: the daemon answers
+    // ENOTSUP, but the kernel screens `trusted.*` for CAP_SYS_ADMIN first, so
+    // an unprivileged caller is refused with EPERM before the handler runs.
     let name = CString::new("trusted.evil").unwrap();
     let cp = CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
     let rc = unsafe { libc::setxattr(cp.as_ptr(), name.as_ptr(), c"x".as_ptr().cast(), 1, 0) };
-    assert_eq!(rc, -1);
-    let e = std::io::Error::last_os_error().raw_os_error();
-    assert!(
-        e == Some(libc::ENOTSUP) || e == Some(libc::EOPNOTSUPP),
-        "got {e:?}"
-    );
+    assert_eq!(rc, -1, "a non-user xattr namespace must be refused");
 }
 
 #[test]
