@@ -401,7 +401,9 @@ storage — never what a mount, a lock, or an operation means.
   `Clock`, `CryptoRngCore` entropy, `spawn`/`time`. Its `fs` module is
   deliberately **not** used for volumes (its browser backend is
   `localStorage`, string-typed and quota-bound; its own docs say blobs are
-  the right home for binary state). Dependency form: git, for now.
+  the right home for binary state). Dependency form: git, for now, pinned to
+  the `pre-wasm-bindgen-0.2.127` tag rather than floating on its default
+  branch.
 - `aloecrypt_core` is **aligned with, not depended on**. Its KDFs are not the
   ENC-2 ladder (a hash-iteration `pbkdf`, not Argon2id; HMAC-with-domain, not
   RFC 5869 HKDF), and both are pinned byte-for-byte in

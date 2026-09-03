@@ -500,7 +500,7 @@ dependencies = [
 [[package]]
 name = "ego_platform"
 version = "0.1.2"
-source = "git+https://github.com/Aloecraft-org/ego-platform#04e0e01d9e99e7db421047352303ea4b63cb4fbc"
+source = "git+https://github.com/Aloecraft-org/ego-platform?tag=pre-wasm-bindgen-0.2.127#04e0e01d9e99e7db421047352303ea4b63cb4fbc"
 dependencies = [
  "base64",
  "console_error_panic_hook",

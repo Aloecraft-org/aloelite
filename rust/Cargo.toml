@@ -40,7 +40,16 @@ authors = ["Michael Godfrey <michael@aloecraft.org>"]
 # not dependency: aloecrypt_core's KDFs are not the ENC-2 ladder.
 [workspace.dependencies]
 # --- platform seam (git for now; see doc/RUST_PORT.md) ---
-ego_platform = { git = "https://github.com/Aloecraft-org/ego-platform" }
+# Pinned to the tag ego-platform cut before its wasm-bindgen 0.2.114 -> 0.2.127
+# upgrade -- which is the commit this workspace already resolved to, so the
+# pin changes nothing it builds. Unpinned, one `cargo update` would take that
+# upgrade silently, and it is not a local matter: ego-platform requires
+# wasm-bindgen EXACTLY (`=0.2.114`), so its bump moves this whole graph, and
+# .devcontainer/Dockerfile's WASM_BINDGEN_VERSION does not follow Cargo.lock
+# the way CI does -- the devcontainer would fail the bindgen schema check
+# while CI stayed green. Going to 0.2.127 is a deliberate step: move this
+# pin, bump that ARG, re-run the browser suite.
+ego_platform = { git = "https://github.com/Aloecraft-org/ego-platform", tag = "pre-wasm-bindgen-0.2.127" }
 
 # --- the engine ---
 # `bundled` statically links SQLite on native and WASI — the whole

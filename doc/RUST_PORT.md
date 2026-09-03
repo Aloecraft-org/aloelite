@@ -109,7 +109,10 @@ And what it does **not** inherit, which is where the cost is:
 ## Platform seam: ego-platform
 
 [`ego-platform`](https://github.com/Aloecraft-org/ego-platform) is the
-cross-target abstraction the crates use. Git dependency for now.
+cross-target abstraction the crates use. Git dependency for now, pinned to
+the `pre-wasm-bindgen-0.2.127` tag: ego-platform requires wasm-bindgen
+exactly, so which commit this points at decides the whole graph's version.
+`rust/Cargo.toml` says what moving it costs.
 
 | ego-platform | used for |
 |---|---|
