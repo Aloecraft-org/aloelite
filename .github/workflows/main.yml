@@ -260,3 +260,26 @@ jobs:
           target/wasm32-unknown-unknown/debug/aloelite_wasm.wasm
         test -s target/aloelite-wasm-pkg/aloelite_wasm.d.ts
         grep -q "class Fs" target/aloelite-wasm-pkg/aloelite_wasm.d.ts
+
+    # The CLI's other target, driven for real: a WASI component under
+    # wasmtime with the volume on a preopened host directory. `cargo check`
+    # proves it compiles; this proves it opens a file, writes, and reads it
+    # back through WASI's filesystem, which is the crate's promise.
+    - name: wasmtime, for the WASI CLI
+      uses: bytecodealliance/actions/wasmtime/setup@v1
+      with:
+        version: "v36.0.2"
+    - name: The CLI runs as a WASI component
+      run: |
+        cargo build -p aloelite-cli --target wasm32-wasip2
+        W=$(mktemp -d)
+        echo "hello from wasi" > "$W/in.txt"
+        A="wasmtime run --dir=$W::/work target/wasm32-wasip2/debug/aloelite.wasm"
+        $A -f /work/t.fs
+        $A -f /work/t.fs mkdir -p /docs
+        $A -f /work/t.fs put /work/in.txt /docs/in.txt
+        $A -f /work/t.fs ls -l /docs | grep -q "/docs/in.txt"
+        test "$($A -f /work/t.fs cat /docs/in.txt)" = "hello from wasi"
+        $A -f /work/t.fs get -r /docs /work/out        # /work/out does not exist: it becomes the tree root (cp -r)
+        test "$(cat "$W/out/in.txt")" = "hello from wasi"
+        $A -f /work/t.fs volumes | grep -q "main"

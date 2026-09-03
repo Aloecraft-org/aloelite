@@ -40,6 +40,9 @@ cargo test -p aloelite-conformance -p aloelite-store -p aloelite-wasm \
 cargo build -p aloelite-wasm --target wasm32-unknown-unknown --release
 wasm-bindgen --target web --typescript --out-dir pkg \
   target/wasm32-unknown-unknown/release/aloelite_wasm.wasm      # the ES module a page imports
+cargo build -p aloelite-cli --target wasm32-wasip2 --release
+wasmtime run --dir=.::/work \
+  target/wasm32-wasip2/release/aloelite.wasm -f /work/notebook.fs ls /   # the CLI as a WASI component
 ```
 
 The wasm test run needs `wasm-bindgen-test-runner` at **exactly** the
@@ -72,5 +75,7 @@ is tested where it runs. `aloelite-wasm` is the browser surface over them:
 Lock; `aloelite-wasm/README.md` has the page-side snippet. `aloelite-fuse`
 mounts a volume as a Linux directory over `fuser`, re-establishing
 `doc/COMPATIBILITY.md` on a live kernel mount (`aloelite-fuse/README.md`).
-The cli crate is the last one. `doc/RUST_PORT.md` "Standing" has the
-detail.
+`aloelite-cli` is the `aloelite` command, to the contract in
+`aloelite/config/cli.yaml` that the Python command is held to as well; it
+runs natively and as a WASI component (`aloelite-cli/README.md`). All six
+crates are done. `doc/RUST_PORT.md` "Standing" has the detail.

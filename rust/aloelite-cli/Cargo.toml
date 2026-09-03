@@ -1,6 +1,6 @@
 [package]
 name = "aloelite-cli"
-description = "The `aloelite` command over aloelite-core. Native and wasm32-wasip2 (a WASI component runs under wasmtime with the volume on the host filesystem)."
+description = "The `aloelite` command over aloelite-core, to the contract in aloelite/config/cli.yaml. Native and wasm32-wasip2 (a WASI component under wasmtime, with the volume on the host filesystem)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,19 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "aloelite"
+path = "src/main.rs"
+
 [dependencies]
 aloelite-core = { path = "../aloelite-core" }
 aloelite-store = { path = "../aloelite-store" }
-ego_platform = { workspace = true }
-log = { workspace = true }
+rusqlite = { workspace = true }
+
+# The PIN prompt turns terminal echo off; termios is a Unix thing, and WASI
+# has no controlling terminal to prompt on anyway.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+serde_norway = { workspace = true }

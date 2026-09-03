@@ -85,6 +85,19 @@ the implementation rather than describing it.
   and device-node refusal (D-3). POSIX locks stay kernel-arbitrated per
   mount, as in the reference; the cross-mount upgrade is D-4. CI
   installs `fuse3` and runs the mount tests on every push.
+- **`aloelite-cli`, and a contract for the command.** The `aloelite`
+  command in Rust, verb for verb with `aloelite/cli.py`: the same
+  fifteen verbs, globals, flags, output lines and exit codes, `put -r`
+  / `get -r`, the three PIN sources with a terminal prompt. Porting it
+  wrote the contract the CLI never had, `aloelite/config/cli.yaml`,
+  which `tests/test_cli_contract.py` (Python argparse) and
+  `rust/aloelite-cli/tests/contract.rs` (Rust verb table) now project
+  onto in both directions — a verb or a flag cannot exist in one
+  implementation alone; the file lists the few places the two
+  legitimately read differently. The Rust command also builds for
+  `wasm32-wasip2` and runs under wasmtime with the volume on a
+  preopened host directory; CI drives it there. With this the six
+  crates of the port are complete (D-7).
 - **Real POSIX metadata.** `uid`/`gid`/`mode` columns, `atime`/`ctime`,
   `link` (hardlinks, with `nlink` derived from active placements rather
   than stored), `mknod` for fifos and sockets, symlinks as a first-class

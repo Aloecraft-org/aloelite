@@ -15,7 +15,7 @@ decision rather than a conversation. Uses the vocabulary of
 | D-4 | POSIX byte-range locks are per mount through FUSE; engine locks arbitrate across mounts; admission defaults to one rw mount per subtree, overlap is an opt-in. | 2026-08-26, amended 08-28 | implemented |
 | D-5 | Hardlinks: a leaf may be placed many times, a placement may carry its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02 | implemented; the record was written after the fact |
 | D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
-| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store; wire protocol; fuse) | in progress: engine, store, browser surface and FUSE daemon done; cli next |
+| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store; wire protocol; fuse), 09-03 (cli contract) | implemented: all six crates; every point left open is settled below |
 | D-8 | The pack blob format moves to v2 once, carrying uid/gid/mode, xattrs and retention; not atime, ctime or hardlink identity. v1 stays readable forever. | 2026-09-02 | implemented (Python and Rust) |
 
 How to read a record: what was decided, why, what it obliges, and what it
@@ -320,9 +320,10 @@ question, and it wants its own decision.
 
 ## D-7: The Rust engine is one crate on three targets; storage is the seam, not the engine
 
-**Decided 2026-09-02.** Two of the three points left open below were settled
-the same day, when `aloelite-store` was written, and the browser surface's
-shape when `aloelite-wasm` was; see the two "Settled since" sections.
+**Decided 2026-09-02.** Every point this record left open was settled as the
+crate that owned it was written — the store's shape, the wire protocol, the
+FUSE lock question, and last the CLI's contract; see the four "Settled
+since" sections, dated.
 
 `aloelite-rs` targets native, `wasm32-wasip2` and `wasm32-unknown-unknown` as
 peers. Not native-first with WebAssembly to follow: the moment WebAssembly is
@@ -502,10 +503,32 @@ storage — never what a mount, a lock, or an operation means.
   not a new one, so a divergence would show up as a failing row rather than a
   silent semantic drift.
 
+### Settled since (2026-09-03, when `aloelite-cli` was written)
+
+- **The CLI mirrors the reference verb for verb, and the two now share a
+  written contract.** The question was mirror first or contract first. The
+  answer is both, in that order: the documented surface (README, Getting
+  Started) and `tests/test_cli.py` were already a de-facto contract that
+  scripts rely on, so the Rust command reproduces it — the same fifteen
+  verbs, globals, positionals, flags, output lines and exit codes — and the
+  act of porting wrote the contract down as `aloelite/config/cli.yaml`.
+  That file is asserted from both sides: `tests/test_cli_contract.py`
+  projects the Python argparse tree onto it and
+  `rust/aloelite-cli/tests/contract.rs` projects the Rust verb table, in
+  both directions, the same idiom as the Mount API's projection tests.
+  Implication: a script written against one implementation runs against the
+  other; a verb or a flag cannot exist in one alone; and where the two
+  legitimately read differently — the listing timestamp's zone, metadata
+  key order, no prompt on WASI — the contract's `known_differences` says so,
+  so nobody hunts a bug that is a decision. The plan's "the CLI has no spec"
+  line is retired.
+
 ### Not decided here
 
-- Whether `aloelite-cli` mirrors the Python CLI verb-for-verb or writes its
-  own contract first. The Python CLI has no spec; either answer wants one.
+Nothing remains open in D-7. Follow-ups that came out of the port live
+where they belong: the cross-mount lock upgrade at D-4, the pack
+concealment gap noted under D-8, and the era-1 migration policy in
+`doc/RUST_PORT.md`.
 
 ## D-8: The pack format moves to v2 once, carrying what v1 drops, before any further port writes a pack
 

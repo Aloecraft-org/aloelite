@@ -100,7 +100,8 @@ And what it does **not** inherit, which is where the cost is:
   byte-for-byte and both pass. Vectors are owed before Rust implements pack,
   and the v2 format question (`DECISIONS.md` D-6's neighbours; see the
   "pack format" thread in `HANDOFF-0.4.0rc1.md`) should be settled first.
-- **The CLI has no spec.** 754 lines of Python, no contract, no oracle.
+- **The CLI had no spec.** It now has one, written while porting:
+  `aloelite/config/cli.yaml`, projected from both implementations (D-7).
 - **Era-1 migration** lives in `db.py::_migrate_to_era2` with a Python
   fixture only. `aloelite-rs` may refuse era-1 files and defer to the Python
   tool; that is cheaper and defensible, and wants writing down.
@@ -178,8 +179,8 @@ same.
    in a Worker. The suite runs against each.
 4. **`aloelite-wasm`** — the Worker protocol and the Web Lock.
 5. **`aloelite-fuse`** — the expensive one. Budget it; the oracle is human.
-6. **`aloelite-cli`** — after deciding whether it mirrors Python or writes
-   its own contract.
+6. **`aloelite-cli`** — mirrored verb for verb, with the contract written
+   down and asserted from both sides on the way (D-7).
 
 Postgres and MariaDB are not in this sequence. When they come, prototype the
 dialect seam in Python first, where the 500-test suite can tell you
@@ -303,5 +304,20 @@ refusal — self-skipping only where the box cannot mount FUSE. `fallocate`,
 (D-7's third "Settled since"), so the table did not move. CI installs `fuse3`
 and runs the mount tests on every push.
 
-**Next:** `aloelite-cli` — the last crate, and the one the port has neither a
-contract nor an oracle for (D-7 leaves the CLI's shape open).
+**`aloelite-cli` is the `aloelite` command, to a contract both
+implementations now share.** Fifteen verbs, the same globals, positionals,
+flags, output lines and exit codes as `aloelite/cli.py`, session per
+invocation; `put -r` / `get -r` as a walk over single-node operations with
+cp -r's destination rule; the PIN from `--pin` / `--pin-file` / `--pin-env`
+with a terminal prompt (echo off) when a bare `--pin` asks for one. The
+contract is `aloelite/config/cli.yaml`; `tests/test_cli_contract.py` and
+`rust/aloelite-cli/tests/contract.rs` hold each side to it in both
+directions, and `rust/aloelite-cli/tests/cli.rs` is `tests/test_cli.py`
+ported case for case through the built binary. It builds for
+`wasm32-wasip2` and runs as a component under wasmtime with the volume on a
+preopened host directory; CI builds and drives it there.
+
+**The six crates are done.** What the port leaves as recorded follow-ups,
+not as missing pieces: the cross-mount POSIX lock upgrade (D-4), the pack
+concealment gap (D-8's finding), the era-1 migration policy (above), and the
+Postgres and MariaDB dialects, which were never in this sequence.
