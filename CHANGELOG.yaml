@@ -16,6 +16,13 @@
 #                     nothing else can claim the name. Set it only for a
 #                     one-off, and it is checked against the derivation.
 #   date              ISO date published; null when unreleased.
+#   candidates        Optional. Release candidates cut from this entry
+#                     before the final: a list of {version, date}, each
+#                     version a PEP 440 pre-release of `version` (0.4.0rc1
+#                     of 0.4.0). A candidate's tag is v{candidate}; it is
+#                     published as a GitHub pre-release built from this
+#                     entry's notes, and the entry stays `unreleased` until
+#                     the final ships. doc/RELEASING.md walks a release.
 #   status            released | unreleased | tagged
 #                     `tagged` means the tag exists but no GitHub release
 #                     was published for it.
@@ -56,6 +63,9 @@ releases:
   - version: "0.4.0"
     status: unreleased
     stable: false
+    candidates:
+      - version: "0.4.0rc1"
+        date: "2026-09-03"
     api_version: 2
     summary: |
       **Schema era 2: the break-once release.** A file written by this build
@@ -154,6 +164,17 @@ releases:
         `wasm32-wasip2` and runs under wasmtime with the volume on a
         preopened host directory; CI drives it there. With this the six
         crates of the port are complete (D-7).
+      - |
+        **Releases are built by an action.** Pushing a `v*` tag now produces
+        the GitHub release itself: the Python wheel and sdist, `aloelite`
+        and `aloelite-fuse` for Linux (x86_64 glibc and musl, aarch64),
+        `aloelite` for macOS (both architectures) and Windows, the WASI
+        component, the browser package, a `SHA256SUMS`, and the container
+        image on GHCR — with the release notes rendered from this file and
+        the pre-release flag derived from it. A candidate tag (`v0.4.0rc1`)
+        is recorded here under its entry's `candidates` rather than as an
+        entry of its own. `doc/RELEASING.md` walks a release end to end; the
+        existing PyPI publish is unchanged and still runs on the same tag.
       - |
         **Real POSIX metadata.** `uid`/`gid`/`mode` columns, `atime`/`ctime`,
         `link` (hardlinks, with `nlink` derived from active placements rather

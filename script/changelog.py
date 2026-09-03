@@ -19,7 +19,9 @@ Usage:
   script/changelog.py release-check --tag TAG [--publish]
                                             fail unless TAG is releasable;
                                             prints prerelease= and version=
-                                            for GITHUB_OUTPUT
+                                            for GITHUB_OUTPUT. TAG may be a
+                                            release (v0.4.0) or a candidate
+                                            listed under it (v0.4.0rc1).
 
 Ported from Diluvium's script/changelog.py, minus the release-mirror half
 (aloelite has no mirror, so there is no changelog.json and no mirror flag)
@@ -55,9 +57,23 @@ SECTIONS = [
     ("known_issues", "Known issues"),
 ]
 STATUSES = {"released", "unreleased", "tagged"}
-SCALARS = {"version", "tag", "date", "status", "stable", "latest",
-           "api_version", "summary", "upgrading"}
-KNOWN = SCALARS | {k for k, _ in SECTIONS}
+SCALARS = {
+    "version",
+    "tag",
+    "date",
+    "status",
+    "stable",
+    "latest",
+    "api_version",
+    "summary",
+    "upgrading",
+}
+KNOWN = SCALARS | {k for k, _ in SECTIONS} | {"candidates"}
+
+# A candidate is a PEP 440 pre-release of the entry's X.Y.Z: 0.4.0rc1 of
+# 0.4.0. Its tag is v{candidate}, and it is built from the entry's notes.
+CANDIDATE = re.compile(r"^(\d+\.\d+\.\d+)(a|b|rc)(\d+)$")
+
 
 # A release's tag is v{version}: unlike Diluvium, this repository carries no
 # upstream project's tags, so nothing else can claim the name. An explicit
@@ -65,6 +81,35 @@ KNOWN = SCALARS | {k for k, _ in SECTIONS}
 # one-off can never disagree with itself silently.
 def tag_of(r):
     return r.get("tag") or "v%s" % r["version"]
+
+
+def candidates_of(r):
+    return r.get("candidates") or []
+
+
+def find_tag(doc, tag):
+    """-> (release, candidate or None) for a release tag or a candidate tag
+    listed under a release; (None, None) when nothing claims the tag."""
+    for r in doc["releases"]:
+        if tag_of(r) == tag:
+            return r, None
+        for c in candidates_of(r):
+            if isinstance(c, dict) and "v%s" % c.get("version") == tag:
+                return r, c
+    return None, None
+
+
+def pep440_to_semver(v):
+    """The Python version as Cargo spells it: 0.4.0rc1 -> 0.4.0-rc.1,
+    0.4.0a2 -> 0.4.0-alpha.2, 0.4.0 -> 0.4.0. None when it is not a shape
+    this project uses."""
+    m = re.match(r"^(\d+\.\d+\.\d+)(?:(a|b|rc)(\d+))?$", v)
+    if not m:
+        return None
+    base, kind, n = m.groups()
+    if not kind:
+        return base
+    return "%s-%s.%s" % (base, {"a": "alpha", "b": "beta", "rc": "rc"}[kind], n)
 
 
 def load():
@@ -98,8 +143,10 @@ def validate(doc):
         seen_v.add(v)
 
         if r.get("tag") and r["tag"] != "v%s" % v:
-            bad.append("%s: explicit tag %r is not v%s -- drop it and let it "
-                       "derive, or fix the version" % (where, r["tag"], v))
+            bad.append(
+                "%s: explicit tag %r is not v%s -- drop it and let it "
+                "derive, or fix the version" % (where, r["tag"], v)
+            )
         tag = tag_of(r) if r.get("version") else None
         if tag:
             if tag in seen_t:
@@ -108,8 +155,10 @@ def validate(doc):
 
         status = r.get("status")
         if status not in STATUSES:
-            bad.append("%s: status %r not one of %s"
-                       % (where, status, ", ".join(sorted(STATUSES))))
+            bad.append(
+                "%s: status %r not one of %s"
+                % (where, status, ", ".join(sorted(STATUSES)))
+            )
 
         date = r.get("date")
         if status == "unreleased":
@@ -122,11 +171,40 @@ def validate(doc):
 
         if r.get("api_version") is not None:
             if not isinstance(r["api_version"], int):
-                bad.append("%s: api_version must be an integer schema era"
-                           % where)
+                bad.append("%s: api_version must be an integer schema era" % where)
 
         if r.get("latest"):
             latest.append(r)
+
+        cands = r.get("candidates")
+        if cands is not None:
+            if not isinstance(cands, list):
+                bad.append("%s: candidates must be a list of {version, date}" % where)
+                cands = []
+            seen_c = set()
+            for i, c in enumerate(cands):
+                cw = "%s: candidates[%d]" % (where, i)
+                if not isinstance(c, dict) or not c.get("version"):
+                    bad.append("%s: needs a version" % cw)
+                    continue
+                cm = CANDIDATE.match(str(c["version"]))
+                if not cm:
+                    bad.append(
+                        "%s: %r is not a pre-release like X.Y.ZrcN" % (cw, c["version"])
+                    )
+                elif cm.group(1) != v:
+                    bad.append(
+                        "%s: %r is not a candidate of %s" % (cw, c["version"], v)
+                    )
+                if c["version"] in seen_c:
+                    bad.append("%s: duplicate candidate" % cw)
+                seen_c.add(c["version"])
+                cd = c.get("date")
+                if not cd or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(cd)):
+                    bad.append("%s: needs an ISO yyyy-mm-dd date" % cw)
+                for key in c:
+                    if key not in ("version", "date"):
+                        bad.append("%s: unknown key %r" % (cw, key))
 
         # SCALARS enforced by what they are not: YAML resolves a bare
         # `date: 2026-01-01` to a datetime.date, so an allowlist of scalar
@@ -137,9 +215,11 @@ def validate(doc):
             val = r.get(key)
             if not isinstance(val, (list, tuple, dict, set)):
                 continue
-            bad.append("%s: %s must be a single value, not a %s -- a block "
-                       "scalar is '%s: |', not '%s:' followed by '- |'"
-                       % (where, key, type(val).__name__, key, key))
+            bad.append(
+                "%s: %s must be a single value, not a %s -- a block "
+                "scalar is '%s: |', not '%s:' followed by '- |'"
+                % (where, key, type(val).__name__, key, key)
+            )
 
         for key, _ in SECTIONS:
             items = r.get(key)
@@ -150,20 +230,20 @@ def validate(doc):
                 continue
             for i, item in enumerate(items):
                 if not isinstance(item, str) or not item.strip():
-                    bad.append("%s: %s[%d] must be a non-empty string"
-                               % (where, key, i))
+                    bad.append(
+                        "%s: %s[%d] must be a non-empty string" % (where, key, i)
+                    )
 
     if len(latest) != 1:
-        bad.append("exactly one release must carry 'latest: true' (found %d)"
-                   % len(latest))
+        bad.append(
+            "exactly one release must carry 'latest: true' (found %d)" % len(latest)
+        )
     else:
         r = latest[0]
         if not r.get("stable"):
-            bad.append("release %s is latest but stable is not true"
-                       % r.get("version"))
+            bad.append("release %s is latest but stable is not true" % r.get("version"))
         if r.get("status") != "released":
-            bad.append("release %s is latest but is not released"
-                       % r.get("version"))
+            bad.append("release %s is latest but is not released" % r.get("version"))
 
     for p in doc.get("planned") or []:
         for key in ("title", "summary"):
@@ -172,7 +252,13 @@ def validate(doc):
     return bad
 
 
-def heading(r):
+def heading(r, candidate=None):
+    if candidate is not None:
+        return "## [%s] - %s (release candidate of %s)" % (
+            candidate["version"],
+            candidate["date"],
+            r["version"],
+        )
     date = r.get("date") or "unreleased"
     text = "## [%s] - %s" % (r["version"], date)
     marks = []
@@ -197,12 +283,22 @@ def bullets(items):
     return out
 
 
-def render_release(r):
-    out = [heading(r), ""]
-    meta = ["`%s`" % tag_of(r)]
+def render_release(r, candidate=None):
+    """A release's section; with `candidate`, the same notes under that
+    candidate's heading and tag (what its GitHub pre-release body wants)."""
+    out = [heading(r, candidate), ""]
+    meta = ["`%s`" % ("v%s" % candidate["version"] if candidate else tag_of(r))]
     if r.get("api_version") is not None:
         meta.append("schema era `%d`" % r["api_version"])
     out += [" &middot; ".join(meta), ""]
+    if candidate is None and candidates_of(r):
+        out += [
+            "Release candidates: "
+            + ", ".join(
+                "`v%s` (%s)" % (c["version"], c["date"]) for c in candidates_of(r)
+            ),
+            "",
+        ]
     if r.get("summary"):
         out += [r["summary"].rstrip("\n"), ""]
     for key, title in SECTIONS:
@@ -235,10 +331,10 @@ def render_planned(doc):
 
 def render_md(doc, tag=None):
     if tag:
-        for r in doc["releases"]:
-            if tag_of(r) == tag:
-                return render_release(r)
-        sys.exit("changelog.py: no release with tag %r" % tag)
+        r, c = find_tag(doc, tag)
+        if r is None:
+            sys.exit("changelog.py: no release or candidate with tag %r" % tag)
+        return render_release(r, c)
     head = (
         "# Changelog\n\n"
         "All notable changes to Aloelite are recorded here.\n\n"
@@ -249,8 +345,12 @@ def render_md(doc, tag=None):
         "one era is readable by a build of that era, and an era bump is a\n"
         "migration rather than a compatible change.\n"
     )
-    return head + "\n" + render_planned(doc) + "\n\n".join(
-        render_release(r) for r in doc["releases"])
+    return (
+        head
+        + "\n"
+        + render_planned(doc)
+        + "\n\n".join(render_release(r) for r in doc["releases"])
+    )
 
 
 def read(path):
@@ -284,24 +384,55 @@ def consistency(doc):
     else:
         got = got.group(1)
         if r["status"] == "unreleased":
-            if not re.match(r"^%s([abc]|rc|alpha|beta)?\d*$" % re.escape(version),
-                            got):
-                bad.append("pyproject.toml is %r, which is not %s or a "
-                           "prerelease of it (%s)" % (got, version, where))
+            if not re.match(r"^%s([abc]|rc|alpha|beta)?\d*$" % re.escape(version), got):
+                bad.append(
+                    "pyproject.toml is %r, which is not %s or a "
+                    "prerelease of it (%s)" % (got, version, where)
+                )
+            cands = candidates_of(r)
+            if cands and got != cands[-1].get("version"):
+                bad.append(
+                    "pyproject.toml is %r but the newest candidate "
+                    "listed under %s is %r" % (got, where, cands[-1].get("version"))
+                )
         elif got != version:
-            bad.append("pyproject.toml is %r but %s says %r"
-                       % (got, where, version))
+            bad.append("pyproject.toml is %r but %s says %r" % (got, where, version))
+        # The Rust workspace spells the same version SemVer's way.
+        want = pep440_to_semver(got)
+        cargo = re.search(
+            r"^\[workspace\.package\]\s*\n(?:[^\[].*\n)*?"
+            r"version\s*=\s*\"([^\"]+)\"",
+            read("rust/Cargo.toml"),
+            re.M,
+        )
+        if not cargo:
+            bad.append("rust/Cargo.toml: no [workspace.package] version")
+        elif want is None:
+            bad.append(
+                "pyproject.toml version %r has no SemVer spelling to "
+                "hold rust/Cargo.toml to" % got
+            )
+        elif cargo.group(1) != want:
+            bad.append(
+                "rust/Cargo.toml [workspace.package] version is %r but "
+                "pyproject.toml %r spells %r in SemVer" % (cargo.group(1), got, want)
+            )
 
     try:
         proj = json.loads(read(".technoproj"))["TECHNO_VERSION"]
     except (OSError, ValueError, KeyError) as e:
         bad.append(".technoproj: cannot read TECHNO_VERSION (%s)" % e)
     else:
-        for key, want in (("major", int(major)), ("minor", int(minor)),
-                          ("patch", int(patch))):
+        for key, want in (
+            ("major", int(major)),
+            ("minor", int(minor)),
+            ("patch", int(patch)),
+        ):
             if proj.get(key) != want:
-                bad.append(".technoproj TECHNO_VERSION.%s is %r but %s implies "
-                           "%r" % (key, proj.get(key), where, want))
+                bad.append(
+                    ".technoproj TECHNO_VERSION.%s is %r but %s implies "
+                    "%r" % (key, proj.get(key), where, want)
+                )
 
     # The era the code actually stamps into PRAGMA user_version. An entry
     # claiming an era the build does not write is the mistake worth catching
@@ -312,37 +443,65 @@ def consistency(doc):
         if not era:
             bad.append("aloelite/db.py: no SCHEMA_ERA")
         elif int(era.group(1)) != r["api_version"]:
-            bad.append("db.py SCHEMA_ERA is %s but %s says schema era %s"
-                       % (era.group(1), where, r["api_version"]))
+            bad.append(
+                "db.py SCHEMA_ERA is %s but %s says schema era %s"
+                % (era.group(1), where, r["api_version"])
+            )
     return bad
 
 
 def release_check(doc, tag, publishing):
-    """Gate a release on its changelog entry. -> (problems, outputs)."""
-    entry = next((r for r in doc["releases"] if tag_of(r) == tag), None)
+    """Gate a release on its changelog entry. -> (problems, outputs).
+    A candidate tag (v0.4.0rc1) is releasable while its entry is still
+    unreleased -- that is what a candidate is -- and is always a
+    prerelease; the entry it belongs to must not claim to be stable."""
+    entry, candidate = find_tag(doc, tag)
     if entry is None:
-        return (["no entry in CHANGELOG.yaml for tag %r -- add one before "
-                 "releasing it" % tag], {})
+        return (
+            [
+                "no entry in CHANGELOG.yaml for tag %r -- add one (or list "
+                "it under an entry's candidates) before releasing it" % tag
+            ],
+            {},
+        )
     bad = []
+    if candidate is not None:
+        if entry.get("stable"):
+            bad.append(
+                "%s is a candidate of %s, which is marked stable"
+                % (tag, entry["version"])
+            )
+        return bad, {"prerelease": "true", "version": candidate["version"]}
     if publishing:
         if entry["status"] != "released":
             bad.append(
                 "%s is still status: %s. Before publishing, edit "
                 "CHANGELOG.yaml: set status: released and a date, move "
                 "latest: true onto it, then re-run "
-                "script/changelog.py generate and commit."
-                % (tag, entry["status"]))
+                "script/changelog.py generate and commit." % (tag, entry["status"])
+            )
         if not entry.get("date"):
             bad.append("%s has no date" % tag)
-    return bad, {"prerelease": "false" if entry.get("stable") else "true",
-                 "version": entry["version"]}
+    return bad, {
+        "prerelease": "false" if entry.get("stable") else "true",
+        "version": entry["version"],
+    }
 
 
 def main():
     ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("command", choices=["validate", "render", "latest",
-                                        "generate", "check", "consistency",
-                                        "release-check"])
+    ap.add_argument(
+        "command",
+        choices=[
+            "validate",
+            "render",
+            "latest",
+            "generate",
+            "check",
+            "consistency",
+            "release-check",
+        ],
+    )
     ap.add_argument("format", nargs="?", choices=["md"])
     ap.add_argument("--tag")
     ap.add_argument("--publish", action="store_true")
@@ -360,9 +519,13 @@ def main():
         return 1
 
     if args.command == "validate":
-        print("OK: %d releases, latest=%s"
-              % (len(doc["releases"]),
-                 next(tag_of(r) for r in doc["releases"] if r.get("latest"))))
+        print(
+            "OK: %d releases, latest=%s"
+            % (
+                len(doc["releases"]),
+                next(tag_of(r) for r in doc["releases"] if r.get("latest")),
+            )
+        )
     elif args.command == "render":
         sys.stdout.write(render_md(doc, args.tag))
     elif args.command == "latest":
@@ -373,8 +536,10 @@ def main():
             for p in problems:
                 print("inconsistent: " + p, file=sys.stderr)
             return 1
-        print("OK: pyproject.toml, .technoproj and db.py agree with %s"
-              % doc["releases"][0]["version"])
+        print(
+            "OK: pyproject.toml, .technoproj and db.py agree with %s"
+            % doc["releases"][0]["version"]
+        )
     elif args.command == "release-check":
         if not args.tag:
             sys.exit("changelog.py: release-check needs --tag")
@@ -398,8 +563,10 @@ def main():
             except OSError:
                 current = None
             if current != text:
-                print("stale, re-run 'script/changelog.py generate': "
-                      "CHANGELOG.md", file=sys.stderr)
+                print(
+                    "stale, re-run 'script/changelog.py generate': CHANGELOG.md",
+                    file=sys.stderr,
+                )
                 return 1
             print("OK: CHANGELOG.md matches CHANGELOG.yaml")
     return 0

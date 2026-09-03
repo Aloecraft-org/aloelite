@@ -14,6 +14,8 @@ migration rather than a compatible change.
 
 `v0.4.0` &middot; schema era `2`
 
+Release candidates: `v0.4.0rc1` (2026-09-03)
+
 **Schema era 2: the break-once release.** A file written by this build
 does not open on an older one, by design — `PRAGMA user_version` is 2
 and a newer era is refused rather than half-read. The first open of an
@@ -98,6 +100,16 @@ the implementation rather than describing it.
   `wasm32-wasip2` and runs under wasmtime with the volume on a
   preopened host directory; CI drives it there. With this the six
   crates of the port are complete (D-7).
+- **Releases are built by an action.** Pushing a `v*` tag now produces
+  the GitHub release itself: the Python wheel and sdist, `aloelite`
+  and `aloelite-fuse` for Linux (x86_64 glibc and musl, aarch64),
+  `aloelite` for macOS (both architectures) and Windows, the WASI
+  component, the browser package, a `SHA256SUMS`, and the container
+  image on GHCR — with the release notes rendered from this file and
+  the pre-release flag derived from it. A candidate tag (`v0.4.0rc1`)
+  is recorded here under its entry's `candidates` rather than as an
+  entry of its own. `doc/RELEASING.md` walks a release end to end; the
+  existing PyPI publish is unchanged and still runs on the same tag.
 - **Real POSIX metadata.** `uid`/`gid`/`mode` columns, `atime`/`ctime`,
   `link` (hardlinks, with `nlink` derived from active placements rather
   than stored), `mknod` for fifos and sockets, symlinks as a first-class

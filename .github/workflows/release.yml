@@ -1,0 +1,326 @@
+name: Release
+
+# A `v*` tag builds every format and publishes the GitHub release, with the
+# container image on GHCR. A manual dispatch builds the same artifacts from
+# any ref and, unless `publish` is set, stops there: the dry run that proves
+# the whole matrix before a tag exists (artifacts stay on the run, with a
+# manifest in the job summary). Re-running a tag's release is the dispatch
+# with the tag as `ref` and `publish` on; the release is updated in place and
+# its assets replaced, so a run that died of infrastructure needs no new tag.
+#
+# What a tag produces, and from where:
+#   Python wheel + sdist          `python -m build`
+#   aloelite, aloelite-fuse       Linux x86_64 (glibc, musl), aarch64
+#   aloelite                      macOS arm64 and x86_64, Windows x86_64
+#   aloelite-<v>-wasm32-wasip2.wasm   the CLI as a WASI component
+#   aloelite-wasm-<v>.tar.gz      the browser package (ES module, .wasm, .d.ts)
+#   SHA256SUMS                    over all of the above
+#   ghcr.io/<owner>/aloelite:<v>  the manager image, amd64 + arm64
+#                                 (`:latest` too when the release is stable)
+# The release body is CHANGELOG.yaml's entry for the tag, rendered by
+# script/changelog.py, which also decides `prerelease`. PyPI is publish.yml,
+# unchanged, on the same tag. doc/RELEASING.md walks the whole procedure.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or branch to build (empty: the ref this was dispatched from)"
+        required: false
+        default: ""
+      publish:
+        description: "Publish the GitHub release and push the image (ref must be a v* tag)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # What is being built, and whether it is being published. One place, so
+  # every job below agrees on the version string in asset names.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.plan.outputs.ref }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - id: plan
+        shell: bash
+        run: |
+          REF="${{ inputs.ref || github.ref }}"
+          PUBLISH="${{ github.event_name == 'push' && 'true' || inputs.publish }}"
+          case "$REF" in
+            refs/tags/v*) TAG="${REF#refs/tags/}" ;;
+            v*)           TAG="$REF" ;;
+            *)            TAG="" ;;
+          esac
+          if [[ "$PUBLISH" == "true" && -z "$TAG" ]]; then
+            echo "::error::publish needs a v* tag as ref, got '$REF'"; exit 1
+          fi
+          if [[ -n "$TAG" ]]; then
+            # release-check prints prerelease= and version= for the tag, and
+            # refuses a tag the changelog does not claim (or, when publishing,
+            # a final whose entry is still unreleased).
+            ARGS=(); [[ "$PUBLISH" == "true" ]] && ARGS+=(--publish)
+            python script/changelog.py release-check --tag "$TAG" "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT"
+          else
+            V=$(python -c 'import re; print(re.search(r"^version\s*=\s*\"([^\"]+)\"", open("pyproject.toml").read(), re.M).group(1))')
+            echo "version=$V" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+      - name: Release notes, from the changelog
+        if: steps.plan.outputs.tag != ''
+        run: python script/changelog.py render md --tag "${{ steps.plan.outputs.tag }}" | tee release-notes.md
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.tag != ''
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  python:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-python
+          path: dist/*
+
+  native:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            crates: -p aloelite-cli -p aloelite-fuse
+            bins: aloelite aloelite-fuse
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            crates: -p aloelite-cli -p aloelite-fuse
+            bins: aloelite aloelite-fuse
+            cross: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            crates: -p aloelite-cli -p aloelite-fuse
+            bins: aloelite aloelite-fuse
+            musl: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            crates: -p aloelite-cli
+            bins: aloelite
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            crates: -p aloelite-cli
+            bins: aloelite
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            crates: -p aloelite-cli
+            bins: aloelite.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: release-${{ matrix.target }}
+      # rusqlite `bundled` compiles sqlite3.c, so a cross build needs a C
+      # toolchain for the target, not only a Rust one.
+      - if: matrix.cross
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+      - if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.crates }}
+      - name: Package
+        run: |
+          V="${{ needs.plan.outputs.version }}"
+          T="${{ matrix.target }}"
+          STAGE="aloelite-$V-$T"
+          mkdir -p "$STAGE" ../dist
+          for b in ${{ matrix.bins }}; do cp "target/$T/release/$b" "$STAGE/"; done
+          if [[ "$T" == *windows* ]]; then
+            7z a "../dist/$STAGE.zip" "$STAGE" > /dev/null
+          else
+            tar czf "../dist/$STAGE.tar.gz" "$STAGE"
+          fi
+          ls -la ../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-native-${{ matrix.target }}
+          path: dist/*
+
+  wasm:
+    needs: plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: release-wasm
+      - name: wasi-sdk for the wasip2 target
+        run: |
+          curl -sSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz | sudo tar xz -C /opt
+          SDK=/opt/wasi-sdk-27.0-x86_64-linux
+          echo "CC_wasm32_wasip2=$SDK/bin/clang"                          >> "$GITHUB_ENV"
+          echo "AR_wasm32_wasip2=$SDK/bin/llvm-ar"                        >> "$GITHUB_ENV"
+          echo "CFLAGS_wasm32_wasip2=--sysroot=$SDK/share/wasi-sysroot"   >> "$GITHUB_ENV"
+      - name: wasm-bindgen, at the lockfile's version
+        run: |
+          WBG=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | cut -d'"' -f2)
+          cargo install wasm-bindgen-cli --version "$WBG" --locked
+      - name: The browser package
+        run: |
+          V="${{ needs.plan.outputs.version }}"
+          cargo build --release --locked -p aloelite-wasm --target wasm32-unknown-unknown
+          PKG="aloelite-wasm-$V"
+          wasm-bindgen --target web --typescript --out-dir "$PKG" target/wasm32-unknown-unknown/release/aloelite_wasm.wasm
+          cp aloelite-wasm/README.md "$PKG/"
+          mkdir -p ../dist
+          tar czf "../dist/$PKG.tar.gz" "$PKG"
+      - name: The CLI as a WASI component
+        run: |
+          V="${{ needs.plan.outputs.version }}"
+          cargo build --release --locked -p aloelite-cli --target wasm32-wasip2
+          cp target/wasm32-wasip2/release/aloelite.wasm "../dist/aloelite-$V-wasm32-wasip2.wasm"
+          ls -la ../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-wasm
+          path: dist/*
+
+  # The manager image. Built for amd64 alone on a dry run (a multi-platform
+  # build cannot be loaded locally, only pushed); both platforms when
+  # publishing. GHCR is the GitHub side of images; Docker Hub stays the
+  # Makefile's manual push.
+  image:
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - if: needs.plan.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        shell: bash
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          TAGS="$IMAGE:${{ needs.plan.outputs.version }}"
+          if [[ "${{ needs.plan.outputs.prerelease }}" != "true" ]]; then TAGS="$TAGS,$IMAGE:latest"; fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ needs.plan.outputs.publish == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ needs.plan.outputs.publish == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Dry run: what a tag would have shipped, in the run's summary.
+  manifest:
+    needs: [plan, python, native, wasm]
+    if: needs.plan.outputs.publish != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - shell: bash
+        run: |
+          cd dist && sha256sum * | tee SHA256SUMS
+          {
+            echo "### Release dry run: ${{ needs.plan.outputs.version }} from \`${{ needs.plan.outputs.ref }}\`"
+            echo
+            echo '| asset | size |'; echo '|---|---|'
+            for f in *; do printf '| `%s` | %s |\n' "$f" "$(du -h "$f" | cut -f1)"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    needs: [plan, python, native, wasm, image]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: notes
+      - shell: bash
+        run: cd dist && sha256sum * | tee SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          name: ${{ needs.plan.outputs.tag }}
+          body_path: notes/release-notes.md
+          prerelease: ${{ needs.plan.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.plan.outputs.prerelease != 'true' }}
+          files: dist/*
+          fail_on_unmatched_files: true
