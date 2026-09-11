@@ -59,6 +59,64 @@
 schema: 1
 repo: Aloecraft-org/aloelite
 
+planned:
+  - title: "Benchmark suite and CI benchmark job"
+    branch: claude/aloelite-ci-benchmarks-9ts6he
+    summary: |
+      **`bench/`, a measurement harness, and a CI job that publishes what it
+      finds.** Seventeen suites across four axes -- frontend (`ext4` baseline,
+      `direct`, `fuse`), volume mode (plain / convergent / random), cache
+      state (cold / warm), and size -- with every row carrying all four labels
+      so two numbers can never be averaged into one that means nothing.
+
+      - Throughput, small-file ops, random `pread` p50/p99, and append commit
+        latency, each against an ext4 baseline on the same disk and under one
+        durability barrier for every backend (an ext4 buffered write and a WAL
+        commit are not the same promise).
+      - Space: on-disk over logical for unique / template-cloned / sparse
+        corpora; dedup within a volume and ACROSS volumes, which is the row
+        that confirms per-volume key separation (plain 1.0, encrypted 0.0);
+        bytes per version for a small edit; prune's freed pages reported
+        separately from VACUUM's file shrink.
+      - Scale curves rather than averages: ingest rate against chunk-table
+        depth, lookup and readdir against directory size, and peak RSS for a
+        long stream (measured in a child, since `ru_maxrss` never falls).
+      - Maintenance: unlock and `change_pin` against volume size, verify
+        seconds per GiB shallow and deep, and export/snapshot duration
+        alongside what they do to a concurrent reader's p99.
+      - Robustness: readers and a writer as separate processes with
+        SQLITE_BUSY accounting, and a `kill -9` loop that kills the writer --
+        or the FUSE daemon -- mid-write, then reopens and deep-verifies every
+        file whose write had been confirmed.
+      - `gocryptfs` and `restic` as outside comparators, so the numbers mean
+        something to a reader who has never used aloelite.
+
+      `doc/BENCHMARKS.md` records the method, the findings, and what the
+      harness deliberately does not measure. Nothing asserts: the job fails
+      only when a suite crashes, never on a slow number.
+
+      **Finding worth acting on:** directory size is a scaling wall, and one
+      missing capability causes both halves of it. `name` lives on `node` and
+      `from_id` lives on `edge`, so no index can answer "the child of
+      container C named X" as a seek. `resolve_segment` (and the same shape
+      inside `resolve_path`'s CTE) therefore seeks `edge_from_active` on
+      `from_id` alone and filters the container's whole child set by name,
+      making a single `stat` O(entries in that directory); and
+      `directory_listing` runs that as a correlated scalar subquery per row,
+      making `readdir` O(N^2). Measured: 0.07 ms / 3 ms at 100 entries,
+      0.42 ms / 0.29 s at 1,000, 5.6 ms / 37.6 s at 10,000. Candidate fixes
+      are an index on `node (name)` (additive) or denormalising the name onto
+      the edge, which D-5 already plans -- a schema question that belongs
+      with the era-2 work, not with a benchmark.
+
+      Through a FUSE mount it is worse again, for a second and independent
+      reason: `AloeFS.readdir` calls `Mount.list()` and then skips the first
+      `start` entries, so the kernel's continuation calls recompute the whole
+      listing each time. The FUSE-to-library ratio is therefore not constant
+      -- 9.5x at 1,000 entries, 27x at 5,000, where one `ls` takes 211 s.
+      That half needs no schema change: cache the listing for the life of the
+      open directory handle.
+
 releases:
   - version: "0.4.0"
     status: unreleased

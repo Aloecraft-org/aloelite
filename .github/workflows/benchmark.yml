@@ -1,0 +1,124 @@
+name: Benchmarks
+
+# Informational, never a gate. Throughput is a property of the runner, so a
+# job that failed on a slow number would be reporting on GitHub's hardware
+# rather than on this repository. What IS a failure is a suite that crashes:
+# that is a bug in the benchmark or in the engine, and `python -m bench`
+# exits non-zero for it.
+on:
+  pull_request:
+    branches: [ main, master ]
+  push:
+    branches: [ main, master ]
+  schedule:
+    # Weekly, so the curves have a history to be read against.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: 'Size profile (smoke | ci | full — full needs a real host)'
+        required: false
+        default: 'ci'
+      group:
+        description: 'Suite group (core | deep | external | all)'
+        required: false
+        default: 'all'
+
+jobs:
+  # Every pull request gets this one: it proves the harness still runs and
+  # produces a comparable shape, in about a minute.
+  smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y fuse3 libfuse3-dev pkg-config
+
+    - name: Install aloelite
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[fuse]
+
+    - name: Run the harness at smoke scale
+      run: |
+        python -m bench --scale smoke --group all \
+          --json bench-results/results.json \
+          --markdown bench-results/BENCHMARKS.md
+
+    - name: Publish to the job summary
+      if: always()
+      run: cat bench-results/BENCHMARKS.md >> "$GITHUB_STEP_SUMMARY" || true
+
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: bench-smoke-${{ github.sha }}
+        path: bench-results/
+
+  # The published numbers. Not on pull requests: it wants the whole runner,
+  # and a contended run is a run that measures contention.
+  measure:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y fuse3 libfuse3-dev pkg-config
+
+    # The comparators are what make the numbers mean anything to a reader who
+    # has never used aloelite. Absent, the suite records why and carries on.
+    - name: Install comparators
+      # Optional. A transient apt failure should cost the comparator rows,
+      # not the whole benchmark: the suite records why it produced none.
+      continue-on-error: true
+      run: sudo apt-get install -y gocryptfs restic
+
+    - name: Install aloelite
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[fuse]
+
+    - name: Free disk before the scale curves
+      run: |
+        # The ingest and memory suites want GBs. The hosted image ships with
+        # toolchains this job never touches; df before and after, because a
+        # cleanup step that silently freed nothing is worse than none.
+        df -h /
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+        df -h /
+
+    - name: Run the harness
+      run: |
+        python -m bench \
+          --scale "${{ github.event.inputs.scale || 'ci' }}" \
+          --group "${{ github.event.inputs.group || 'all' }}" \
+          --json bench-results/results.json \
+          --markdown bench-results/BENCHMARKS.md
+
+    - name: Publish to the job summary
+      if: always()
+      run: cat bench-results/BENCHMARKS.md >> "$GITHUB_STEP_SUMMARY" || true
+
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: bench-${{ github.event.inputs.scale || 'ci' }}-${{ github.sha }}
+        path: bench-results/
+        retention-days: 90

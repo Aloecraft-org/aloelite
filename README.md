@@ -37,6 +37,7 @@ A portable encrypted filesystem stored inside one file
     + [API](#api)
     + [Backup Sync Pattern](#backup-sync-pattern)
 - [Security Notes](#security-notes)
+- [Performance](#performance)
 - [Design Background](#design-background)
 - [License](#license)
 
@@ -593,6 +594,29 @@ The rename into place is atomic; a failed export leaves the previous replica int
 **Node metadata** (paths, timestamps, node IDs, directory structure) is stored in plaintext in the SQLite schema. An observer with access to the file can read the filesystem tree even without the PIN. For sensitive deployments, place the backing file on an encrypted volume (LUKS, encrypted home directory, etc.) or use the `pack` primitive to seal a subtree before transport.
 
 The volume manager API is intended for trusted networks. PINs are transmitted in request bodies and never logged or persisted; the derived key is held only for the duration of the mount session.
+
+## Performance
+
+Measured by `python -m bench`, which CI runs on every push and publishes to
+the job summary. Full method, caveats and the rows themselves are in
+[Benchmarks](https://github.com/Aloecraft-org/aloelite/blob/main/doc/BENCHMARKS.md);
+the shape of the answer is:
+
+**Good at** repeated data (a template-cloned tree stores one copy), cheap
+versions (a one-byte edit to a large file costs one chunk, not a file),
+surviving `kill -9` (no confirmed write has been lost in any run, through the
+library or through a killed FUSE daemon), and maintenance that does not grow
+with the volume (unlock and `change_pin` are flat).
+
+**Costs** a multiple of raw file I/O on sequential throughput and per-operation
+on small files — the price of a content-addressed pool inside a transactional
+database. Encryption is close to free on top of that.
+
+**Avoid** large directories. Nothing in the schema can turn "the child of this
+directory named X" into an index seek, so a `stat` costs a scan of the whole
+directory and a `readdir` costs one such scan per entry. At 10,000 entries
+that is 5.6 ms to stat one file and 37 s to list them all. Keep directories
+small until that changes.
 
 ## Design Background
 
