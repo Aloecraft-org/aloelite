@@ -113,6 +113,20 @@ SECTIONS: dict[str, tuple[str, str]] = {
         "`confirmed_then_lost` counts files whose write was confirmed and "
         "which are then missing or fail deep verify. The target is zero.",
     ),
+    "cli": (
+        "The two `aloelite` binaries, verb for verb",
+        "One process per operation, driven through the verb contract in "
+        "`aloelite/config/cli.yaml` that both implementations parse from the "
+        "same table. `startup` is the floor every other row in this table "
+        "sits on; `above_floor_ms` is what the engine actually did.",
+    ),
+    "interop": (
+        "Cross-implementation round trip",
+        "One implementation writes a volume, the other reads it back, both "
+        "directions and both volume modes. `value` is the mismatch count, so "
+        "0 is the pass — a throughput figure would mean nothing if the bytes "
+        "disagreed.",
+    ),
     "external": (
         "Outside comparators",
         "gocryptfs for encrypted FUSE throughput, restic for ingest and "
@@ -139,6 +153,8 @@ DETAIL_COLUMNS: dict[str, tuple[str, ...]] = {
     "concurrency": ("scaling_efficiency", "MiB_s_per_worker", "busy"),
     "durability": ("files_confirmed", "missing_after_crash", "p99_ms"),
     "external": ("elapsed_s", "min", "max"),
+    "cli": ("p99_ms", "startup_floor_ms", "above_floor_ms", "MiB_s"),
+    "interop": ("bytes_match", "write_MiB_s", "read_MiB_s"),
 }
 
 

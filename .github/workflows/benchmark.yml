@@ -48,6 +48,22 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e .[fuse]
 
+    - name: Cache the Rust build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          rust/target
+        key: bench-cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+        restore-keys: bench-cargo-${{ runner.os }}-
+
+    - name: Build the Rust implementation
+      # `rust-fuse` and `rust-cli` are frontends on the same axis as the
+      # Python ones; without the binaries the suites record a skip naming
+      # this command, which is honest but much less interesting.
+      run: cargo build --release --bins --manifest-path rust/Cargo.toml
+
     - name: Run the harness at smoke scale
       run: |
         python -m bench --scale smoke --group all \
@@ -94,6 +110,22 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -e .[fuse]
+
+    - name: Cache the Rust build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          rust/target
+        key: bench-cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+        restore-keys: bench-cargo-${{ runner.os }}-
+
+    - name: Build the Rust implementation
+      # `rust-fuse` and `rust-cli` are frontends on the same axis as the
+      # Python ones; without the binaries the suites record a skip naming
+      # this command, which is honest but much less interesting.
+      run: cargo build --release --bins --manifest-path rust/Cargo.toml
 
     - name: Free disk before the scale curves
       run: |

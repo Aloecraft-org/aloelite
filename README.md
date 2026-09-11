@@ -598,14 +598,16 @@ The volume manager API is intended for trusted networks. PINs are transmitted in
 ## Performance
 
 Measured by `python -m bench`, which CI runs on every push and publishes to
-the job summary. Full method, caveats and the rows themselves are in
+the job summary. Every row is reported per frontend — the library API, both
+FUSE daemons, both `aloelite` binaries — and per volume mode. Full method,
+caveats and the rows themselves are in
 [Benchmarks](https://github.com/Aloecraft-org/aloelite/blob/main/doc/BENCHMARKS.md);
 the shape of the answer is:
 
 **Good at** repeated data (a template-cloned tree stores one copy), cheap
 versions (a one-byte edit to a large file costs one chunk, not a file),
-surviving `kill -9` (no confirmed write has been lost in any run, through the
-library or through a killed FUSE daemon), and maintenance that does not grow
+surviving `kill -9` (6,993 confirmed files across 48 crash rounds, none lost
+or corrupt — through the library and through either killed FUSE daemon), and maintenance that does not grow
 with the volume (unlock and `change_pin` are flat).
 
 **Costs** a multiple of raw file I/O on sequential throughput and per-operation
@@ -615,8 +617,14 @@ database. Encryption is close to free on top of that.
 **Avoid** large directories. Nothing in the schema can turn "the child of this
 directory named X" into an index seek, so a `stat` costs a scan of the whole
 directory and a `readdir` costs one such scan per entry. At 10,000 entries
-that is 5.6 ms to stat one file and 37 s to list them all. Keep directories
+that is 5.6 ms to stat one file and 37 s to list them all — in both
+implementations, since the Rust port inherited the shape. Keep directories
 small until that changes.
+
+**Two implementations, one format.** A volume written by either `aloelite`
+binary reads correctly in the other, plain and encrypted. The Rust CLI starts
+in 1.6 ms against Python's 173 ms, which is most of the difference for
+one-shot commands.
 
 ## Design Background
 

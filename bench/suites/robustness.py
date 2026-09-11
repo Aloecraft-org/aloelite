@@ -45,11 +45,13 @@ import time
 from pathlib import Path
 
 from ..corpus import (
+    FUSE_DAEMONS,
     VOLUME_MODES,
     attach_session,
     block_source,
     engine_session,
     fuse_session,
+    rust_available,
     unmount,
 )
 from ..harness import MiB, Row, Run, each, fuse_available, latency_detail
@@ -94,7 +96,7 @@ def concurrency(run: Run, scratch: Path, cfg: dict) -> None:
                     frontend="direct",
                     volume=mode,
                     n=int(solo["ops"]),
-                    detail=solo,
+                    detail=_numeric(solo),
                     note=f"one {role}, nothing else touching the file",
                 )
             )
@@ -113,7 +115,7 @@ def concurrency(run: Run, scratch: Path, cfg: dict) -> None:
                     volume=mode,
                     n=int(mixed["ops"]),
                     detail={
-                        **mixed,
+                        **_numeric(mixed),
                         "workers": float(workers),
                         "MiB_s_per_worker": per_worker,
                         "aggregate_vs_solo": (
@@ -142,15 +144,45 @@ def concurrency(run: Run, scratch: Path, cfg: dict) -> None:
                     "reader_busy": both["reader"]["busy"],
                     "writer_busy": both["writer"]["busy"],
                     "busy_timeout_ms": 5000.0,
+                    "busy_wait_median_ms": both["writer"].get(
+                        "busy_wait_median_ms", 0.0
+                    ),
+                    "busy_wait_max_ms": both["writer"].get("busy_wait_max_ms", 0.0),
                 },
                 note=(
-                    "operations refused AFTER the 5s busy_timeout expired. "
-                    "Retries inside the timeout are invisible from Python — "
-                    "sqlite3 exposes no busy-handler callback — so they show "
-                    "up as latency in the rows above, not here."
+                    "write operations refused outright. Retries sqlite "
+                    "absorbs are invisible from Python — sqlite3 exposes no "
+                    "busy-handler callback — so they show up as latency in "
+                    "the rows above, not here. `busy_wait_median_ms` says "
+                    "which kind these were: near the 5s busy_timeout means "
+                    "the handler ran and gave up; near zero means sqlite "
+                    "refused immediately, which it does for a deferred "
+                    "transaction upgrading against a moved snapshot and "
+                    "which a longer timeout would therefore not fix. "
+                    "Refusals by message: " + (_reasons_text(both) or "none")
                 ),
             )
         )
+
+
+def _numeric(acc: dict) -> dict:
+    """A Row's detail is numeric columns only; `_reasons` is prose and rides
+    on the note instead."""
+    return {k: v for k, v in acc.items() if isinstance(v, (int, float))}
+
+
+def _reasons_text(totals: dict) -> str:
+    """What the refusals actually SAID, aggregated.
+
+    A count of "SQLITE_BUSY" that never checked the message would happily
+    report an unrelated OperationalError as contention. This is what stops
+    that, and it goes on the row rather than in a log.
+    """
+    merged: dict[str, int] = {}
+    for acc in totals.values():
+        for msg, n in (acc.get("_reasons") or {}).items():
+            merged[msg] = merged.get(msg, 0) + n
+    return "; ".join(f"{n}x {msg!r}" for msg, n in sorted(merged.items()))
 
 
 def _spawn_workers(
@@ -183,6 +215,10 @@ def _spawn_workers(
         acc["mount_retries"] = acc.get("mount_retries", 0.0) + got.get(
             "mount_retries", 0
         )
+        for msg, n in (got.get("reasons") or {}).items():
+            acc.setdefault("_reasons", {})[msg] = (
+                acc.setdefault("_reasons", {}).get(msg, 0) + n
+            )
         acc["s"] = max(acc["s"], got["elapsed"])
     for acc in totals.values():
         acc["MiB_s"] = (acc["bytes"] / MiB) / acc["s"] if acc["s"] else 0.0
@@ -224,7 +260,14 @@ def durability(run: Run, scratch: Path, cfg: dict) -> None:
     """
     targets = [("direct", "plain"), ("direct", "convergent")]
     if fuse_available():
-        targets.append(("fuse", "plain"))
+        # Every daemon separately: "a crashed daemon loses only what was in
+        # flight" is a claim each implementation makes on its own, and a
+        # Python result is not a Rust result.
+        for daemon, impl in FUSE_DAEMONS.items():
+            if impl == "rust" and not rust_available():
+                run.skip(f"durability/{daemon}", "aloelite-fuse (rust) not built")
+                continue
+            targets.append((daemon, "plain"))
     else:
         run.skip("durability/fuse", "needs /dev/fuse, fusermount3 and pyfuse3")
 
@@ -285,9 +328,10 @@ def _round(workdir: Path, frontend: str, mode: str, seed: int) -> dict:
     with engine_session(fs_file, mode, name="crash") as (_fs, _m):
         pass
 
-    if frontend == "fuse":
+    if frontend in FUSE_DAEMONS:
         mp = workdir / "mnt"
-        with fuse_session(fs_file, mode, mp, name="crash") as daemon:
+        impl = FUSE_DAEMONS[frontend]
+        with fuse_session(fs_file, mode, mp, name="crash", impl=impl) as daemon:
             writer = _crash_writer(fs_file, mode, journal, "fuse", mp)
             time.sleep(rng.uniform(*KILL_DELAY_RANGE))
             # Kill the DAEMON: the writer is an ordinary application, and the
@@ -350,7 +394,11 @@ def _audit(fs_file: Path, mode: str, journal: Path) -> dict:
                 "corrupt": 0,
                 "reopen_s": time.perf_counter() - start,
             }
-        with fs.mount(vol, pin=spec["pin"]) as m:
+        # ro: the killed writer's mount row is still in the file (it never
+        # got to unmount), and era 2 refuses a second rw mount over it. The
+        # audit only reads, so declaring that is both correct and what lets
+        # it run at all.
+        with fs.mount(vol, pin=spec["pin"], access="ro") as m:
             for index, digest in claims:
                 path = f"/f{index:06d}.bin"
                 try:
@@ -386,7 +434,12 @@ def _w_reader(fs_file: Path, mode: str, seconds: float, seed: int) -> dict:
 
     rng = random.Random(seed)
     ops = nbytes = busy = 0
-    with attach_session(fs_file, mode, "shared") as (_fs, m, mount_retries):
+    reasons: dict[str, int] = {}
+    with attach_session(fs_file, mode, "shared", access="ro") as (
+        _fs,
+        m,
+        mount_retries,
+    ):
         start = time.perf_counter()
         size = m.stat("/payload.bin").size or 0
         while time.perf_counter() - start < seconds:
@@ -396,12 +449,14 @@ def _w_reader(fs_file: Path, mode: str, seconds: float, seed: int) -> dict:
                     fh.seek(off)
                     nbytes += len(fh.read(MiB))
                 ops += 1
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as exc:
                 busy += 1
+                reasons[str(exc)[:80]] = reasons.get(str(exc)[:80], 0) + 1
     return {
         "ops": ops,
         "bytes": nbytes,
         "busy": busy,
+        "reasons": reasons,
         "mount_retries": mount_retries,
         "elapsed": time.perf_counter() - start,
     }
@@ -411,21 +466,38 @@ def _w_writer(fs_file: Path, mode: str, seconds: float, seed: int) -> dict:
     import sqlite3
 
     ops = nbytes = busy = 0
+    reasons: dict[str, int] = {}
+    busy_waits: list[float] = []
     with attach_session(fs_file, mode, "shared") as (_fs, m, mount_retries):
         start = time.perf_counter()
         i = 0
         while time.perf_counter() - start < seconds:
+            attempt = time.perf_counter()
             try:
                 m.create_entry(f"/w{seed}-{i:06d}.bin", _content(seed * 1000 + i))
                 nbytes += FILE_BYTES
                 ops += 1
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as exc:
+                # Counted BY MESSAGE, and TIMED. "database is locked" is
+                # contention -- but whether it arrived after the 5s
+                # busy_timeout or instantly decides the advice, because
+                # SQLite does not run the busy handler for a deferred
+                # transaction that must upgrade against a moved snapshot.
                 busy += 1
+                busy_waits.append(time.perf_counter() - attempt)
+                reasons[str(exc)[:80]] = reasons.get(str(exc)[:80], 0) + 1
             i += 1
+    import statistics
+
     return {
         "ops": ops,
         "bytes": nbytes,
         "busy": busy,
+        "reasons": reasons,
+        "busy_wait_median_ms": (
+            statistics.median(busy_waits) * 1e3 if busy_waits else 0.0
+        ),
+        "busy_wait_max_ms": max(busy_waits) * 1e3 if busy_waits else 0.0,
         "mount_retries": mount_retries,
         "elapsed": time.perf_counter() - start,
     }

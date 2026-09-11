@@ -341,7 +341,10 @@ def _foreground(
     busy = 0
     try:
         vol = fs.resolve_volume_name("src")
-        with fs.mount(vol, pin=spec["pin"]) as m:
+        # ro: export and snapshot hold rw mounts of their own while they run,
+        # and era 2 refuses an overlapping rw. A reader declaring `ro` is both
+        # accurate and the only way this measures anything.
+        with fs.mount(vol, pin=spec["pin"], access="ro") as m:
             size = m.stat("/payload.bin").size or 0
             if ready is not None:
                 ready.set()

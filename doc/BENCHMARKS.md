@@ -27,6 +27,7 @@ python -m bench.report bench-results/results.json   # json -> markdown
 
 - [Read this before the numbers](#read-this-before-the-numbers)
 - [What is not measured, and why](#what-is-not-measured-and-why)
+- [Two implementations of one format](#two-implementations-of-one-format)
 - [What aloelite is good for](#what-aloelite-is-good-for)
 - [What it costs](#what-it-costs)
 - [What to avoid](#what-to-avoid)
@@ -54,7 +55,7 @@ Every row is labelled with four things, and they are never collapsed:
 
 | label | values | why it cannot be averaged away |
 |---|---|---|
-| frontend | `ext4`, `direct`, `fuse`, `gocryptfs`, `restic` | a kernel mount and a library call are not the same code path |
+| frontend | `ext4`, `direct`, `fuse`, `rust-fuse`, `py-cli`, `rust-cli`, `gocryptfs`, `restic` | a kernel mount and a library call are not the same code path, and neither is a second implementation of either |
 | volume | `plain`, `convergent`, `random` | encryption changes dedup, memory, and read cost |
 | cache | `cold`, `warm` | a warm read reports the page cache's speed, not the filesystem's |
 | n | sample count | a p99 over 200 samples is not a p99 |
@@ -69,21 +70,16 @@ tmpfs is measuring memory, which is why the harness records that too.
 Some of these are runner limits and some are limits of the tree. Saying which
 is which is the point of this section.
 
-**There is no Rust frontend to measure.** The engine is Python, and nothing
-in this tree implements the Mount API in another language. A port has been
-assessed (on `claude/aloelite-rust-port-assessment-732bo0`) but none exists
-here, so a "Rust direct" row would be fabricated rather than measured. The
-frontend axis is therefore `direct` (the library API, in process) and `fuse`
-(a real kernel mount), with `ext4` on the same disk as the baseline that
-separates aloelite's overhead from the hardware's.
-
-That is a gap in the tree, not in the harness. The matrix lives in one place
-— `bench/corpus.py::backends_for` — and a third frontend is a third branch
-there; every suite picks it up without changing, because suites iterate the
-matrix and never name a frontend. The `conformance/` suite is built on the
-same principle for correctness (`doc/HANDOFF-0.4.md`: its scenarios are
-written so as not to be "rewritten for Postgres, SQL Server, Rust, or
-Kotlin"), and this is the performance counterpart of that.
+**There is no in-process Rust `direct` row.** The Rust engine is a library
+(`rust/aloelite-core`) with no Python binding, so it cannot be called from
+this harness the way `aloelite.aloelite.Mount` can. The two Rust frontends
+that *are* measured are the ones a user runs: the FUSE daemon
+(`rust-fuse`, compared against `fuse` over an identical workload) and the
+CLI (`rust-cli`, compared against `py-cli` over the shared verb contract).
+Where a `direct` comparison would be most interesting — raw engine
+throughput with no kernel and no process in the way — read the `put_large`
+and `get_large` CLI rows instead: at multi-MiB sizes the process startup is
+a small and separately-reported part of the total.
 
 **100 GB streams need a real host.** A hosted runner has roughly 25 GB of
 writable disk. `--scale full` sets the streaming size to 100 GiB; `--scale
@@ -117,6 +113,147 @@ serious event.
 benchmark that installs a binary from a vendor URL is a supply-chain
 decision, not a measurement. `restic` covers the ingest-and-dedup category
 and `gocryptfs` covers encrypted FUSE throughput; both come from apt.
+
+## Two implementations of one format
+
+`rust/` is a second implementation of the Mount API: same schema, same
+chunk addressing, same key ladder, same verb contract
+(`aloelite/config/cli.yaml`, which both parse from one table). That makes a
+kind of comparison most projects cannot run — not "this filesystem against
+that one", but **the same design, built twice**, with everything else held
+constant.
+
+The harness treats it as one more entry on the frontend axis rather than a
+special case. `rust-fuse` is an entry in `corpus.FUSE_DAEMONS`, so every
+suite already reports it beside `fuse`; nothing in any suite names a
+daemon. Two comparisons do not fit that matrix and get their own suites:
+`cli` (both binaries, verb for verb) and `interop` (one writes, the other
+reads).
+
+### The formats really are interchangeable
+
+`interop` writes a volume with one implementation and reads it back with
+the other, both directions and both volume modes, and compares the bytes.
+Four of four round trips match. The row reports a mismatch *count*, so 0 is
+the pass — a throughput figure would mean nothing if the bytes disagreed.
+
+| writer -> reader | volume | bytes match |
+|---|---|---|
+| `py-cli` -> `rust-cli` | plain | yes |
+| `py-cli` -> `rust-cli` | convergent | yes |
+| `rust-cli` -> `py-cli` | plain | yes |
+| `rust-cli` -> `py-cli` | convergent | yes |
+
+Convergent is the interesting half: it means both implementations derive the
+same volume key from the same PIN and produce byte-identical ciphertext
+addresses, which is the ENC-2 ladder agreeing end to end.
+
+### The CLI: startup is most of it
+
+One process per operation, which is what a shell script pays. 64 MiB for the
+bulk verbs; `above floor` subtracts that implementation's own startup, so it
+is what the engine did.
+
+| verb | `py-cli` | `rust-cli` | ratio |
+|---|---:|---:|---:|
+| `--version` (startup floor) | 174 ms | **1.5 ms** | **115x** |
+| `ls` | 226 ms _(51 above floor)_ | 6.4 ms _(4.9)_ | 35x _(10x)_ |
+| `stat` | 232 ms _(58)_ | 5.8 ms _(4.2)_ | 40x _(14x)_ |
+| `mkdir -p` | 225 ms _(51)_ | 7.0 ms _(5.5)_ | 32x _(9x)_ |
+| `put` 64 MiB | 163 MiB/s | **577 MiB/s** | 3.5x |
+| `get` 64 MiB | 195 MiB/s | 385 MiB/s | 2.0x |
+
+**Startup is most of a one-shot command.** For `ls`, `stat` and `mkdir` the
+Python binary spends 174 of its ~228 ms before it has looked at the volume —
+interpreter plus imports. The Rust binary spends 1.5 ms. That is a 35-40x
+difference end to end and about a 10x difference in the engine underneath,
+and it is why the floor row is reported rather than folded in: they are
+different problems with different fixes.
+
+**For bulk transfer the engine dominates and the gap narrows**, to 3.5x on
+`put` and 2.0x on `get`. These are also the closest thing here to an engine
+against engine number, since at 64 MiB the process startup is 1% of the
+total.
+
+The practical reading: a script that shells out per file pays Python's
+startup per file, and there the Rust binary is worth two orders of
+magnitude. A process that moves a lot of bytes in one call is paying for the
+engine, and there it is worth 2-3x.
+
+
+### The FUSE daemons: the same handlers, different costs
+
+`rust-fuse` and `fuse` run the identical workload over the identical kernel
+path, so their rows differ only by the daemon. Every suite reports both.
+
+| measurement | `fuse` | `rust-fuse` | |
+|---|---:|---:|---|
+| sequential write, plain | 79 MiB/s | **97 MiB/s** | Rust 1.2x |
+| sequential write, convergent | 63 MiB/s | 49 MiB/s | Python 1.3x |
+| cold sequential read, plain | 167 MiB/s | 158 MiB/s | even |
+| cold sequential read, convergent | 131 MiB/s | 82 MiB/s | Python 1.6x |
+| **warm** sequential read, plain | **4,701 MiB/s** | 289 MiB/s | see below |
+| create, 4 KiB files | 265 /s | **341 /s** | Rust 1.3x |
+| cold `stat` | 1,834 /s | **4,305 /s** | Rust 2.3x |
+| `unlink` | 747 /s | **1,650 /s** | Rust 2.2x |
+| `readdir` | 42 /s | **50 /s** | Rust 1.2x |
+| daemon peak RSS, 1 GiB stream | 56.0 MiB | **14.1 MiB** | Rust 4.0x smaller |
+
+Three things to take from this:
+
+- **Metadata operations are where the Rust daemon wins**: 2.2-2.3x on `stat`
+  and `unlink`, which is the per-operation overhead of the runtime rather
+  than anything about the format.
+- **Memory is the clearest win**: a daemon that streams a gigabyte at
+  14.1 MiB against 56.0 MiB. Both are bounded — that is the streaming claim
+  holding in both — but the constant differs by 4x.
+- **Bulk throughput is a wash, and encryption is not.** Writes and cold
+  reads are within ~20% on plain volumes, but on convergent volumes the
+  Python daemon is ahead (131 vs 82 MiB/s on cold reads). One run on one
+  host; before drawing a conclusion from it, run `--suite throughput` on the
+  hardware you care about.
+
+The warm-read row is not a throughput difference. It is the next section.
+
+
+### One difference worth fixing: the Rust daemon disables the page cache
+
+The largest single gap between the daemons is not throughput, it is caching,
+and it is one line.
+
+`aloelite-fuse` answers `open` with `fuser::FopenFlags::empty()`
+(`rust/aloelite-fuse/src/fs.rs`). Without `FOPEN_KEEP_CACHE` the kernel
+invalidates a file's page cache on every open, so **no read through the Rust
+mount is ever served from cache.** The Python daemon gets
+`keep_cache = True`, which is pyfuse3's default, and keeps it.
+
+Four consecutive reads of the same 16 MiB file, no cache dropped between
+them:
+
+| read | `fuse` | `rust-fuse` |
+|---:|---:|---:|
+| 1st | 280 MiB/s | 257 MiB/s |
+| 2nd | 3,723 MiB/s | 284 MiB/s |
+| 3rd | 5,036 MiB/s | 273 MiB/s |
+| 4th | 5,360 MiB/s | 266 MiB/s |
+
+Cold, the two daemons are within 10% of each other — the Rust engine is doing
+its job. Warm, the Python daemon is **20x faster**, and the Rust one is flat
+because every read is still a round trip to the daemon. That is why
+`rust-fuse` warm rows in the throughput table look anomalously close to its
+cold rows: there is no warm path.
+
+This is a behavioural difference, not necessarily a bug — `KEEP_CACHE` is
+the flag that makes a mount cache-coherent with itself but not with
+out-of-band writers, and the reference daemon's own comments treat cache
+coherence as a deliberate choice. But the reference chose to keep the cache
+and the port did not, which looks like an inherited default rather than a
+decision. Worth an explicit one either way.
+
+(While confirming this: the comment at `aloelite/fuse.py:30` describes
+`keep_cache=False` as "the pyfuse3 default". The default is `True`, which is
+what the measurements show the Python daemon actually getting.)
+
 
 ## What aloelite is good for
 
@@ -166,61 +303,67 @@ imports — 27 MiB of working set. At 64 MiB streamed the same measurement was
 is 105 MiB, because Argon2id's `memory_cost` is 64 MiB, and streaming 1 GiB
 on top of it moved RSS by **0.3 MiB**.
 
-**Surviving `kill -9`.** The durability suite kills the writing process — or,
-for the mount, the FUSE daemon itself — at a random point during writes, then
-reopens the volume and deep-verifies every file whose write had been
-confirmed. Across 36 rounds (12 each for `direct`/plain, `direct`/convergent
-and `fuse`/plain) covering **5,370 confirmed files, none was missing and none
-failed deep verify**. Reopening a volume killed mid-write took 129 ms (plain),
-194 ms (convergent) and 69 ms (through a fresh mount) at p50, deep verify
-included.
+**Surviving `kill -9`, in every frontend and both implementations.** The
+durability suite kills the writing process — or, for a mount, the FUSE daemon
+itself — at a random point during writes, then reopens the volume and
+deep-verifies every file whose write had been confirmed. Across 48 rounds
+covering **6,993 confirmed files, none was missing and none failed deep
+verify**:
+
+| frontend | rounds | files confirmed | lost or corrupt | reopen p50 |
+|---|---:|---:|---:|---:|
+| `direct`, plain | 12 | 2,485 | **0** | 140 ms |
+| `direct`, convergent | 12 | 1,785 | **0** | 238 ms |
+| `fuse`, plain | 12 | 1,203 | **0** | 92 ms |
+| `rust-fuse`, plain | 12 | 1,520 | **0** | 110 ms |
+
+Reopen includes a full deep verify of the volume the crash left behind.
 
 **Maintenance that does not scale with the volume.** Unlock and `change_pin`
 touch the key ladder and nothing else. Mounting an encrypted volume took
 74 ms at 1 MiB and 84 ms at 64 MiB; `change_pin` took 134 ms and 127 ms. The
 cost is Argon2id at the shipped parameters (t=3, m=64 MiB, p=4) and nothing
-else. An unencrypted mount is 0.37 ms, which is the contrast that shows the
-74 ms is all key derivation.
+else. An unencrypted mount is 0.5 ms, which is the contrast that shows the
+79 ms is all key derivation.
 
 ## What it costs
 
 The engine is a content-addressed chunk pool inside a transactional database.
 That is a real cost on the paths where a plain file would simply be a plain
 file, and the ext4 baseline row in every table is there to price it. One
-run, one 4-vCPU host, 64 MiB streamed, median of three rounds, every row
-under the same durability barrier:
+run, one 4-vCPU host, sqlite 3.45.1 in WAL at `synchronous=FULL`, 1 MiB
+chunks, 64 MiB streamed, median of three rounds, every row under the same
+durability barrier:
 
 | | seq write | cold seq read | create (4 KiB files) | 4 KiB `pread` p50 |
 |---|---:|---:|---:|---:|
-| ext4 (baseline) | 157 MiB/s | 479 MiB/s | 3,374 /s | 0.057 ms |
-| `direct`, plain | 84 MiB/s | 1,196 MiB/s | 758 /s | 0.41 ms |
-| `direct`, convergent | 77 MiB/s | 744 MiB/s | 765 /s | 0.84 ms |
-| `fuse`, plain | 60 MiB/s | 181 MiB/s | 264 /s | 0.95 ms |
-| `fuse`, convergent | 57 MiB/s | 103 MiB/s | 252 /s | 2.0 ms |
-| gocryptfs (comparator) | 190 MiB/s | 1,070 MiB/s | — | — |
+| ext4 (baseline) | 188 MiB/s | 2,399 MiB/s | 3,314 /s | 0.05 ms |
+| `direct`, plain | 104 MiB/s | 1,584 MiB/s | 1,509 /s | 0.39 ms |
+| `direct`, convergent | 85 MiB/s | 617 MiB/s | 1,395 /s | 0.85 ms |
+| `fuse`, plain | 79 MiB/s | 167 MiB/s | 265 /s | 0.93 ms |
+| `fuse`, convergent | 63 MiB/s | 131 MiB/s | 259 /s | 1.41 ms |
+| `rust-fuse`, plain | 97 MiB/s | 158 MiB/s | 341 /s | 0.79 ms |
+| `rust-fuse`, convergent | 49 MiB/s | 82 MiB/s | 326 /s | 1.78 ms |
 
 Read the columns, not the cells:
 
-- **Sequential write** costs about 2x raw file I/O through the library and
-  about 2.6x through a mount. **Encryption is close to free on top of that**
-  — 84 to 77 MiB/s — because the cost is dominated by chunking and sqlite,
-  not by ChaCha20-Poly1305. gocryptfs, which writes ordinary files into
-  ext4, is faster than either; that gap is the database, not the crypto.
-- **Small-file creates** cost ~4.5x ext4 through the library and ~13x
-  through the mount. The engine pays a transaction per create; the mount
-  pays that plus the kernel round trip.
+- **Sequential write** costs about 1.8x raw file I/O through the library and
+  2-2.4x through a mount. **Encryption is the larger cost of the two** here:
+  `direct` drops 104 -> 85 MiB/s, and the mounts drop further.
+- **Small-file creates** cost ~2.2x ext4 through the library and ~10-12x
+  through a mount. The engine pays a transaction per create; the mount pays
+  that plus the kernel round trip.
 - **Random reads pay a whole chunk.** A 4 KiB `pread` and a 64 KiB `pread`
-  cost almost the same (0.41 ms vs 0.43 ms on `direct`/plain), because both
-  fetch the 1 MiB chunk containing the offset and, on an encrypted volume,
-  decrypt it. Effective bandwidth at 4 KiB is therefore about a sixteenth of
-  the bandwidth at 64 KiB: 8 MiB/s against 119 MiB/s. If the workload is
-  `qemu-img` against a mounted image, **chunk size is the knob that
-  matters** — and it is fixed per volume at creation (CV-1), so it is a
+  cost almost the same, because both fetch the 1 MiB chunk containing the
+  offset and, on an encrypted volume, decrypt it. Effective bandwidth at
+  4 KiB is therefore about a sixteenth of the bandwidth at 64 KiB. If the
+  workload is `qemu-img` against a mounted image, **chunk size is the knob
+  that matters** — and it is fixed per volume at creation (CV-1), so it is a
   decision, not a tuning.
 - **Cold reads through `direct` flatter themselves** and the figures say so:
-  1,196 MiB/s is above the ext4 baseline because sqlite is returning pages
-  the kernel had not been asked to forget. See the caveat on cold-cache
-  symmetry above.
+  1,584 MiB/s is close to the ext4 baseline because sqlite is returning
+  pages the kernel had not been asked to forget. See the caveat on
+  cold-cache symmetry above.
 - **Unlocking an encrypted volume costs ~64 MiB of RSS**, because that is
   Argon2id's `memory_cost`. The `peak_rss_baseline` row exists so that this
   is subtracted rather than blamed on the streaming path.
@@ -275,16 +418,24 @@ Measured on a 4-vCPU CI-class host, one directory per size:
 Ten thousand entries is a mail spool, a `node_modules`, or a month of daily
 files — not an abusive case.
 
-**Through the mount it is worse again, and for a second, separate reason.**
-`AloeFuse.readdir(inode, start, token)` in `aloelite/fuse.py` calls
-`self.m.list(...)` — the whole O(N²) listing — and then skips the first
-`start` entries. The kernel calls `readdir` repeatedly with a rising `start`
-until the directory is exhausted, because one reply buffer holds only so many
-entries, so the full listing is recomputed on every continuation call. That
-is why the FUSE-to-library ratio is not a constant: 9.5x at 1,000 entries,
-27x at 5,000. This one is fixable without touching the schema — cache the
-listing for the life of the open directory handle instead of rebuilding it
-per call.
+**Through a mount it is worse again, and for a second, separate reason —
+in both daemons.** `AloeFuse.readdir(inode, start, token)` in
+`aloelite/fuse.py` calls `self.m.list(...)` — the whole O(N²) listing — and
+then skips the first `start` entries. The kernel calls `readdir` repeatedly
+with a rising `start` until the directory is exhausted, because one reply
+buffer holds only so many entries, so the full listing is recomputed on
+every continuation call. That is why the FUSE-to-library ratio is not a
+constant: 9.5x at 1,000 entries, 27x at 5,000.
+
+`rust/aloelite-fuse/src/fs.rs` does the same thing — `ops::list(...)` per
+call, then `.enumerate()` and skip to `offset`, plus a `stat_by_id` per
+entry. The port is faithful handler-for-handler, and it inherited this. So
+the `dir_scale` suite measures both daemons: the constant factor differs,
+the shape does not.
+
+This half is fixable without touching the schema, in either language: cache
+the listing for the life of the open directory handle instead of rebuilding
+it per call.
 
 The harness will not sit through the worst of these. `dir_scale` fits the
 growth exponent from the last two measurements and skips a size it projects
@@ -300,22 +451,22 @@ covering index. Which is right is a schema question, and it belongs with the
 era-2 work rather than with a benchmark.
 
 **Maintenance while tail latency matters.** Export and snapshot are both
-fast — 256 MiB exported in 2.0 s, snapshotted in 0.64 s — and neither moved a
-concurrent reader's p50 measurably (0.57 ms against a 0.57 ms control). The
+fast — 256 MiB exported in 1.9 s, snapshotted in 0.65 s — and neither moved a
+concurrent reader's p50 measurably (0.56 ms against a 0.52 ms control). The
 tail is a different matter, and it is not uniform:
 
 | maintenance op | foreground p50 | foreground p99 vs control |
 |---|---:|---:|
-| export to another file, plain | 0.58 ms | 1.25x |
-| snapshot within the same file, plain | 0.83 ms | **9.5x** |
-| export, convergent | 1.00 ms | 1.04x |
-| snapshot, convergent | 1.01 ms | 1.04x |
+| export to another file, plain | 0.56 ms | 1.27x |
+| snapshot within the same file, plain | 0.71 ms | **23x** |
+| export, convergent | 0.96 ms | 1.20x |
+| snapshot, convergent | 0.98 ms | 1.11x |
 
 The shape that makes sense of this is that a snapshot writes into the *same*
 file it is reading, so it contends for the one write lock a WAL database has,
 while an export writes elsewhere. But the convergent snapshot did not
 reproduce the spike, and each cell here is a single observation — so read the
-9.5x as "the tail can move by most of an order of magnitude", not as a
+23x as "the tail can move by an order of magnitude or more", not as a
 constant. If a snapshot's tail matters to you, measure it on your data:
 `python -m bench --suite transfer`.
 

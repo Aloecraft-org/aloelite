@@ -183,7 +183,12 @@ def _fmt_row(r: Row) -> str:
     labels = " ".join(x for x in (r.frontend, r.volume, r.cache) if x != "-")
     detail = ""
     if r.detail:
-        detail = "  [" + " ".join(f"{k}={v:.4g}" for k, v in r.detail.items()) + "]"
+        # Tolerant on purpose: a detail value that is not a number is a bug in
+        # the suite, not a reason to take the whole run down at print time.
+        parts = []
+        for k, v in r.detail.items():
+            parts.append(f"{k}={v:.4g}" if isinstance(v, (int, float)) else f"{k}={v}")
+        detail = "  [" + " ".join(parts) + "]"
     return f"{r.metric:<28} {r.value:12.4g} {r.unit:<7} {labels:<26}{detail}"
 
 

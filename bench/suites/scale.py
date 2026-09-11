@@ -39,11 +39,13 @@ import sys
 from pathlib import Path
 
 from ..corpus import (
+    FUSE_DAEMONS,
     VOLUME_MODES,
     block_source,
     engine_session,
     fuse_session,
     on_disk_bytes,
+    rust_available,
 )
 from ..harness import (
     MiB,
@@ -345,31 +347,37 @@ def memory(run: Run, scratch: Path, cfg: dict) -> None:
         run.skip("memory/fuse", "needs /dev/fuse, fusermount3 and pyfuse3")
         return
     # The daemon's memory, not the caller's: a FUSE write is bounded by what
-    # the daemon holds, and VmHWM is the only place that shows up.
-    mp = scratch / "mem-mnt"
-    fs_file = scratch / "mem-fuse.fs"
-    with fuse_session(fs_file, "plain", mp) as proc:
-        target = mp / "stream.bin"
-        elapsed = timed(lambda: _write_plain(target, mb))
-        hwm = peak_rss_pid(proc.pid)
-    run.add(
-        Row(
-            suite="memory",
-            metric="peak_rss_write",
-            unit="bytes",
-            value=float(hwm),
-            frontend="fuse",
-            volume="plain",
-            n=1,
-            detail={
-                "stream_MiB": float(mb),
-                "rss_MiB": hwm / MiB,
-                "elapsed_s": elapsed,
-                "MiB_s": rate(mb * MiB, elapsed),
-            },
-            note="VmHWM of the aloelite-fuse daemon, not of the writer",
+    # the daemon holds, and VmHWM is the only place that shows up. Both
+    # daemons, because "bounded by dirty bytes" is a claim each makes
+    # separately and a Python floor is not a Rust floor.
+    for daemon, impl in FUSE_DAEMONS.items():
+        if impl == "rust" and not rust_available():
+            run.skip(f"memory/{daemon}", "aloelite-fuse (rust) not built")
+            continue
+        mp = scratch / f"mem-mnt-{daemon}"
+        fs_file = scratch / f"mem-{daemon}.fs"
+        with fuse_session(fs_file, "plain", mp, impl=impl) as proc:
+            target = mp / "stream.bin"
+            elapsed = timed(lambda: _write_plain(target, mb))
+            hwm = peak_rss_pid(proc.pid)
+        run.add(
+            Row(
+                suite="memory",
+                metric="peak_rss_write",
+                unit="bytes",
+                value=float(hwm),
+                frontend=daemon,
+                volume="plain",
+                n=1,
+                detail={
+                    "stream_MiB": float(mb),
+                    "rss_MiB": hwm / MiB,
+                    "elapsed_s": elapsed,
+                    "MiB_s": rate(mb * MiB, elapsed),
+                },
+                note="VmHWM of the daemon process, not of the writer",
+            )
         )
-    )
 
 
 def _write_plain(target: Path, mb: int) -> None:

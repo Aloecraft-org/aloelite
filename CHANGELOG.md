@@ -17,10 +17,20 @@ migration rather than a compatible change.
 Not on `main`. Lives on `claude/aloelite-ci-benchmarks-9ts6he`.
 
 **`bench/`, a measurement harness, and a CI job that publishes what it
-finds.** Seventeen suites across four axes -- frontend (`ext4` baseline,
-`direct`, `fuse`), volume mode (plain / convergent / random), cache
-state (cold / warm), and size -- with every row carrying all four labels
-so two numbers can never be averaged into one that means nothing.
+finds.** Nineteen suites across four axes -- frontend (`ext4` baseline,
+`direct`, both FUSE daemons, both `aloelite` binaries), volume mode
+(plain / convergent / random), cache state (cold / warm), and size --
+with every row carrying all four labels so two numbers can never be
+averaged into one that means nothing.
+
+Because the tree now holds two implementations of one format, the
+frontend axis is also an implementation axis: `rust-fuse` is an entry
+in the daemon table, so every suite reports it beside `fuse` without
+naming it. Two comparisons get their own suites -- `cli` (both
+binaries over the shared verb contract, with the process-startup floor
+measured separately) and `interop` (one implementation writes a volume,
+the other reads it back, both directions and both volume modes, bytes
+compared).
 
 - Throughput, small-file ops, random `pread` p50/p99, and append commit
   latency, each against an ext4 baseline on the same disk and under one
@@ -38,9 +48,11 @@ so two numbers can never be averaged into one that means nothing.
   seconds per GiB shallow and deep, and export/snapshot duration
   alongside what they do to a concurrent reader's p99.
 - Robustness: readers and a writer as separate processes with
-  SQLITE_BUSY accounting, and a `kill -9` loop that kills the writer --
-  or the FUSE daemon -- mid-write, then reopens and deep-verifies every
-  file whose write had been confirmed.
+  SQLITE_BUSY accounting (counted by message and timed, so a refusal
+  that arrived instantly is not reported as a timeout), and a `kill -9`
+  loop that kills the writer -- or EITHER FUSE daemon -- mid-write, then
+  reopens and deep-verifies every file whose write had been confirmed.
+  6,993 confirmed files over 48 rounds, none lost or corrupt.
 - `gocryptfs` and `restic` as outside comparators, so the numbers mean
   something to a reader who has never used aloelite.
 
@@ -62,13 +74,24 @@ are an index on `node (name)` (additive) or denormalising the name onto
 the edge, which D-5 already plans -- a schema question that belongs
 with the era-2 work, not with a benchmark.
 
-Through a FUSE mount it is worse again, for a second and independent
-reason: `AloeFS.readdir` calls `Mount.list()` and then skips the first
-`start` entries, so the kernel's continuation calls recompute the whole
-listing each time. The FUSE-to-library ratio is therefore not constant
--- 9.5x at 1,000 entries, 27x at 5,000, where one `ls` takes 211 s.
-That half needs no schema change: cache the listing for the life of the
-open directory handle.
+Through a mount it is worse again, for a second and independent reason,
+and in BOTH daemons: `AloeFuse.readdir` calls `Mount.list()` and then
+skips the first `start` entries, so the kernel's continuation calls
+recompute the whole listing each time; `aloelite-fuse`'s `readdir` is a
+faithful handler-for-handler port and does the same, plus a
+`stat_by_id` per entry. The FUSE-to-library ratio is therefore not
+constant -- 9.5x at 1,000 entries, 27x at 5,000, where one `ls` takes
+211 s. That half needs no schema change in either language: cache the
+listing for the life of the open directory handle.
+
+**Second finding, Rust side:** `aloelite-fuse` replies to `open` with
+`FopenFlags::empty()`, so the kernel invalidates a file's page cache on
+every open and no read is ever served from cache. The Python daemon
+gets `keep_cache = True` (pyfuse3's default) and its repeat reads
+accelerate about 20x -- measured at 279 -> 5,359 MiB/s over four reads
+of the same file, against a flat ~270 MiB/s for the Rust daemon. The
+comment in `aloelite/fuse.py` describing `keep_cache=False` as "the
+pyfuse3 default" is also wrong: the default is True.
 
 ## [0.4.0] - unreleased (prerelease)
 

@@ -5,16 +5,24 @@ The two things every suite needs: somewhere to put bytes (a backend) and
 bytes with a known shape (a corpus).
 
 A backend is the frontend-under-test reduced to the handful of operations
-the suites actually time. Two exist, because two ship: the Python library
-API (`direct`) and a real kernel mount (`fuse`). `ext4` is the same POSIX
-backend pointed at a plain directory on the same disk, which is how a row
-gets a baseline rather than an absolute number nobody can place.
+the suites actually time. Four ship: the Python library API (`direct`), the
+Python FUSE daemon (`fuse`), the Rust FUSE daemon (`rust-fuse`), and `ext4`
+-- the same POSIX backend pointed at a plain directory on the same disk,
+which is how a row gets a baseline rather than an absolute number nobody can
+place.
+
+`fuse` and `rust-fuse` are the interesting pair: the same kernel path, the
+same workload, the same on-disk format, two implementations of the Mount
+API. Nothing in any suite distinguishes them, which is the point -- a
+difference in their rows is a difference between the daemons and nothing
+else.
 
 Surface
 -------
 Entry points
   engine_session(...)      an open Aloelite + Mount for a volume mode
-  fuse_session(...)        a live kernel mount, unmounted on exit
+  fuse_session(...)        a live kernel mount (either daemon), unmounted on exit
+  rust_bin(...)            locate a built Rust binary, or None
   posix_backend(path)      ext4 / fuse / gocryptfs, all the same POSIX ops
   backends_for(...)        the (frontend, volume) matrix a suite iterates
   block_source(...)        streaming corpus bytes, never materialized whole
@@ -23,14 +31,17 @@ Entry points
 
 Configurable values
   VOLUME_MODES     plain | convergent | random, and what each means
+  FUSE_DAEMONS     frontend name -> how to launch that daemon
+  RUST_BIN_DIRS    where a built Rust binary is looked for
   MOUNT_WAIT_S     how long a FUSE mount gets to appear
   BENCH_PIN        the PIN encrypted benchmark volumes use
   STREAM_BLOCK     the unit of every streaming read and write here
 
 Fan-out points
-  VOLUME_MODES is the volume axis. Backend is the frontend axis and has
-  exactly two implementations, EngineBackend and PosixBackend; a third
-  frontend is a third entry in `backends_for` and nothing else.
+  VOLUME_MODES is the volume axis; FUSE_DAEMONS is the mount axis. Backend
+  has two implementations, EngineBackend and PosixBackend -- every mounted
+  frontend is a PosixBackend over a different daemon, so adding one is an
+  entry in FUSE_DAEMONS and a name in `backends_for`.
 """
 
 from __future__ import annotations
@@ -51,6 +62,24 @@ from .harness import MiB
 BENCH_PIN = b"benchmark-pin-not-a-secret"
 MOUNT_WAIT_S = 30.0
 STREAM_BLOCK = 4 * MiB
+
+# Where a built Rust binary is looked for, in order. $ALOELITE_RUST_BIN_DIR
+# wins, so a CI job that builds elsewhere needs no code change. A release
+# build is tried before a debug one: a debug `aloelite-fuse` would be
+# measuring rustc's -O0, not the daemon.
+RUST_BIN_DIRS = (
+    "rust/target/release",
+    "rust/target/debug",
+)
+
+# The mount axis: frontend name -> how to launch that daemon. Both take the
+# SAME flags (-f/-v/--create/--pin-env, mountpoint last), because the Rust
+# entry point was written to mirror the Python one; that is what lets one
+# fuse_session serve both and one workload compare them.
+FUSE_DAEMONS: dict[str, str] = {
+    "fuse": "python",
+    "rust-fuse": "rust",
+}
 
 # The volume axis. `random` sacrifices dedup for zero equality leakage, so it
 # only appears in the space suite, where that trade-off is the measurement.
@@ -315,9 +344,18 @@ def engine_session(
 
 @contextmanager
 def attach_session(
-    fs_file: Path, mode: str, name: str = "bench", mount_retries: int = 40
+    fs_file: Path,
+    mode: str,
+    name: str = "bench",
+    mount_retries: int = 40,
+    access: str = "rw",
 ) -> Iterator[tuple[Aloelite, Mount, int]]:
     """Open an EXISTING volume by name and mount it, retrying the mount.
+
+    `access` is era 2's mount access mode, and it is load-bearing here: only
+    an `rw` mount is checked for overlap, so every concurrent READER must ask
+    for `ro` or the second one is refused outright. That is also the honest
+    declaration -- a benchmark reader does not write.
 
     Mounting is a write — it inserts a mount row — so a client that mounts
     while another process holds the write lock gets SQLITE_BUSY once the
@@ -336,7 +374,7 @@ def attach_session(
         retries = 0
         while True:
             try:
-                mount = fs.mount(vol, pin=spec["pin"])
+                mount = fs.mount(vol, pin=spec["pin"], access=access)
                 break
             except sqlite3.OperationalError:
                 retries += 1
@@ -351,11 +389,42 @@ def attach_session(
         fs.close()
 
 
+def rust_bin(name: str) -> Path | None:
+    """Absolute path to a built Rust binary, or None if it is not there.
+
+    None is a first-class answer: a checkout with no `cargo build` is the
+    normal case, and a suite reports a skip naming the build command rather
+    than failing. A release build is preferred over a debug one -- timing a
+    debug `aloelite-fuse` would measure rustc at -O0, not the daemon.
+    """
+    override = os.environ.get("ALOELITE_RUST_BIN_DIR")
+    roots = [Path(override)] if override else []
+    repo = Path(__file__).resolve().parents[1]
+    roots += [repo / d for d in RUST_BIN_DIRS]
+    for root in roots:
+        candidate = root / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def rust_available() -> bool:
+    return rust_bin("aloelite-fuse") is not None and rust_bin("aloelite") is not None
+
+
 @contextmanager
 def fuse_session(
-    fs_file: Path, mode: str, mountpoint: Path, name: str = "bench"
+    fs_file: Path,
+    mode: str,
+    mountpoint: Path,
+    name: str = "bench",
+    impl: str = "python",
 ) -> Iterator[subprocess.Popen]:
     """A live kernel mount of a fresh volume, torn down on exit.
+
+    `impl` selects the daemon: the Python entry point or the Rust binary.
+    Everything else -- flags, volume, PIN plumbing, readiness probe, teardown
+    -- is identical, which is what makes the two frontends' rows comparable.
 
     The daemon is a subprocess on purpose: that is how a user runs it, its RSS
     is then separately observable (the streaming-write claim is about the
@@ -365,36 +434,61 @@ def fuse_session(
     spec = VOLUME_MODES[mode]
     mountpoint.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    argv = [
-        sys.executable,
-        "-c",
-        "from aloelite.fuse import main; main()",
-        "-f",
-        str(fs_file),
-        "-v",
-        name,
-        "--create",
-        str(mountpoint),
-    ]
+    if impl == "rust":
+        binary = rust_bin("aloelite-fuse")
+        if binary is None:
+            raise RuntimeError(
+                "aloelite-fuse not built: `cargo build --release --bins` in rust/"
+            )
+        launch = [str(binary)]
+    else:
+        launch = [sys.executable, "-c", "from aloelite.fuse import main; main()"]
+
+    # Quiet by default. `fuser` logs a WARN per unimplemented request (ioctl,
+    # among others), which the Python daemon does not do at all -- left on, it
+    # is both measurable overhead on one side of a comparison and a torrent of
+    # output. RUST_LOG is honoured only by the Rust binary; the Python daemon
+    # ignores it.
+    env.setdefault("RUST_LOG", "error")
+
+    argv = [*launch, "-f", str(fs_file), "-v", name, "--create"]
     if spec["pin"] is not None:
         env["ALOELITE_BENCH_PIN"] = spec["pin"].decode()
         argv += ["--pin-env", "ALOELITE_BENCH_PIN"]
-    proc = subprocess.Popen(
-        argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env
-    )
+    # Mountpoint LAST: the Rust parser is hand-rolled and takes the first bare
+    # token as the mountpoint, so a flag placed after it would be read as one.
+    argv.append(str(mountpoint))
+
+    # A FILE, never a pipe. A daemon lives for the whole suite and nothing
+    # drains its output; a pipe fills at 64 KiB, the daemon blocks writing to
+    # stdout, stops answering FUSE requests, and every caller wedges in
+    # uninterruptible sleep on the mount. That is not a hypothetical -- it is
+    # what a chatty daemon did here before this was a file.
+    log_path = mountpoint.parent / f"{mountpoint.name}.daemon.log"
+    log = open(log_path, "wb")
+    proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env)
+
+    def _tail() -> str:
+        try:
+            return log_path.read_text(errors="replace")[-2000:]
+        except OSError:
+            return "(no daemon log)"
+
     deadline = time.monotonic() + MOUNT_WAIT_S
     while time.monotonic() < deadline and not os.path.ismount(mountpoint):
         if proc.poll() is not None:
-            out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
-            raise RuntimeError(f"aloelite-fuse exited {proc.returncode}:\n{out}")
+            log.close()
+            raise RuntimeError(f"aloelite-fuse exited {proc.returncode}:\n{_tail()}")
         time.sleep(0.05)
     if not os.path.ismount(mountpoint):
         proc.terminate()
-        raise RuntimeError(f"mount did not appear within {MOUNT_WAIT_S}s")
+        log.close()
+        raise RuntimeError(f"mount did not appear within {MOUNT_WAIT_S}s:\n{_tail()}")
     try:
         yield proc
     finally:
         unmount(mountpoint, proc)
+        log.close()
 
 
 def unmount(mountpoint: Path, proc: subprocess.Popen | None = None) -> None:
@@ -412,7 +506,7 @@ def unmount(mountpoint: Path, proc: subprocess.Popen | None = None) -> None:
 @contextmanager
 def backends_for(
     scratch: Path,
-    frontends: tuple[str, ...] = ("ext4", "direct", "fuse"),
+    frontends: tuple[str, ...] = ("ext4", "direct", "fuse", "rust-fuse"),
     modes: tuple[str, ...] = ("plain", "convergent"),
 ) -> Iterator[list[Backend]]:
     """The (frontend, volume) matrix, all live at once so every row in a
@@ -421,11 +515,15 @@ def backends_for(
     ext4 has no volume axis: it appears once, as the baseline that separates
     aloelite's overhead from the hardware's.
 
-    There is no third frontend here because there is no third frontend: the
-    engine is Python, and nothing in this tree implements the Mount API in
-    another language. When one exists it becomes one more branch below.
+    `rust-fuse` is dropped silently when the binary is not built -- a
+    checkout without `cargo build` is the normal case, and every suite would
+    otherwise fail rather than report what it could measure. Suites that want
+    to say so explicitly call `rust_available()` and record a skip.
     """
     from contextlib import ExitStack
+
+    if "rust-fuse" in frontends and not rust_available():
+        frontends = tuple(f for f in frontends if f != "rust-fuse")
 
     with ExitStack() as stack:
         out: list[Backend] = []
@@ -438,11 +536,13 @@ def backends_for(
                 fs_file = scratch / f"direct-{mode}.fs"
                 fs, mount = stack.enter_context(engine_session(fs_file, mode))
                 out.append(EngineBackend(fs, mount, mode, fs_file))
-            if "fuse" in frontends:
-                fs_file = scratch / f"fuse-{mode}.fs"
-                mp = scratch / f"mnt-{mode}"
-                stack.enter_context(fuse_session(fs_file, mode, mp))
-                out.append(PosixBackend(mp, "fuse", mode, _sqlite_files(fs_file)))
+            for daemon, impl in FUSE_DAEMONS.items():
+                if daemon not in frontends:
+                    continue
+                fs_file = scratch / f"{daemon}-{mode}.fs"
+                mp = scratch / f"mnt-{daemon}-{mode}"
+                stack.enter_context(fuse_session(fs_file, mode, mp, impl=impl))
+                out.append(PosixBackend(mp, daemon, mode, _sqlite_files(fs_file)))
         yield out
 
 

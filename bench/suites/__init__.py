@@ -42,6 +42,8 @@ SUITES: dict[str, str] = {
     "concurrency": "bench.suites.robustness:concurrency",
     "durability": "bench.suites.robustness:durability",
     "external": "bench.suites.external:comparators",
+    "cli": "bench.suites.rust:cli",
+    "interop": "bench.suites.rust:interop",
 }
 
 # What CI runs, and in what order. `core` is the set that fits a runner
@@ -60,6 +62,8 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "transfer",
         "concurrency",
         "durability",
+        "cli",
+        "interop",
     ),
     "external": ("external",),
 }
