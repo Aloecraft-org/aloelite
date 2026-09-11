@@ -141,10 +141,15 @@ def dir_scale(run: Run, scratch: Path, cfg: dict) -> None:
     to be far worse than the library's ran for half an hour before anyone
     could tell it would.
 
-    The tree is built once through the library and then measured through both
-    frontends: the same file, mounted after the builder closed it. A FUSE
-    build at these sizes would cost minutes and measure the daemon's create
-    path, which the smallfile suite already reports.
+    The tree is built once through the library and then measured through
+    every frontend: the same file, mounted after the builder closed it. A
+    FUSE build at these sizes would cost minutes and measure the daemon's
+    create path, which the smallfile suite already reports.
+
+    ext4 is built and measured separately, as an ordinary directory of empty
+    files on the same disk. It is the row that answers "is this cost
+    aloelite's, or does every filesystem pay it?" — and without it the curve
+    is a number with nothing to be large relative to.
     """
     sizes = cfg["dir_sizes"]
     fs_file = scratch / "dirscale.fs"
@@ -158,14 +163,32 @@ def dir_scale(run: Run, scratch: Path, cfg: dict) -> None:
             fs.db.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             _measure_dir(run, "direct", "plain", size, _EngineDir(m, d), budget)
 
+    baseline = scratch / "ext4-dirs"
+    budget = _Budget()
+    for size in each("directory entries (ext4) ->", sizes):
+        d = baseline / f"d{size}"
+        d.mkdir(parents=True, exist_ok=True)
+        for i in range(size):
+            (d / f"e{i:07d}.txt").write_bytes(b"x")
+        _measure_dir(run, "ext4", "-", size, _PosixDir(baseline, f"d{size}"), budget)
+
     if not _fuse_ok():
         run.skip("dir_scale/fuse", "needs /dev/fuse, fusermount3 and pyfuse3")
         return
-    mp = scratch / "dirscale-mnt"
-    with fuse_session(fs_file, "plain", mp, name="dirs"):
-        budget = _Budget()
-        for size in each("directory entries (fuse) ->", sizes):
-            _measure_dir(run, "fuse", "plain", size, _PosixDir(mp, f"d{size}"), budget)
+    # Every daemon over the SAME tree. The Rust readdir is a handler-for-
+    # handler port of the Python one, including the full re-list per kernel
+    # continuation call, so this is where that shows up in both.
+    for daemon, impl in FUSE_DAEMONS.items():
+        if impl == "rust" and not rust_available():
+            run.skip(f"dir_scale/{daemon}", "aloelite-fuse (rust) not built")
+            continue
+        mp = scratch / f"dirscale-mnt-{daemon}"
+        with fuse_session(fs_file, "plain", mp, name="dirs", impl=impl):
+            budget = _Budget()
+            for size in each(f"directory entries ({daemon}) ->", sizes):
+                _measure_dir(
+                    run, daemon, "plain", size, _PosixDir(mp, f"d{size}"), budget
+                )
 
 
 class _EngineDir:

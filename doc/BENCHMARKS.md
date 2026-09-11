@@ -406,17 +406,42 @@ subquery:
 `EXPLAIN QUERY PLAN` shows it as `CORRELATED SCALAR SUBQUERY` over the same
 `(from_id)`-only index, so N rows each rescan N siblings: **O(N²)**.
 
-Measured on a 4-vCPU CI-class host, one directory per size:
+Measured on a 4-vCPU CI-class host, one directory per size, with ext4 on the
+same disk as the control. This is the comparison that says whether the cost
+is aloelite's or whether every filesystem pays it:
 
-| entries in one directory | `stat` one entry (p50) | `readdir` via the library | `readdir` through a FUSE mount |
-|---:|---:|---:|---:|
-| 100 | 0.07 ms | 3 ms | — |
-| 1,000 | 0.43 ms | 0.23 s | 2.2 s |
-| 5,000 | 1.98 ms | 7.7 s | **211 s** |
-| 10,000 | 5.4 ms | 39.9 s | not run (projected ~840 s) |
+**`stat` of one entry (p50)**
 
-Ten thousand entries is a mail spool, a `node_modules`, or a month of daily
-files — not an abusive case.
+| entries | ext4 | `direct` | `fuse` | `rust-fuse` |
+|---:|---:|---:|---:|---:|
+| 1,000 | 0.005 ms | 0.53 ms | 0.87 ms | 0.59 ms |
+| 5,000 | 0.005 ms | 2.99 ms | 3.40 ms | 2.98 ms |
+| 10,000 | 0.005 ms | 6.20 ms | 6.58 ms | 5.75 ms |
+| growth | **flat** | **linear** | linear | linear |
+
+**One full `readdir`**
+
+| entries | ext4 | `direct` | `fuse` | `rust-fuse` |
+|---:|---:|---:|---:|---:|
+| 1,000 | 0.32 ms | 358 ms | 2.9 s | 1.1 s |
+| 5,000 | 1.45 ms | 9.5 s | **328 s** | **88 s** |
+| 10,000 | 2.92 ms | 49 s | not run (proj. 2,524 s) | not run (proj. 592 s) |
+| fitted | **linear** | **n^2.1** | **n^2.94** | **n^2.74** |
+
+ext4 is flat on lookup because its directories are hashed (htree) and linear
+on `readdir` because that is the floor for reading N names. Those are the
+right shapes. aloelite is one power worse on both: **linear lookup and
+quadratic readdir** in the library, and readdir through a mount is close to
+cubic because the quadratic listing is recomputed on every kernel
+continuation call.
+
+At 10,000 entries — a mail spool, a `node_modules`, a month of daily files —
+that is **1,100x ext4 to `stat` one file and ~17,000x to list the
+directory**. Through a mount at 5,000 entries, one `ls` takes 5.5 minutes
+against ext4's 1.5 ms.
+
+Both the constant and the exponent matter, and only the exponent is
+alarming: a constant factor is a port away, an exponent is a schema away.
 
 **Through a mount it is worse again, and for a second, separate reason —
 in both daemons.** `AloeFuse.readdir(inode, start, token)` in
