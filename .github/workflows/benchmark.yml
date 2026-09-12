@@ -127,6 +127,24 @@ jobs:
       # this command, which is honest but much less interesting.
       run: cargo build --release --bins --manifest-path rust/Cargo.toml
 
+    # The Extism plug-in is a frontend on the same axis as the others, and
+    # wants a wasm target, a WASI clang and the host SDK. Best effort on
+    # purpose: without any of them the suites drop `extism` silently, which
+    # costs those rows and nothing else -- the same posture the comparators
+    # get. rust/target is cached, so the wasm build is paid once.
+    - name: Build the Extism plug-in
+      continue-on-error: true
+      run: |
+        rustup target add wasm32-wasip1
+        curl -sSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz | sudo tar xz -C /opt
+        SDK=/opt/wasi-sdk-27.0-x86_64-linux
+        CC_wasm32_wasip1=$SDK/bin/clang \
+        AR_wasm32_wasip1=$SDK/bin/llvm-ar \
+        CFLAGS_wasm32_wasip1=--sysroot=$SDK/share/wasi-sysroot \
+          cargo build --release -p aloelite-extism \
+            --target wasm32-wasip1 --manifest-path rust/Cargo.toml
+        pip install extism
+
     - name: Free disk before the scale curves
       run: |
         # The ingest and memory suites want GBs. The hosted image ships with

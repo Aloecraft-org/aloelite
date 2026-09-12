@@ -152,11 +152,13 @@ to do 64 MiB of hashing. And SQLite falls back from WAL to a rollback
 journal, because WAL needs shared memory WASI has no way to offer — so write
 durability here is a journal, not a log.
 
-For the rest: a prototype of this plug-in, driven on one host against the
-same engine natively, came out around 2x on Argon2id-bound operations, 2x on
-small ones and 4-5x on bulk reads and writes, with the Extism boundary itself
-accounting for well under a quarter of the gap — the rest is the engine
-running in WebAssembly. Those are indicative single-run numbers, not
-`bench/` output: an Extism backend for the benchmark suite is the follow-up
-that would put them beside the frontends in `doc/BENCHMARKS.md` on equal
-terms.
+For the rest, `extism` is a frontend in the benchmark harness: the
+`throughput`, `smallfile`, `random` and `append` suites report it beside
+`direct` on the same corpora with the same barrier, so the gap between those
+two rows is what the sandbox costs and nothing else.
+`doc/BENCHMARKS.md` has the method, and the tables there are what to read
+rather than anything quoted here. The shape of it, from the runs behind that
+integration: roughly 2x on the Argon2id that dominates `create_volume` and
+`mount`, 2x on small operations, and 3-5x on bulk reads and writes, with the
+Extism call boundary itself a minority of the gap — most of it is the engine
+running in WebAssembly.

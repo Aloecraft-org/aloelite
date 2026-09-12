@@ -55,7 +55,7 @@ Every row is labelled with four things, and they are never collapsed:
 
 | label | values | why it cannot be averaged away |
 |---|---|---|
-| frontend | `ext4`, `direct`, `fuse`, `rust-fuse`, `py-cli`, `rust-cli`, `gocryptfs`, `restic` | a kernel mount and a library call are not the same code path, and neither is a second implementation of either |
+| frontend | `ext4`, `direct`, `fuse`, `rust-fuse`, `extism`, `py-cli`, `rust-cli`, `gocryptfs`, `restic` | a kernel mount, a library call and a WebAssembly sandbox are not the same code path, and neither is a second implementation of any of them |
 | volume | `plain`, `convergent`, `random` | encryption changes dedup, memory, and read cost |
 | cache | `cold`, `warm` | a warm read reports the page cache's speed, not the filesystem's |
 | n | sample count | a p99 over 200 samples is not a p99 |
@@ -129,6 +129,34 @@ suite already reports it beside `fuse`; nothing in any suite names a
 daemon. Two comparisons do not fit that matrix and get their own suites:
 `cli` (both binaries, verb for verb) and `interop` (one writes, the other
 reads).
+
+### The plug-in frontend
+
+`extism` is the same engine again, inside a WebAssembly sandbox, driven over
+a MessagePack wire from the Extism host SDK
+(`rust/aloelite-extism/README.md`). It is a `Backend` like the others, so
+the four frontend-comparison suites — `throughput`, `smallfile`, `random`,
+`append` — report it beside `direct` on the same corpora with the same
+barrier, and the gap between those two rows is what the sandbox costs and
+nothing else.
+
+Two things about its rows are properties of the shape rather than of the
+run, and are worth knowing before reading them:
+
+- **SQLite is on a rollback journal, not WAL.** WAL wants shared memory
+  WASI has no way to offer, and `Db.open`'s probe falls back. Some of the
+  write gap is that, not WebAssembly.
+- **A cold read discards the whole plug-in instance**, because its sqlite
+  page cache lives in linear memory where no pragma of ours can reach it.
+  That also means re-mounting, since an encrypted volume's key is
+  connection state (ENC-3) — one Argon2id, outside every timed region.
+  `direct` reaches the same cold state with `PRAGMA shrink_memory`; the
+  FUSE rows cannot reach it at all, which favours them, and is said here
+  rather than hidden.
+
+The plug-in drops out of the matrix silently when it has not been built for
+`wasm32-wasip1` or the host SDK is not installed, the same way `rust-fuse`
+does without `cargo build`.
 
 ### The formats really are interchangeable
 

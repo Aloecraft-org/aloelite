@@ -72,6 +72,21 @@ host path the manifest grants.
   the spec's error is a code, and a code glued to a message is not one.
   Every export succeeds at the Extism level, including the ones that
   failed, which a host has to be told.
+- **`extism` is a frontend in the benchmark harness.** The
+  `throughput`, `smallfile`, `random` and `append` suites report it
+  beside `direct` on the same corpora with the same barrier, so the gap
+  between those two rows is what the WebAssembly sandbox costs and
+  nothing else. It drops out silently when the plug-in has not been
+  built for `wasm32-wasip1` or the host SDK is absent, the same way
+  `rust-fuse` does without `cargo build`.
+
+  Two of its rows' properties are the shape rather than the run, and
+  `doc/BENCHMARKS.md` says so where the numbers are: SQLite falls back
+  from WAL to a rollback journal (WAL wants shared memory WASI cannot
+  offer), and a cold read discards the whole plug-in instance, since
+  its page cache lives in linear memory. That second one costs a
+  re-mount, because an encrypted volume's key is connection state
+  (ENC-3) -- one Argon2id, outside every timed region.
 - **Two things a host must get right, both learned the hard way.**
   Plug-in memory must be at least 96 MiB: Argon2id at the format's
   pinned 64 MiB runs inside the sandbox once per `create_volume` and

@@ -1,0 +1,33 @@
+{
+  "scale": "smoke",
+  "host": {
+    "scale": "smoke",
+    "python": "3.11.15",
+    "platform": "Linux-6.18.44-fc-v24-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "cpu_count": 4,
+    "cpu_model": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "mem_total_gib": 15.7,
+    "sqlite_version": "3.45.1",
+    "sqlite_source": "stdlib / host libsqlite3",
+    "aloelite_version": "0.5.0",
+    "git_commit": "c5733af",
+    "scratch_fs": "ext4",
+    "scratch_free_gib": 17.2,
+    "fuse_available": false,
+    "journal_mode": "wal",
+    "synchronous": "FULL",
+    "busy_timeout_ms": 5000,
+    "page_size": 4096,
+    "chunk_size": 1048576,
+    "failed_suites": [
+      "throughput"
+    ]
+  },
+  "started_at": "2026-09-12T21:42:45Z",
+  "rows": [],
+  "skipped": {
+    "throughput": "crashed: RuntimeError: aloelite-fuse exited 1:\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"/home/user/aloelite/aloelite/fuse.py\", line 60, in <module>\n    import pyfuse3\nModuleNotFoundError: No module named 'pyfuse3'\n"
+  },
+  "finished_at": "2026-09-12T21:42:45Z"
+}

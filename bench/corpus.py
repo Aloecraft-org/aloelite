@@ -5,11 +5,11 @@ The two things every suite needs: somewhere to put bytes (a backend) and
 bytes with a known shape (a corpus).
 
 A backend is the frontend-under-test reduced to the handful of operations
-the suites actually time. Four ship: the Python library API (`direct`), the
-Python FUSE daemon (`fuse`), the Rust FUSE daemon (`rust-fuse`), and `ext4`
--- the same POSIX backend pointed at a plain directory on the same disk,
-which is how a row gets a baseline rather than an absolute number nobody can
-place.
+the suites actually time. Five ship: the Python library API (`direct`), the
+Python FUSE daemon (`fuse`), the Rust FUSE daemon (`rust-fuse`), the Extism
+plug-in (`extism`), and `ext4` -- the same POSIX backend pointed at a plain
+directory on the same disk, which is how a row gets a baseline rather than
+an absolute number nobody can place.
 
 `fuse` and `rust-fuse` are the interesting pair: the same kernel path, the
 same workload, the same on-disk format, two implementations of the Mount
@@ -22,7 +22,9 @@ Surface
 Entry points
   engine_session(...)      an open Aloelite + Mount for a volume mode
   fuse_session(...)        a live kernel mount (either daemon), unmounted on exit
+  extism_session(...)      a plug-in instance with a volume open and mounted
   rust_bin(...)            locate a built Rust binary, or None
+  extism_plugin(...)       locate the built wasm32-wasip1 plug-in, or None
   posix_backend(path)      ext4 / fuse / gocryptfs, all the same POSIX ops
   backends_for(...)        the (frontend, volume) matrix a suite iterates
   block_source(...)        streaming corpus bytes, never materialized whole
@@ -30,18 +32,21 @@ Entry points
   on_disk_bytes(...)       file size after a checkpoint, plus page accounting
 
 Configurable values
-  VOLUME_MODES     plain | convergent | random, and what each means
-  FUSE_DAEMONS     frontend name -> how to launch that daemon
-  RUST_BIN_DIRS    where a built Rust binary is looked for
+  VOLUME_MODES       plain | convergent | random, and what each means
+  FUSE_DAEMONS       frontend name -> how to launch that daemon
+  RUST_BIN_DIRS      where a built Rust binary is looked for
+  EXTISM_PLUGIN_DIRS where the built plug-in is looked for
+  EXTISM_PAGES       plug-in memory cap; Argon2id runs inside the sandbox
   MOUNT_WAIT_S     how long a FUSE mount gets to appear
   BENCH_PIN        the PIN encrypted benchmark volumes use
   STREAM_BLOCK     the unit of every streaming read and write here
 
 Fan-out points
   VOLUME_MODES is the volume axis; FUSE_DAEMONS is the mount axis. Backend
-  has two implementations, EngineBackend and PosixBackend -- every mounted
-  frontend is a PosixBackend over a different daemon, so adding one is an
-  entry in FUSE_DAEMONS and a name in `backends_for`.
+  has three implementations -- EngineBackend, ExtismBackend and PosixBackend.
+  Every mounted frontend is a PosixBackend over a different daemon, so adding
+  one is an entry in FUSE_DAEMONS and a name in `backends_for`; a frontend
+  that is not a mount is a Backend subclass and a branch there.
 """
 
 from __future__ import annotations
@@ -71,6 +76,21 @@ RUST_BIN_DIRS = (
     "rust/target/release",
     "rust/target/debug",
 )
+
+# Where the built Extism plug-in is looked for, in order. Release first, for
+# the reason a debug aloelite-fuse is not the daemon: a debug wasm build
+# measures rustc at -O0 inside a sandbox, which is nobody's deployment.
+EXTISM_PLUGIN_DIRS = (
+    "rust/target/wasm32-wasip1/release",
+    "rust/target/wasm32-wasip1/debug",
+)
+EXTISM_PLUGIN = "aloelite_extism.wasm"
+
+# Plug-in memory, in 64 KiB pages. Argon2id at the format's pinned factors
+# (64 MiB, t=3, p=4) runs INSIDE the sandbox, once per create_volume and once
+# per mount; below about 96 MiB that is an `oom` rather than anything about a
+# key. 128 MiB leaves the engine room on top of it.
+EXTISM_PAGES = 2048
 
 # The mount axis: frontend name -> how to launch that daemon. Both take the
 # SAME flags (-f/-v/--create/--pin-env, mountpoint last), because the Rust
@@ -238,6 +258,152 @@ class EngineBackend(Backend):
 
     def unlink(self, path: str) -> None:
         self.m.remove(path)
+
+
+class ExtismBackend(Backend):
+    """The engine inside an Extism plug-in: WebAssembly, a MessagePack wire,
+    and the volume on a host path the manifest granted.
+
+    The same engine `direct` runs, with two boundaries added -- the sandbox
+    and the call envelope -- so the gap between these rows and `direct`'s is
+    what putting Aloelite in a plug-in costs, on this machine, for this work.
+    Nothing else differs: same volume modes, same corpora, same barrier.
+    """
+
+    name = "extism"
+
+    def __init__(
+        self,
+        plugin,
+        mount: str,
+        volume_mode: str,
+        fs_file: Path,
+        open_plugin,
+        mount_volume,
+    ):
+        self.p = plugin
+        self.m = mount
+        self.volume = volume_mode
+        self.fs_file = fs_file
+        self.backing = _sqlite_files(fs_file)
+        self._open_plugin = open_plugin
+        self._mount_volume = mount_volume
+
+    # -- the two that are not just an operation ---------------------------
+
+    def host_files(self, path: str) -> list[Path]:
+        return [p for p in self.backing if p.exists()]
+
+    def durable(self, path: str) -> None:
+        """The plug-in lands on a rollback journal, not WAL -- WAL wants
+        shared memory WASI cannot offer -- so a committed transaction is
+        already on the host file and there is nothing to checkpoint. The
+        fsync is the same barrier every other backend ends on."""
+        _fsync_path(self.fs_file)
+
+    def go_cold(self, path: str) -> None:
+        """The plug-in's own sqlite page cache lives in its linear memory,
+        where no pragma of ours can reach it. Discarding the instance
+        discards it, which is the honest cold state -- `direct` reaches the
+        same one with `PRAGMA shrink_memory`, and the FUSE rows cannot reach
+        it at all, an asymmetry that favours them and is stated rather than
+        hidden.
+
+        Re-mounting is part of it and not an accident. A mount row is
+        durable and outlives the connection, but an encrypted volume's KEY is
+        connection state (ENC-3): a fresh instance holding the old mount id
+        answers `encryption_required` until it mounts again with the PIN. So
+        the old mount is released and a new one taken, at the cost of one
+        Argon2id -- which lands outside every timed region, since this runs
+        before the measurement, not inside it."""
+        from .harness import drop_cache
+
+        self.durable(path)
+        self._recycle()
+        drop_cache(*self.host_files(path))
+
+    # -- the operations ---------------------------------------------------
+
+    def write(self, path: str, data: bytes) -> None:
+        self.call("create_entry", mount=self.m, path=path, data=data)
+
+    def write_stream(self, path: str, blocks: Iterator[bytes]) -> int:
+        total = 0
+        fd = self.call("open_write", mount=self.m, path=path)["fd"]
+        try:
+            for block in blocks:
+                self.call("write", fd=fd, data=block)
+                total += len(block)
+        finally:
+            self.call("close", fd=fd)
+        return total
+
+    def read(self, path: str) -> bytes:
+        return self.call("read_all", mount=self.m, path=path)
+
+    def read_stream(self, path: str) -> int:
+        total = 0
+        fd = self.call("open_read", mount=self.m, path=path)["fd"]
+        try:
+            while block := self.call("read", fd=fd, len=STREAM_BLOCK):
+                total += len(block)
+        finally:
+            self.call("close", fd=fd)
+        return total
+
+    def pread(self, path: str, offset: int, length: int) -> bytes:
+        fd = self.call("open_read", mount=self.m, path=path)["fd"]
+        try:
+            self.call("seek", fd=fd, offset=offset, whence="set")
+            return self.call("read", fd=fd, len=length)
+        finally:
+            self.call("close", fd=fd)
+
+    def append(self, path: str, data: bytes) -> None:
+        self.call("append", mount=self.m, path=path, data=data)
+
+    def mkdir(self, path: str) -> None:
+        """`create_container` is one level and refuses an existing name; the
+        `parents=True, exist_ok=True` the other backends get from their own
+        facade is spelled out here."""
+        walked = ""
+        for segment in path.strip("/").split("/"):
+            walked += "/" + segment
+            try:
+                self.call("create_container", mount=self.m, path=walked)
+            except ExtismCallError as e:
+                if e.code not in ("already_exists", "name_taken"):
+                    raise
+
+    def listdir(self, path: str) -> list[str]:
+        return [e["name"] for e in self.call("list", mount=self.m, path=path)]
+
+    def stat_size(self, path: str) -> int:
+        return self.call("stat", mount=self.m, path=path).get("size") or 0
+
+    def unlink(self, path: str) -> None:
+        self.call("remove", mount=self.m, path=path)
+
+    # -- depth: the wire --------------------------------------------------
+
+    def call(self, op: str, **args):
+        """One Mount API operation. `None` arguments are dropped rather than
+        sent as nil: the plug-in refuses an argument an operation does not
+        take, and an optional the caller did not set is not an argument."""
+        given = {k: v for k, v in args.items() if v is not None}
+        return _extism_call(self.p, "fs_call", {"op": op, "args": given})
+
+    def _recycle(self) -> None:
+        try:
+            self.call("unmount", mount=self.m)
+        except Exception:
+            pass
+        try:
+            _extism_call(self.p, "fs_close")
+        except Exception:
+            pass
+        self.p = self._open_plugin()
+        self.m = self._mount_volume(self.p)
 
 
 class PosixBackend(Backend):
@@ -412,6 +578,126 @@ def rust_available() -> bool:
     return rust_bin("aloelite-fuse") is not None and rust_bin("aloelite") is not None
 
 
+def extism_plugin() -> Path | None:
+    """Absolute path to the built Extism plug-in, or None.
+
+    None is a first-class answer, as it is for the Rust binaries: a checkout
+    that has not built for wasm32-wasip1 is the normal case, and the frontend
+    drops out rather than failing every suite.
+    """
+    override = os.environ.get("ALOELITE_EXTISM_PLUGIN")
+    if override:
+        candidate = Path(override)
+        return candidate if candidate.is_file() else None
+    repo = Path(__file__).resolve().parents[1]
+    for directory in EXTISM_PLUGIN_DIRS:
+        candidate = repo / directory / EXTISM_PLUGIN
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def extism_available() -> bool:
+    """Both halves have to be there: the plug-in, and a host to run it in."""
+    if extism_plugin() is None:
+        return False
+    try:
+        import extism  # noqa: F401
+        import msgpack  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+@contextmanager
+def extism_session(
+    fs_file: Path, mode: str, name: str = "bench"
+) -> Iterator[ExtismBackend]:
+    """A plug-in instance with a fresh volume open and mounted.
+
+    The manifest grants one directory -- the one the volume lives in -- and
+    nothing else, which is how the plug-in is meant to be run and so how it
+    is measured.
+    """
+    import extism as extism_sdk
+
+    spec = VOLUME_MODES[mode]
+    manifest = {
+        "wasm": [{"path": str(extism_plugin())}],
+        "allowed_paths": {str(fs_file.parent): "/vol"},
+        "memory": {"max_pages": EXTISM_PAGES},
+    }
+    guest = f"/vol/{fs_file.name}"
+
+    def open_plugin():
+        plugin = extism_sdk.Plugin(manifest, wasi=True)
+        _extism_call(plugin, "fs_open", {"path": guest})
+        return plugin
+
+    plugin = open_plugin()
+    backend = None
+    try:
+        vol = _extism_call(
+            plugin,
+            "fs_call",
+            {
+                "op": "create_volume",
+                "args": _present(name=name, pin=spec["pin"], enc_mode=spec["enc_mode"]),
+            },
+        )
+
+        def mount_volume(on):
+            return _extism_call(
+                on,
+                "fs_call",
+                {"op": "mount", "args": _present(volume=vol["id"], pin=spec["pin"])},
+            )
+
+        mount = mount_volume(plugin)
+        backend = ExtismBackend(plugin, mount, mode, fs_file, open_plugin, mount_volume)
+        try:
+            yield backend
+        finally:
+            try:
+                backend.call("unmount", mount=mount)
+            except Exception:
+                pass
+    finally:
+        try:
+            _extism_call(backend.p if backend else plugin, "fs_close")
+        except Exception:
+            pass
+
+
+class ExtismCallError(RuntimeError):
+    """An `{error: {code, message}}` reply, with the spec's code kept."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+
+
+def _present(**args) -> dict:
+    return {k: v for k, v in args.items() if v is not None}
+
+
+def _extism_call(plugin, export: str, value=None):
+    """One export, MessagePack in and out, envelope unwrapped.
+
+    MessagePack rather than JSON because the Mount API's values are 64-bit
+    integers and byte strings: a nanosecond timestamp through a double comes
+    back rounded, and bytes through JSON come back base64. The plug-in's
+    README says it at length.
+    """
+    import msgpack
+
+    reply = plugin.call(export, msgpack.packb(value, use_bin_type=True))
+    answer = msgpack.unpackb(bytes(reply), raw=False)
+    if "error" in answer:
+        raise ExtismCallError(answer["error"]["code"], answer["error"]["message"])
+    return answer["ok"]
+
+
 @contextmanager
 def fuse_session(
     fs_file: Path,
@@ -506,7 +792,7 @@ def unmount(mountpoint: Path, proc: subprocess.Popen | None = None) -> None:
 @contextmanager
 def backends_for(
     scratch: Path,
-    frontends: tuple[str, ...] = ("ext4", "direct", "fuse", "rust-fuse"),
+    frontends: tuple[str, ...] = ("ext4", "direct", "fuse", "rust-fuse", "extism"),
     modes: tuple[str, ...] = ("plain", "convergent"),
 ) -> Iterator[list[Backend]]:
     """The (frontend, volume) matrix, all live at once so every row in a
@@ -515,15 +801,19 @@ def backends_for(
     ext4 has no volume axis: it appears once, as the baseline that separates
     aloelite's overhead from the hardware's.
 
-    `rust-fuse` is dropped silently when the binary is not built -- a
-    checkout without `cargo build` is the normal case, and every suite would
+    `rust-fuse` and `extism` are dropped silently when what they need is not
+    built -- a checkout without `cargo build`, or without a wasm32-wasip1
+    build and the Extism host SDK, is the normal case, and every suite would
     otherwise fail rather than report what it could measure. Suites that want
-    to say so explicitly call `rust_available()` and record a skip.
+    to say so explicitly call `rust_available()` or `extism_available()` and
+    record a skip.
     """
     from contextlib import ExitStack
 
     if "rust-fuse" in frontends and not rust_available():
         frontends = tuple(f for f in frontends if f != "rust-fuse")
+    if "extism" in frontends and not extism_available():
+        frontends = tuple(f for f in frontends if f != "extism")
 
     with ExitStack() as stack:
         out: list[Backend] = []
@@ -543,6 +833,9 @@ def backends_for(
                 mp = scratch / f"mnt-{daemon}-{mode}"
                 stack.enter_context(fuse_session(fs_file, mode, mp, impl=impl))
                 out.append(PosixBackend(mp, daemon, mode, _sqlite_files(fs_file)))
+            if "extism" in frontends:
+                fs_file = scratch / f"extism-{mode}.fs"
+                out.append(stack.enter_context(extism_session(fs_file, mode)))
         yield out
 
 
