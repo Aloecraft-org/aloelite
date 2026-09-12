@@ -14,7 +14,7 @@ migration rather than a compatible change.
 
 `v0.4.0` &middot; schema era `3`
 
-Release candidates: `v0.4.0rc1` (2026-09-03)
+Release candidates: `v0.4.0rc1` (2026-09-03), `v0.4.0rc2` (2026-09-12)
 
 **Schema era 3: the break-once release.** A file written by this build
 does not open on an older one, by design — `PRAGMA user_version` is 3

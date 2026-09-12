@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "aloelite-cli"
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 dependencies = [
  "aloelite-core",
  "aloelite-store",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "aloelite-conformance"
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 dependencies = [
  "aloelite-core",
  "aloelite-store",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "aloelite-core"
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "aloelite-fuse"
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 dependencies = [
  "aloelite-core",
  "aloelite-store",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "aloelite-store"
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 dependencies = [
  "aloelite-core",
  "ego_platform",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "aloelite-wasm"
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 dependencies = [
  "aloelite-core",
  "aloelite-store",

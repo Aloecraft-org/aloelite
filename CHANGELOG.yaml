@@ -68,6 +68,8 @@ releases:
     candidates:
       - version: "0.4.0rc1"
         date: "2026-09-03"
+      - version: "0.4.0rc2"
+        date: "2026-09-12"
     api_version: 3
     summary: |
       **Schema era 3: the break-once release.** A file written by this build
