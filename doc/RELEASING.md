@@ -3,6 +3,14 @@
 How a version of Aloelite goes out, end to end. Everything downstream of
 `CHANGELOG.yaml` is derived; the tag is the only manual push.
 
+> **This describes the current shape, not the agreed one.**
+> [`ALIGNMENT.md`](/doc/ALIGNMENT.md) is the org-wide standard every
+> Aloecraft project is moving to, and §8 lists what this repository has to
+> change to reach it: the tag spelling, the artifact names, `SHA256SUMS.txt`,
+> and `.technoproj`'s `pre`. That file is shared verbatim across
+> repositories, so it is not edited here; this one changes as each item
+> lands.
+
 ## Where the version lives
 
 | file | field | spelling |
