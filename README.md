@@ -614,17 +614,20 @@ with the volume (unlock and `change_pin` are flat).
 on small files — the price of a content-addressed pool inside a transactional
 database. Encryption is close to free on top of that.
 
-**Avoid** large directories — for path lookups, not for listings. Nothing in
-the schema can turn "the child of this directory named X" into an index seek,
-so a `stat` scans the whole directory: 6.3 ms at 10,000 entries against
-ext4's 0.005 ms. Listing one is fine now (96 ms for 10,000, linear); it used
-to be quadratic. Keep directories in the low thousands until lookup is fixed
-too, which needs a schema change.
+**Costs** on directory operations are what a path resolved through SQL costs,
+and no longer grow with directory size: at 10,000 entries a `stat` is 12x
+ext4 and a full listing 29x, both flat or linear. Getting there took a
+schema era — era 3 materialises `edge.name` so a child lookup is a covering
+index seek — and a rewrite of the listing view's visibility rule as a window
+function.
 
 **Two implementations, one format.** A volume written by either `aloelite`
 binary reads correctly in the other, plain and encrypted. The Rust CLI starts
 in 1.6 ms against Python's 173 ms, which is most of the difference for
 one-shot commands.
+
+Opening a file written by an older build migrates it to schema era 3 in
+place; a file it has touched is not readable by an era-2 build.
 
 ## Design Background
 

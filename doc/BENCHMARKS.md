@@ -406,39 +406,61 @@ subquery:
 `EXPLAIN QUERY PLAN` shows it as `CORRELATED SCALAR SUBQUERY` over the same
 `(from_id)`-only index, so N rows each rescan N siblings: **O(N²)**.
 
-There are two separate costs here, and they have separate fates. **`readdir`
-is fixed**; **lookup is not.** Measured on a 4-vCPU CI-class host, one
-directory per size, with ext4 on the same disk as the control.
+Both costs are now fixed, by two different changes. What follows is the
+state after them, with ext4 on the same disk as the control; the arc that
+got here is in the two subsections below.
 
-**`stat` of one entry (p50) — unchanged, still linear**
-
-| entries | ext4 | `direct` | `fuse` | `rust-fuse` |
-|---:|---:|---:|---:|---:|
-| 1,000 | 0.005 ms | 0.54 ms | 0.94 ms | 0.61 ms |
-| 5,000 | 0.005 ms | 3.04 ms | 3.49 ms | 3.03 ms |
-| 10,000 | 0.005 ms | 6.32 ms | 6.63 ms | 5.90 ms |
-| growth | **flat** | **linear** | linear | linear |
-
-**One full `readdir` — now linear, was quadratic**
+**`stat` of one entry (p50) — flat**
 
 | entries | ext4 | `direct` | `fuse` | `rust-fuse` |
 |---:|---:|---:|---:|---:|
-| 1,000 | 0.33 ms | 8.2 ms | 48 ms | 13.5 ms |
-| 5,000 | 1.63 ms | 41 ms | 265 ms | 67 ms |
-| 10,000 | 2.81 ms | 96 ms | 500 ms | 137 ms |
-| µs per entry | 0.28 | **8.2 → 9.6** | 48 → 50 | 13.5 → 13.7 |
+| 1,000 | 0.0053 ms | 0.051 ms | 0.31 ms | 0.102 ms |
+| 5,000 | 0.0053 ms | 0.056 ms | 0.33 ms | 0.109 ms |
+| 10,000 | 0.0054 ms | 0.063 ms | 0.19 ms | 0.112 ms |
+| growth | **flat** | **flat** | flat | flat |
 
-A flat per-entry cost is what linear looks like. Against the quadratic
-version this is 532x at 10,000 entries through the library, 103x through the
-Python mount and 342x through the Rust one — and the gap widens with N,
-because the shape changed rather than the constant.
+**One full `readdir` — linear**
 
-### What fixed it, and what did not
+| entries | ext4 | `direct` | `fuse` | `rust-fuse` |
+|---:|---:|---:|---:|---:|
+| 1,000 | 0.34 ms | 7.7 ms | 46 ms | 13.5 ms |
+| 5,000 | 1.52 ms | 39 ms | 253 ms | 66 ms |
+| 10,000 | 3.16 ms | 93 ms | 487 ms | 128 ms |
+| µs per entry | 0.32 | **7.7 → 9.3** | 46 → 49 | 13.5 → 12.8 |
 
-**The `node (name)` index does not work.** It is the obvious remedy — the
-join predicate is `edge.from_id = ? AND coalesce(edge.name, node.name) = ?`,
-so making the name side seekable looks like the answer. Measured, on a
-3,000-entry directory:
+At 10,000 entries the library is now **12x ext4 on `stat`** and **29x on
+`readdir`**. It was 1,170x and ~18,000x.
+
+### `readdir`: a window, not a correlated subquery
+
+NODE-5 makes the greatest `node_id` per effective name the visible one, and
+`directory_listing` derived that per row with a correlated scalar subquery —
+for every row, re-read the container's whole child set and take the max.
+That is the O(N²). As a window it is one pass:
+
+```sql
+max(n.node_id) OVER (PARTITION BY ae.from_id, ae.name)
+```
+
+| one `readdir` | before | after | |
+|---|---:|---:|---|
+| 1,000 entries | 375 ms | 7.7 ms | 49x |
+| 5,000 entries | 10.2 s | 39 ms | 262x |
+| 10,000 entries | 51.0 s | 93 ms | **550x** |
+
+Output is byte-identical — adopted against a row-for-row differential
+covering hardlinked placements carrying per-placement names (D-5) and hidden
+same-name siblings, the two cases `visible` exists for. A view is not an
+index, so this costs writes nothing.
+
+### `stat`: era 3 materialises `edge.name`
+
+The lookup predicate was `edge.from_id = ? AND coalesce(edge.name,
+node.name) = ?` — spanning two tables, which no index can serve, so finding
+a child by name scanned the container.
+
+**An index on `node (name)` does not fix this**, and was measured before
+being discarded. On a 3,000-entry directory:
 
 | | `stat` | `readdir` | plan |
 |---|---:|---:|---|
@@ -446,50 +468,39 @@ so making the name side seekable looks like the answer. Measured, on a
 | `node (name)` | 1.54 ms | 3,429 ms | identical — **the planner ignores it** |
 | `node (name)` + `ANALYZE` | 2.57 ms | 2,688 ms | `SCAN edge` — a full table scan |
 
-Without `ANALYZE` the index is never chosen, so it would have cost write
-throughput and bought nothing. With `ANALYZE` the planner does use it, and
-picks a *worse* shape: it drives the outer query from a full scan of `edge`,
-which happens to win a small constant at this size and would lose badly at a
-larger one. `stat` gets slower either way. No index on one table can serve a
-predicate that spans two.
+Without `ANALYZE` it is never chosen, so it would have cost write throughput
+and bought nothing; with `ANALYZE` it is chosen and picks a worse shape.
 
-**Rewriting the visibility rule as a window function does work.** NODE-5 says
-the greatest `node_id` per effective name is the visible one, and
-`directory_listing` derived that with a correlated scalar subquery — for
-every row, re-read the container's whole child set and take the max. That is
-the O(N²). As a window it is one pass:
+What does fix it is removing the `coalesce` — era 2 introduced `edge.name`
+as a D-5 *override*, where NULL meant "use the node's name". **Era 3 makes
+it always hold the placement's name.** `create_edge` materialises the node's
+name when no override is given, which moves that coalesce from every read to
+one write, and `edge (from_id, name, to_id) WHERE archived = 0` then answers
+a lookup from the index alone:
 
-```sql
-max(n.node_id) OVER (PARTITION BY ae.from_id, coalesce(ae.name, n.name))
+```
+SEARCH edge USING COVERING INDEX edge_from_name (from_id=? AND name=?)
 ```
 
-Output is byte-identical. The rewrite was adopted against a row-for-row
-differential covering hardlinked placements carrying per-placement names
-(D-5) and hidden same-name siblings — the two cases `visible` exists for —
-and the plan keeps `SEARCH edge USING INDEX edge_from_active (from_id=?)`, so
-a listing still touches only its own container's children.
+| `stat` p50 | before | after | |
+|---|---:|---:|---|
+| 1,000 entries | 0.54 ms | 0.051 ms | 11x |
+| 5,000 entries | 3.04 ms | 0.056 ms | 54x |
+| 10,000 entries | 6.32 ms | 0.063 ms | **100x** |
 
-**It costs nothing to write.** A view is not an index: `create_ops` and the
-ingest curve are unchanged (1,470/s and ~3,000 rows/s, both within noise of
-the previous run). That is the other reason to prefer it to the index.
+The era-3 migration backfills existing rows, an `edge_guard_name` trigger
+keeps the invariant, and a genuine D-5 override is left alone. The index's
+write cost did not show above run-to-run noise: `create_ops` measured
+1,618/s against 1,470/s before, and the ingest curve 3,064–3,341 rows/s
+against 2,952–3,206. One extra B-tree insert per edge is small next to the
+transaction it rides in.
 
-### What is still broken
+### What is left
 
-Lookup. `stat` resolves through `resolve_segment` and `resolve_path`, not
-through the view, and those carry the same two-table predicate with no index
-that can serve it: finding the child of a container by name still scans the
-container's children. At 10,000 entries that is 6.3 ms against ext4's
-0.005 ms — **1,170x**, unchanged by this work.
-
-Fixing it needs the name on the edge row, always, so that
-`edge (from_id, name) WHERE archived = 0` becomes a real covering index.
-Era 2 already added `edge.name` for D-5, but only as an override — NULL means
-"use the node's name" — so the predicate stays a `coalesce` across two
-tables. Populating it unconditionally is a data migration and a schema-era
-bump, which is era-3 work and not a benchmark's to take.
-
-So: **keep directories in the low thousands still**, but for the reason that
-path lookups are linear, not because listing one is quadratic.
+The remaining ~12x on `stat` and ~29x on `readdir` is the cost of resolving
+a path through SQL rather than through an in-kernel dentry cache, and it no
+longer grows with directory size. Directories in the tens of thousands are
+fine now; the reason to keep them smaller is ordinary taste, not a curve.
 
 The harness will not sit through the worst of these. `dir_scale` fits the
 growth exponent from the last two measurements and skips a size it projects

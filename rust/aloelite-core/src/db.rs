@@ -54,7 +54,7 @@ pub const MIN_SQLITE: (u32, u32) = (3, 45);
 /// from the current schema on open, after any table-shape migration in
 /// [`MIGRATIONS`]. A file stamped NEWER is refused rather than half-read.
 /// Bump whenever `schema.sql` changes any view, trigger, or table.
-pub const SCHEMA_ERA: i64 = 2;
+pub const SCHEMA_ERA: i64 = 3;
 
 /// Second writers wait this long before failing (multi-connection model:
 /// a mount is a row, not a connection).
@@ -68,7 +68,7 @@ const NS_BOUND: i64 = 1_000_000_000_000_000;
 /// Table-shape migrations, keyed by the era they upgrade a file TO. Each runs
 /// before the derived-object rebuild and must be crash-idempotent: a failure
 /// between migration and stamp reruns it.
-const MIGRATIONS: &[(i64, Migration)] = &[(2, migrate_to_era2)];
+const MIGRATIONS: &[(i64, Migration)] = &[(2, migrate_to_era2), (3, migrate_to_era3)];
 
 /// One table-shape upgrade step, run against the raw connection.
 type Migration = fn(&Connection) -> rusqlite::Result<()>;
@@ -571,6 +571,27 @@ fn migrate_to_era2(conn: &Connection) -> rusqlite::Result<()> {
         ))?;
     }
     conn.execute_batch("DROP INDEX IF EXISTS edge_active_placement")?;
+    Ok(())
+}
+
+/// Era 2 → 3. Materialise `edge.name` for every placement that inherited it.
+///
+/// In era 2 a null `edge.name` meant "use the node's name", so every lookup
+/// had to match on `coalesce(edge.name, node.name)` — a predicate across two
+/// tables, which no index can serve. Era 3 makes the column always hold the
+/// placement's name, which is what lets `edge_from_name` turn a child lookup
+/// into a seek.
+///
+/// Idempotent by its own WHERE: a crashed run reruns harmlessly, and rows
+/// that already carry an override are not touched. A row whose node has
+/// vanished would be unreachable by path either way; the coalesce keeps it
+/// non-null so the era-3 guard holds.
+fn migrate_to_era3(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "UPDATE edge SET name = coalesce(\
+           (SELECT n.name FROM node n WHERE n.node_id = edge.to_id), edge.to_id\
+         ) WHERE name IS NULL",
+    )?;
     Ok(())
 }
 

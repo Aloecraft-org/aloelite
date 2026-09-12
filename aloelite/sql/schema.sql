@@ -145,11 +145,19 @@ CREATE TABLE IF NOT EXISTS edge (
   to_id     TEXT    NOT NULL REFERENCES node (node_id),
   volume_id TEXT    NOT NULL REFERENCES volume (volume_id),
   archived  INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
-  -- era 2 (D-5): per-placement name override for multi-placement (hardlinked)
-  -- entries. NULL => the node's own name. Resolution and listings match on
-  -- coalesce(edge.name, node.name). Rename is a placement operation in POSIX
-  -- (it edits a directory entry, not the inode): it sets THIS, and refreshes
-  -- node.name too only when this is the node's sole active placement.
+  -- era 2 (D-5): the placement's name. Rename is a placement operation in
+  -- POSIX (it edits a directory entry, not the inode): it sets THIS, and
+  -- refreshes node.name too only when this is the node's sole active
+  -- placement.
+  --
+  -- era 3: ALWAYS POPULATED. It began as an override where NULL meant "use
+  -- the node's name", which forced every lookup to match on
+  -- coalesce(edge.name, node.name) — a predicate spanning two tables, which
+  -- no index can serve, so finding a child by name scanned the container.
+  -- create_edge now materialises the node's name when the caller supplies no
+  -- override, moving that coalesce from every read to one write, and
+  -- edge_from_name below turns the lookup into a seek. The era-3 migration
+  -- backfills existing rows; edge_guard_name keeps it true.
   name      TEXT
 ) STRICT;
 
@@ -190,6 +198,16 @@ END;
 -- multiple active placements — hardlinks (EXT-1's reserved relaxation).
 -- Refuse-only triggers replace the era-1 partial unique index, which could
 -- not consult node.type; the era-2 migration drops that index.
+-- era 3: edge.name is the placement's name, never null — every lookup matches
+-- on it directly, so a null row would be unreachable by path rather than
+-- merely odd. create_edge materialises it; this is the backstop for anything
+-- that inserts without going through the template.
+CREATE TRIGGER IF NOT EXISTS edge_guard_name BEFORE INSERT ON edge
+WHEN NEW.name IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'D-5: edge.name must be set (era 3: no null placement names)');
+END;
+
 CREATE TRIGGER IF NOT EXISTS edge_guard_single_parent BEFORE INSERT ON edge
 WHEN NEW.archived = 0
   AND (SELECT type FROM node WHERE node_id = NEW.to_id) = 'container'
@@ -339,6 +357,10 @@ CREATE TABLE IF NOT EXISTS xattr (
 -- dropped by the era-2 migration; lookups are covered by edge_to_active.
 
 CREATE INDEX IF NOT EXISTS edge_from_active ON edge (from_id) WHERE archived = 0; -- child enumeration
+-- era 3: name lookup within a container, the hot path under every
+-- path-addressed operation. to_id rides along so resolve_path's inner
+-- max(to_id) is answered from the index without touching the table.
+CREATE INDEX IF NOT EXISTS edge_from_name ON edge (from_id, name, to_id) WHERE archived = 0;
 CREATE INDEX IF NOT EXISTS edge_to_active   ON edge (to_id)   WHERE archived = 0; -- active parent / path walk
 CREATE INDEX IF NOT EXISTS edge_to_any      ON edge (to_id);                      -- volatility (any edge, PI-3)
 CREATE INDEX IF NOT EXISTS edge_volume      ON edge (volume_id);                  -- volume-scoped sweeps
@@ -389,8 +411,9 @@ CREATE VIEW IF NOT EXISTS subtree AS
 
 -- Children of a container, with NODE-5 visibility resolved (greatest node_id
 -- per EFFECTIVE name is visible). Ordered per EXT-3 (edge_id, then node_id).
--- era 2 (D-5): the effective name is coalesce(edge.name, node.name) — a
--- hardlinked entry may carry a different name per placement.
+-- era 2 (D-5): the name is the PLACEMENT's — a hardlinked entry may carry a
+-- different one per placement. era 3: edge.name is always populated, so this
+-- reads the column directly rather than coalescing with the node's.
 -- Visibility is resolved with a WINDOW, not a correlated subquery. The
 -- subquery this replaced re-derived the winner for every row by re-reading
 -- the container's whole child set, so one listing was O(N^2) -- 17.9 s for
@@ -421,11 +444,11 @@ CREATE VIEW directory_listing AS
     SELECT
       ae.from_id AS container_id,
       n.node_id,
-      coalesce(ae.name, n.name) AS name,
+      ae.name AS name,
       n.type,
       ae.edge_id,
       max(n.node_id) OVER (
-        PARTITION BY ae.from_id, coalesce(ae.name, n.name)
+        PARTITION BY ae.from_id, ae.name
       ) AS win_max
     FROM active_edge ae JOIN node n ON n.node_id = ae.to_id
   )

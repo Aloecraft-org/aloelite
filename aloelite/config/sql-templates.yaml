@@ -50,7 +50,7 @@ resolution:
       SELECT n.node_id, n.type
       FROM active_edge ae
       JOIN node n ON n.node_id = ae.to_id
-      WHERE ae.from_id = :container AND coalesce(ae.name, n.name) = :name
+      WHERE ae.from_id = :container AND ae.name = :name
       ORDER BY n.node_id DESC
       LIMIT 1
     params:
@@ -86,7 +86,7 @@ resolution:
           FROM active_edge ae
           JOIN node n ON n.node_id = ae.to_id
           WHERE ae.from_id = w.node_id
-            AND coalesce(ae.name, n.name) = substr(w.rest, 1, instr(w.rest, '/') - 1)
+            AND ae.name = substr(w.rest, 1, instr(w.rest, '/') - 1)
         )
         WHERE w.rest <> '' AND w.node_id IS NOT NULL AND w.node_type = 'container'
       )
@@ -520,13 +520,14 @@ mutation:
   create_edge:
     sql: |
       INSERT INTO edge (edge_id, from_id, to_id, volume_id, name)
-      VALUES (:id, :from_id, :to_id, :volume, :name)
+      VALUES (:id, :from_id, :to_id, :volume,
+              coalesce(:name, (SELECT name FROM node WHERE node_id = :to_id)))
     params:
       id:      "EdgeId minted by the host (D-1: same per-volume MonotonicMint as nodes)"
       from_id: "container NodeId (parent)"
       to_id:   "child NodeId"
       volume:  "VolumeId"
-      name:    "placement name override (D-5, hardlinks), or NULL to use the node's own name"
+      name:    "placement name override (D-5, hardlinks), or NULL to take the node's own name — which this template then MATERIALISES, so edge.name is never null (era 3)"
     returns: none
     consumed_by: [create_container, create_entry, move, copy, unpack]
     notes: >
@@ -540,7 +541,7 @@ mutation:
     sql: |
       UPDATE edge SET archived = 1
       WHERE from_id = :parent AND to_id = :node AND archived = 0
-        AND coalesce(name, (SELECT name FROM node WHERE node_id = :node)) = :name
+        AND name = :name
     params:
       parent: "container NodeId the path resolved through"
       node:   "NodeId being detached"
@@ -648,7 +649,7 @@ mutation:
     sql: |
       UPDATE edge SET name = :name
       WHERE from_id = :parent AND to_id = :node AND archived = 0
-        AND coalesce(name, (SELECT name FROM node WHERE node_id = :node)) = :old_name
+        AND name = :old_name
     params:
       parent:   "container NodeId the path resolved through"
       node:     "NodeId"

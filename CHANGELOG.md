@@ -12,6 +12,48 @@ migration rather than a compatible change.
 
 ## Planned
 
+### Schema era 3: edge.name is the placement's name, always
+
+Not on `main`. Lives on `claude/aloelite-ci-benchmarks-9ts6he`.
+
+**Child lookup becomes a covering-index seek.** Era 2 added `edge.name`
+as a D-5 override where NULL meant "use the node's name", so every
+lookup matched on `coalesce(edge.name, node.name)` -- a predicate
+spanning two tables, which no index can serve. Finding a child by name
+therefore scanned the container, making `stat` linear in directory
+size.
+
+Era 3 makes the column always hold the placement's name. `create_edge`
+materialises the node's name when the caller supplies no override, so
+the coalesce moves from every read to one write; `resolve_segment`,
+`resolve_path`, `archive_placement`, `rename_placement` and
+`directory_listing` all match on `edge.name` directly; and a new
+`edge (from_id, name, to_id) WHERE archived = 0` answers the lookup
+from the index alone --
+`SEARCH edge USING COVERING INDEX edge_from_name (from_id=? AND name=?)`.
+
+| `stat` p50 | before | after |
+|---|---|---|
+| 1,000 entries | 0.54 ms | 0.051 ms |
+| 5,000 entries | 3.04 ms | 0.056 ms |
+| 10,000 entries | 6.32 ms | 0.063 ms (100x) |
+
+Flat where it was linear. Against ext4 on the same disk the gap falls
+from 1,170x to 12x. The index's write cost did not show above
+run-to-run noise: `create_ops` 1,618/s against 1,470/s, ingest
+3,064-3,341 rows/s against 2,952-3,206.
+
+`migrate_to_era3` backfills existing rows (idempotent by its own
+WHERE), `edge_guard_name` refuses a null placement name thereafter, and
+a genuine D-5 override is left untouched -- verified by winding a file
+back to era-2 shape, reopening it, and reading the migrated volume from
+BOTH implementations.
+
+**An index on `node (name)` was measured first and discarded.** Without
+ANALYZE the planner ignores it entirely; with ANALYZE it is used and
+picks a worse shape (a full `SCAN edge` for the outer query), making
+`stat` slower while barely moving `readdir`.
+
 ### Listing visibility as a window, not a correlated subquery
 
 Not on `main`. Lives on `claude/aloelite-ci-benchmarks-9ts6he`.
@@ -191,7 +233,7 @@ pyfuse3 default" is also wrong: the default is True.
 
 ## [0.4.0] - unreleased (prerelease)
 
-`v0.4.0` &middot; schema era `2`
+`v0.4.0` &middot; schema era `3`
 
 Release candidates: `v0.4.0rc1` (2026-09-03)
 

@@ -65,7 +65,7 @@ MIN_SQLITE = (3, 45)
 # each entry upgrades a file FROM era-1 (one below its key) and runs before
 # the executescript that rebuilds the derived objects. Steps must be
 # crash-idempotent -- a failure between migration and stamp reruns them.
-SCHEMA_ERA = 2
+SCHEMA_ERA = 3
 
 # ms epochs stay below 1e15 until the year 33658; ns epochs passed 1e18 in
 # 2001. Any stored value under this bound is an unmigrated millisecond value,
@@ -116,7 +116,28 @@ def _migrate_to_era2(conn: sqlite3.Connection) -> None:
     conn.execute("DROP INDEX IF EXISTS edge_active_placement")
 
 
-_MIGRATIONS = {2: _migrate_to_era2}
+def _migrate_to_era3(conn: sqlite3.Connection) -> None:
+    """Era 2 -> 3. Materialise edge.name for every placement that inherited it.
+
+    In era 2 a null edge.name meant "use the node's name", so every lookup had
+    to match on coalesce(edge.name, node.name) -- a predicate across two
+    tables, which no index can serve. Era 3 makes the column always hold the
+    placement's name, which is what lets edge_from_name turn a child lookup
+    into a seek.
+
+    Idempotent by its own WHERE: a crashed run reruns harmlessly, and rows
+    that already carry an override are not touched. A row whose node has
+    vanished would be unreachable by path either way; the coalesce keeps it
+    non-null so the era-3 guard holds.
+    """
+    conn.execute(
+        "UPDATE edge SET name = coalesce("
+        "  (SELECT n.name FROM node n WHERE n.node_id = edge.to_id), edge.to_id"
+        ") WHERE name IS NULL"
+    )
+
+
+_MIGRATIONS = {2: _migrate_to_era2, 3: _migrate_to_era3}
 
 
 def _check_sqlite_capabilities(conn: sqlite3.Connection) -> None:
