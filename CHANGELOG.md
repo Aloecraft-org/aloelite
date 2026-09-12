@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 one era is readable by a build of that era, and an era bump is a
 migration rather than a compatible change.
 
-## [0.4.0] - unreleased (prerelease)
+## [0.4.0] - 2026-09-12
 
 `v0.4.0` &middot; schema era `3`
 

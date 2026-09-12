@@ -63,8 +63,10 @@ planned: []
 
 releases:
   - version: "0.4.0"
-    status: unreleased
-    stable: false
+    date: 2026-09-12
+    status: released
+    stable: true
+    latest: true
     candidates:
       - version: "0.4.0rc1"
         date: "2026-09-03"
@@ -325,7 +327,6 @@ releases:
     date: 2026-08-31
     status: released
     stable: true
-    latest: true
     api_version: 1
     summary: |
       **An S3 frontend, scoped to what a replication client actually calls.**
