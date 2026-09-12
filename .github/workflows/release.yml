@@ -65,6 +65,7 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       prerelease: ${{ steps.plan.outputs.prerelease }}
       publish: ${{ steps.plan.outputs.publish }}
+      sha: ${{ steps.plan.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,6 +103,9 @@ jobs:
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          # The commit, not the ref: `github.sha` is the dispatching ref on a
+          # workflow_dispatch, which is not necessarily what is being built.
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Release notes, from the changelog
         if: steps.plan.outputs.tag != ''
         run: python script/changelog.py render md --tag "${{ steps.plan.outputs.tag }}" | tee release-notes.md
@@ -278,7 +282,7 @@ jobs:
   # publishing. GHCR is the GitHub side of images; Docker Hub stays the
   # Makefile's manual push.
   image:
-    needs: plan
+    needs: [plan, gate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -311,6 +315,63 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Nothing ships untested.
+  #
+  # The build jobs above run in parallel with main.yml's matrix on the same
+  # commit -- two independent workflow runs, with nothing connecting them
+  # until here. This job is that connection, and `image` (which pushes to
+  # GHCR itself) and `release` are the two that wait for it. The build matrix
+  # does not, so this costs no wall clock on the slow half.
+  #
+  # Usually it costs none at all: a commit is pushed to main and tested
+  # before it is tagged, so main.yml has already gone green on this SHA and
+  # there is nothing to wait for. It blocks only when a tag lands on a commit
+  # whose tests are still running -- which is exactly when you want it to.
+  gate:
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      # A dry run publishes nothing, and a -dev.<n> build is exempt by
+      # design: skipping the full gate is what that suffix is for
+      # (doc/ALIGNMENT.md §7).
+      - name: The test matrix passed on this commit
+        if: ${{ needs.plan.outputs.publish == 'true' && !contains(needs.plan.outputs.tag, '-dev.') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          # The matrix runs well inside 30 minutes; the budget is what turns
+          # "main.yml never ran for this commit" into a failure rather than a
+          # job that sits there until the six-hour default.
+          DEADLINE=$(( SECONDS + 40 * 60 ))
+          while :; do
+            RUNS=$(gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/main.yml/runs?head_sha=$SHA" \
+              --jq '.workflow_runs[] | "\(.status)/\(.conclusion)"' || true)
+            # Any completed success is enough: a run from the push to main is
+            # the same commit and the same matrix as a run from the tag.
+            if grep -qx 'completed/success' <<< "$RUNS"; then
+              echo "CI/CD is green on $SHA"
+              exit 0
+            fi
+            if [[ -n "$RUNS" ]] && ! grep -qv '^completed/' <<< "$RUNS"; then
+              echo "::error::CI/CD finished on $SHA without a success"
+              echo "$RUNS"
+              exit 1
+            fi
+            if (( SECONDS > DEADLINE )); then
+              echo "::error::timed out waiting for CI/CD on $SHA"
+              echo "${RUNS:-no run found for this commit}"
+              exit 1
+            fi
+            echo "waiting for CI/CD on $SHA -- ${RUNS:-no run yet}"
+            sleep 30
+          done
+
   # Dry run: what a tag would have shipped, in the run's summary.
   manifest:
     needs: [plan, python, native, wasm]
@@ -333,7 +394,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    needs: [plan, python, native, wasm, image]
+    needs: [plan, gate, python, native, wasm, image]
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:

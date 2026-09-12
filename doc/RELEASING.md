@@ -7,10 +7,11 @@ How a version of Aloelite goes out, end to end. Everything downstream of
 > Aloecraft project is moving to; it is shared verbatim across repositories
 > and is not edited here. What this document describes now conforms to its
 > §1, §2 and §4 — the version scheme, `.technoproj`'s `pre`, and artifact
-> names with no version in them — and to §6's `SHA256SUMS.txt`. Still owed
-> from its §8 checklist: the shared changelog engine with `script/checks.py`,
-> `emit_json` if aloelite is to be mirrored from its changelog, §5's
-> `BUILDINFO.txt`, and §7's `-dev.<n>` builds.
+> names with no version in them — and to §6's `SHA256SUMS.txt`. Its last open
+> question, whether releasing gates on tests, is answered below: it does.
+> Still owed from its §8 checklist: the shared changelog engine with
+> `script/checks.py`, `emit_json` if aloelite is to be mirrored from its
+> changelog, §5's `BUILDINFO.txt`, and §7's `-dev.<n>` builds.
 
 ## Where the version lives
 
@@ -77,6 +78,28 @@ Three workflows run on `v*`, independently:
 - **`release.yml`** — the GitHub release and the image. It refuses a tag the
   changelog does not claim, renders the release body from the entry, and
   derives `prerelease` (a candidate always; a final from `stable`).
+
+### Nothing ships untested
+
+`release.yml`'s builds run in parallel with `main.yml`'s matrix, which is two
+independent workflow runs with nothing connecting them. Its `gate` job is
+that connection: it waits for a **successful `main.yml` run on the same
+commit**, and the two jobs that publish anything — `image`, which pushes to
+GHCR itself, and `release` — wait for it. The build matrix does not, so the
+gate costs nothing on the slow half.
+
+Usually it costs nothing at all. A commit is pushed to `main` and tested
+before it is tagged, so a green run on that SHA already exists and the gate
+returns at once; a run from the push and a run from the tag are the same
+commit and the same matrix, so either satisfies it. It blocks only when a tag
+lands on a commit whose tests are still running, and fails if they finish
+without a success, if no run exists for that commit within forty minutes, or
+if the only runs were cancelled.
+
+Two exemptions, both deliberate: a dry run publishes nothing so the gate
+no-ops, and a `-dev.<n>` build skips it, which is what that suffix is for
+(`ALIGNMENT.md` §7). A re-run dispatch with `publish` on is *not* exempt — it
+finds the original tag push's run and passes on it.
 
 `release.yml` publishes, for a version `V`:
 
