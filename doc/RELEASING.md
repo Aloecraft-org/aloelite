@@ -254,3 +254,18 @@ A tag pushes once; when its run dies of infrastructure, dispatch
 as `ref` and `publish` on. The release is updated in place and its assets
 replaced, so no new tag is needed. `publish.yml` has the same escape hatch
 for PyPI.
+
+**A tag push runs the workflow file as it exists at that tag**, not the one
+on `main`. A dispatch is the other way round — the workflow comes from the
+ref it is dispatched on, and `ref` only says what to check out — which is
+what makes the re-run above able to rebuild an old tag with today's
+pipeline.
+
+That only works back as far as the tree the pipeline can read, though. The
+engine needs `.technoproj`'s `TECHNO_CHANGELOG` block, so a tag from before
+it existed — `v0.4.0` and earlier — cannot be re-run through this pipeline
+at all: `release-check` exits with `TECHNO_CHANGELOG.project is required`
+before anything is built. **`v0.4.0`'s assets are therefore the old scheme**
+— versioned names, Rust triples, `SHA256SUMS` with no extension — and
+permanently so. `ALIGNMENT.md` §11 asks for that rather than works around
+it; 0.5.0 is the first release under the naming above.

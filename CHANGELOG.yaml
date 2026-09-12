@@ -179,8 +179,25 @@ releases:
         wasm leaves are `aloelite_wasi.wasm` and `aloelite_web.tar.gz`. The
         wheel and sdist keep their versioned names, which PyPI mandates.
 
-        Nothing published is renamed: 0.3.7's assets stay as they are, and
-        0.4.0 published none.
+        Nothing published is renamed, and 0.4.0 is not an exception even
+        though it shipped after this: a tag push runs the workflow file as
+        it exists AT THAT TAG, and `v0.4.0` is `386c016`, which predates
+        this. So 0.4.0's eleven assets are the old scheme -- versioned names,
+        Rust triples, `SHA256SUMS` with no extension, no `BUILDINFO.txt`.
+        Re-running it through this pipeline is not available either: the
+        shared engine reads `.technoproj`'s `TECHNO_CHANGELOG` block, and
+        that tree has none, so `release-check` refuses before it starts.
+
+        `ALIGNMENT.md` §11 asks for exactly this -- 0.4.0 under the old
+        spelling so that it ships at all, and 0.5.0 the first release under
+        the new scheme, because one conforming release beats a half-migrated
+        one. Two consequences follow and are worth knowing rather than
+        discovering. The mirror carries 0.4.0 **self-attested** rather than
+        verified, because the manifest it looks for by name is not there
+        (§6); it is not refused. And `latest/aloelite_linux_x86_64_gnu` does
+        not resolve while 0.4.0 is the latest release, because no file of
+        that name exists in it -- the stable download URL that §4 is for
+        begins working at 0.5.0.
       - |
         **The release tooling is `technoproj`, not a copy of it.**
         `script/changelog.py` -- 576 lines here, and 423 and 484 in two
