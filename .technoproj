@@ -24,11 +24,12 @@
       "summary"
     ],
     "latest_requires": [
-      "stable"
+      "stable",
+      "mirror"
     ],
     "candidates": true,
     "planned": true,
-    "emit_json": false,
+    "emit_json": true,
     "stamps": [
       {
         "file": "rust/Cargo.toml",

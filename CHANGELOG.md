@@ -142,6 +142,21 @@ host path the manifest grants.
   `technoproj check` now runs in CI, so it is a copy that is checked
   rather than one that is trusted. That is the whole difference between
   this and the three forks it replaces.
+- **The mirror reads `changelog.json`, and this tree commits it.**
+  `emit_json: true`. A mirror can source a project from GitHub's
+  release list or from its changelog, and aloelite's is the changelog
+  now: the mirror host runs a stdlib-only Python with no build step,
+  so it reads the JSON rather than parsing Markdown or asking an API.
+  Each entry carries its rendered notes, so the mirror needs no
+  renderer of its own. `technoproj-changelog check` runs in CI and is
+  what stops the committed copy going stale.
+
+  Which tags it carries is a per-entry `mirror: true`, not every
+  release: the 0.3.x tags published to PyPI and cut no GitHub release
+  at all, so there is nothing under them to mirror. 0.4.0 is the first
+  and so far only entry marked, and `latest_requires` now names
+  `mirror` alongside `stable`, so the newest release cannot claim
+  `latest` without the question having been answered.
 - **The one invariant that does not generalise moved to
   `script/checks.py`.** The engine calls it if it exists. For aloelite
   it is `SCHEMA_ERA` in `aloelite/db.py` against the era the newest

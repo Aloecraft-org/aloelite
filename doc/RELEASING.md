@@ -14,9 +14,9 @@ How a version of Aloelite goes out, end to end. Everything downstream of
 > to §5's `BUILDINFO.txt`, §6's `SHA256SUMS.txt`, §7's PyPI exclusion, and
 > §9's two gates, and to §3 — the release tooling is
 > [technoproj](https://github.com/Aloecraft-org/technoproj), installed in CI
-> and pinned, rather than a copy of it living here. Still owed: `emit_json`
-> if aloelite is to be mirrored from its changelog rather than from GitHub,
-> and actually cutting a `-dev.<n>` build.
+> and pinned, rather than a copy of it living here — and aloelite is mirrored
+> from its changelog, so `emit_json` is on and `changelog.json` is committed.
+> Still owed: actually cutting a `-dev.<n>` build.
 
 ## The tooling
 
@@ -30,6 +30,15 @@ against the era the newest entry claims.
 
 `make` has to read `version.mk` with no network and no virtualenv, which is
 why that one file is copied into the tree instead of imported.
+
+`generate` writes two files and both are committed: `CHANGELOG.md`, and
+`changelog.json` for the release mirror — which sources aloelite from its
+changelog rather than from GitHub's release list, on a host running a
+stdlib-only Python with no build step. Each entry in the JSON carries its
+notes already rendered, and `mirror_tags` is the list of tags the mirror
+should carry, newest first. Neither file is edited by hand;
+`technoproj-changelog check` runs in CI and fails when either has drifted
+from the YAML.
 
 ## Where the version lives
 
@@ -77,8 +86,9 @@ semver:  0.5.0-rc.1    # what rust/Cargo.toml carries
    The tag body, not PEP 440. Candidates written the old way (`X.Y.ZrcN`)
    still resolve and are not rewritten.
 3. `technoproj-changelog generate`, then `consistency` and
-   `release-check --tag vX.Y.Z-rc.N --publish`; commit `CHANGELOG.md` with
-   it.
+   `release-check --tag vX.Y.Z-rc.N --publish`; commit `CHANGELOG.md` and
+   `changelog.json` with it. A candidate is not mirrored, so it takes no
+   `mirror` flag.
 4. Tag and push: `git tag -a vX.Y.Z-rc.N -m "vX.Y.Z-rc.N" && git push origin vX.Y.Z-rc.N`.
    The tag is `make version`'s `tag:` line. Candidates tagged the old way
    (`vX.Y.ZrcN`) still resolve, so an old release can be re-run; new ones use
@@ -89,11 +99,14 @@ semver:  0.5.0-rc.1    # what rust/Cargo.toml carries
 
 1. Stamp `X.Y.Z` everywhere: `make clear_pre`, then `pyproject.toml` and
    `rust/Cargo.toml` to `X.Y.Z`.
-2. The entry: `status: released`, a `date`, `stable: true`, and move
-   `latest: true` onto it (off the previous release). Keep `candidates`; they
-   are the record of what preceded it.
+2. The entry: `status: released`, a `date`, `stable: true`, `mirror: true`,
+   and move `latest: true` onto it (off the previous release). Keep
+   `candidates`; they are the record of what preceded it. `validate` refuses
+   a `latest` entry that has not answered the mirror question, and refuses
+   `mirror: true` on anything not yet released.
 3. `technoproj-changelog generate`, `consistency`,
-   `release-check --tag vX.Y.Z --publish`; commit.
+   `release-check --tag vX.Y.Z --publish`; commit `CHANGELOG.md` and
+   `changelog.json` with it.
 4. Tag and push `vX.Y.Z` as above.
 
 ## What a tag triggers
