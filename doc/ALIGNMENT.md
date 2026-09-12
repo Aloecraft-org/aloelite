@@ -1,6 +1,8 @@
 # Versioning, artifacts and release alignment
 
-**Revision 3.** Status: proposal, not yet applied to any repository.
+**Revision 4.** Status: proposal. The shared tooling exists at
+[Aloecraft-org/technoproj](https://github.com/Aloecraft-org/technoproj); no
+project repository has been changed yet.
 **Applies to:** diluvium, diluvium-drt, diluvium-lab, dollup, aloelite,
 xtrshow, aloeschema.
 
@@ -12,6 +14,44 @@ at the end saying what each one has to change.
 Rules marked **Verified** were checked against a real toolchain, not assumed.
 Each carries a worked counter-example showing what breaks. They should not be
 "simplified" away.
+
+### What changed in revision 4
+
+**Three snippets in rules marked Verified did not work as written** — all
+three in the copy-paste path, which is the worst place for them. "Verified"
+covered the *claims*; it did not cover the *code*. It does now: every code
+block below has been executed.
+
+- **§7's publish trigger was invalid.** It set `tags` and `tags-ignore` on
+  one event, which Actions rejects. Because an unparseable workflow does not
+  run at all, that spelling switches publishing off rather than narrowing it
+  — and the natural recovery reintroduces exactly the hazard §7 exists to
+  prevent. Corrected, with the ordering rule and the failure mode stated.
+- **§7's dev-tag allocator printed nothing on first use.** With no dev tags
+  yet, `awk` gets no input, so the first `make dev-tag` in every repository
+  would produce `v1.4.0-dev.` and the counter would never start. Seeded with
+  `${n:-0}`. The shipped `version.mk` already guarded this; only the
+  document's prose was wrong.
+- **§5's branch derivation always returned `(detached)`.** The command is
+  fine; the default `actions/checkout` is not — `fetch-depth: 1` fetches only
+  the tag ref, so there are no remote branches to search. `fetch-depth: 0` is
+  now stated as required, with the before/after output.
+- **§3 is settled** — the shared tooling exists, is installable, and
+  reproduces all three repositories' output. This also unblocks §9's tag ↔
+  version gate, which was waiting on it.
+- **xtrshow keeps `__version__`**, derived rather than deleted — it has been
+  a published attribute across ten PyPI releases.
+
+### Scope: what this does not apply to
+
+A sub-project that publishes no release and carries no version of its own —
+xtrshow's `web/`, staged for extraction as `Aloecraft-org/xtrshow-web` — is
+**exempt from everything here except §4's rename coordination**. It has no
+tags to spell, no artifacts to name and no changelog to generate. If it
+consumes a `latest/` URL it is a consumer for §4's purposes and nothing more.
+
+diluvium-lab is *not* exempt: it carries its own version, has a
+`mirrors.json` entry, and is a consumer on two axes (§10).
 
 ### What changed in revision 3
 
@@ -223,8 +263,23 @@ changes the hash it claims. Those are discovered at build time (§5).
 is 423 / 484 / 576 lines in diluvium / DRT / aloelite — one tool, copied
 twice, then drifted.
 
-> **Open:** the shared location is not yet decided. Until it is, treat the
-> engine as vendored at `script/changelog.py` and `script/version.mk`.
+**Settled.** The shared tooling lives at
+[Aloecraft-org/technoproj](https://github.com/Aloecraft-org/technoproj) —
+public, so no CI needs a credential to read it:
+
+```sh
+pip install git+https://github.com/Aloecraft-org/technoproj@v0.1.0
+```
+
+Pin a tag; a release pipeline that tracks `main` changes when nobody touched
+it. `technoproj-changelog` is argument-for-argument compatible with the
+`script/changelog.py` it replaces, so migrating is a change of command name.
+
+`version.mk` cannot travel as an installed command — `make` must read it with
+no network and no virtualenv active — so it is copied into the repository by
+`technoproj sync` at `script/version.mk` and verified by `technoproj check`.
+The copy is checked rather than trusted, which is the whole difference
+between this and what came before.
 
 The divergence turned out to be a **schema and a fact table, not logic**. So
 what differs per repository is declared, in a `TECHNO_CHANGELOG` block:
@@ -426,15 +481,33 @@ are the model.
 A tag-triggered run carries no branch: `github.ref` is the tag. Derive it,
 and record what you actually found rather than guessing:
 
+```yaml
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0        # REQUIRED — see below
+```
+
 ```sh
 BRANCH=$(git branch -r --contains "$SHA" --format='%(refname:lstrip=3)' \
          | grep -vx HEAD | head -1)
 echo "branch: ${BRANCH:-(detached)}"
 ```
 
+**`fetch-depth: 0` is not optional here, and without it the snippet silently
+always reports `(detached)`.** `actions/checkout` defaults to `fetch-depth:
+1` and fetches only the triggering ref, so on a tag push the clone contains
+no remote branches at all for `--contains` to search:
+
+```
+default checkout (depth 1, tag ref only):   BRANCH = []
+fetch-depth: 0 (full history, all refs):    BRANCH = [main]
+```
+
 For a manual dispatch the input ref is authoritative and should be used
-directly. A nightly or branch dev build **must** record this correctly — it
-is the only thing distinguishing two dev builds cut from different branches.
+directly — no fetch depth needed. A nightly or branch dev build **must**
+record this correctly: it is the only thing distinguishing two dev builds cut
+from different branches, and it is exactly the case where a default checkout
+gives you nothing.
 
 ---
 
@@ -470,12 +543,22 @@ Not stored in `.technoproj` — a counter in the tree means a commit on every
 nightly, and two branches could collide.
 
 ```sh
-git tag --list 'v*-dev.*' \
-  | sed -n 's/.*-dev\.\([0-9][0-9]*\)$/\1/p' \
-  | sort -n | tail -1 | awk '{print $1+1}'
+n=$(git tag --list 'v*-dev.*' \
+    | sed -n 's/.*-dev\.\([0-9][0-9]*\)$/\1/p' \
+    | sort -n | tail -1)
+echo "$(( ${n:-0} + 1 ))"
 ```
 
-`make dev-tag` prints the next free tag. The counter is global and monotonic
+The `${n:-0}` seed is not decoration: with no dev tags yet there is nothing
+to increment, and an unguarded pipeline prints an empty string — so the very
+first `make dev-tag` in every repository would yield `v1.4.0-dev.` and the
+counter would never start. That is day one everywhere, and xtrshow, having
+never cut a prerelease, is likeliest to hit it first. Seeded, it gives
+`dev.1` from empty and still `dev.105` against an existing `v0.4.0-dev.104`,
+so global monotonicity holds.
+
+`make dev-tag` prints the next free tag, and the shipped `version.mk` carries
+this guard. The counter is global and monotonic
 per repository and never reused, so `dev.105` names exactly one build
 forever. Ordering holds across versions because the release segment
 dominates: `0.4.0.dev104 < 0.5.0.dev105`.
@@ -505,9 +588,24 @@ Narrow the trigger **before** the first dev tag is cut:
 ```yaml
 on:
   push:
-    tags: ['v*']
-    tags-ignore: ['v*-dev.*']
+    tags: ['v*', '!v*-dev.*']
 ```
+
+Three things about that one line, all of which GitHub enforces, and all of
+which `actionlint` will tell you about:
+
+- **One `tags` list with a `!` negation — never `tags` plus `tags-ignore`.**
+  Actions rejects both filters on one event: *"both `tags` and `tags-ignore`
+  filters cannot be used for the same event."* This matters more than a
+  syntax error usually would, because **a workflow that fails to parse does
+  not run at all** — so the `tags-ignore` spelling does not narrow
+  publishing, it silently switches publishing off, with no failed run to
+  notice. The likely recovery is worse than the bug: someone reverts to a
+  plain `tags: ['v*']` to unblock a release, and now dev tags publish to PyPI
+  while everyone believes this section is in force.
+- **Order is load-bearing.** A matching negative pattern *after* a positive
+  match excludes the ref. Put the `!` second or it does nothing.
+- **At least one non-`!` pattern is required.** Only negations match nothing.
 
 §7 says prune old dev releases. That works on GitHub. It does not work on
 PyPI, which is why the exclusion is not optional.
@@ -578,7 +676,7 @@ xtrshow's `publish.yml` does exactly this: tag `v1.4.0` while
 the same class of drift already visible — `Cargo.toml` at `0.0.2`, the only
 tag `v0.0.1`.
 
-`changelog.py release-check --tag "$TAG"` is this gate. Run it in preflight.
+`technoproj-changelog release-check --tag "$TAG"` is this gate. Run it in preflight.
 
 ---
 
@@ -806,12 +904,21 @@ born conforming.
       `pyproject.toml:7`, `xtrshow/__init__.py:9`, `web/vendor/VERSION`. Both
       release-prep commits bump all four together. `stamps` (§3) is for
       exactly this.
-- [ ] **Delete `__version__`** — nothing imports it; both CLIs call
-      `get_version()`, which reads installed distribution metadata, so it can
-      only ever disagree. Keep `web/vendor/VERSION`: under Pyodide the
-      package is not pip-installed and `get_version()` returns
-      `"unknown (not installed)"`, which is why `web/assets/demo.js` fetches
-      that file.
+- [ ] **Derive `__version__`, do not delete it.** Nothing inside this repo
+      imports it, but it has been an attribute of the published package
+      across all ten PyPI releases, and `import xtrshow; xtrshow.__version__`
+      is a common enough idiom that removing it is a breaking change for an
+      unknown number of consumers. The goal is only to stop hand-typing it,
+      and `__version__ = get_version()` achieves that at zero risk. If you do
+      want it gone, §1's own reasoning says that is user-visible and belongs
+      in the `v1.4.0` notes.
+- [ ] Keep `web/vendor/VERSION`: under Pyodide the package is not
+      pip-installed and `get_version()` returns `"unknown (not installed)"`,
+      which is why `web/assets/demo.js` fetches that file. But
+      **`sync-xtrshow.sh` derives it by grepping `pyproject.toml`**, which
+      under §1 holds the *PEP 440* spelling — so on a prerelease the web demo
+      would display `1.4.0rc1` rather than the canonical `1.4.0-rc.1`. Derive
+      it from the tag body instead.
 - [ ] **Correction to revision 1:** `version.mk` here does *not* conform. It
       is Cargo-shaped (`_sync_version` writes `.package.version`, §8),
       carries `__VERSION_FULL := 1.3.0 build 0` — a fifth spelling the new

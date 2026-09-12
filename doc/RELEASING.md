@@ -4,15 +4,20 @@ How a version of Aloelite goes out, end to end. Everything downstream of
 `CHANGELOG.yaml` is derived; the tag is the only manual push.
 
 > [`ALIGNMENT.md`](/doc/ALIGNMENT.md) is the org-wide standard every
-> Aloecraft project is moving to; it is shared verbatim across repositories
-> and is not edited here. What this document describes now conforms to its
-> §1, §2 and §4 — the version scheme, `.technoproj`'s `pre`, and artifact
-> names with no version in them — and to §6's `SHA256SUMS.txt`. Its last open
-> question, whether releasing gates on tests, is answered below: it does.
-> Still owed from its §8 checklist: the shared changelog engine with
-> `script/checks.py`, `emit_json` if aloelite is to be mirrored from its
-> changelog, and §7's `-dev.<n>` builds — the tag spelling for those is
-> supported, but nothing cuts one yet.
+> Aloecraft project is moving to. The canonical copy lives in
+> [Aloecraft-org/technoproj](https://github.com/Aloecraft-org/technoproj);
+> the copy here is byte-identical to it and is not edited, so it can be
+> diffed against upstream.
+>
+> What this document describes conforms to its §1, §2 and §4 — the version
+> scheme, `.technoproj`'s `pre`, and artifact names with no version in them —
+> to §5's `BUILDINFO.txt`, §6's `SHA256SUMS.txt`, §7's PyPI exclusion, and
+> §9's two gates. Still owed: **the shared engine itself**, which is what
+> `script/changelog.py` and `script/version.mk` here become
+> (`technoproj-changelog` and `technoproj sync`), along with the
+> `script/checks.py` that `SCHEMA_ERA` moves into and the `TECHNO_CHANGELOG`
+> declaration; `emit_json` if aloelite is to be mirrored from its changelog
+> rather than from GitHub; and actually cutting a `-dev.<n>` build.
 
 ## Where the version lives
 
