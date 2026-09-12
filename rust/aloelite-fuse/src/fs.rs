@@ -22,7 +22,7 @@ use std::ffi::OsStr;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aloelite_core::records::NodeInfo;
+use aloelite_core::records::{DirEntry, NodeInfo};
 use aloelite_core::types::{MountId, NodeId, NodeType, WriteMode};
 use aloelite_core::{Db, Descriptor, FsError, Result};
 use fuser::{
@@ -72,6 +72,7 @@ impl AloeFuse {
                 nlookup: HashMap::new(),
                 open: HashMap::new(),
                 overlays: HashMap::new(),
+                dirs: HashMap::new(),
                 next_fh: 0,
             })),
         })
@@ -117,6 +118,10 @@ pub struct Inner {
     nlookup: HashMap<u64, u64>,
     open: HashMap<u64, Handle>,
     overlays: HashMap<u64, Overlay>,
+    /// fh -> the directory listing snapshotted at `opendir`. Deliberately
+    /// separate from `open`: nothing that walks file handles (flush, release,
+    /// the getattr size overlay) should have to know directories exist.
+    dirs: HashMap<u64, Vec<DirEntry>>,
     next_fh: u64,
 }
 
@@ -305,15 +310,55 @@ impl Inner {
     }
 
     // -- directories --------------------------------------------------------
-    fn readdir(&mut self, inode: u64, offset: u64, reply: &mut ReplyDirectory) -> Result<()> {
+    /// Snapshot the listing once, for the life of the handle.
+    ///
+    /// The kernel reads a directory in buffer-sized instalments: `readdir` is
+    /// called again and again with a rising `offset` until the directory is
+    /// exhausted. Rebuilding the listing inside `readdir` therefore cost one
+    /// full listing PER CALL — O(calls x entries) on top of whatever a single
+    /// listing costs, which is the difference between listing a 10,000-entry
+    /// directory in seconds and in minutes.
+    ///
+    /// Snapshotting also fixes the cookies. A readdir offset has to mean the
+    /// same entry on the next call; against a freshly built listing, an entry
+    /// created or removed mid-scan shifted every cookie after it and the
+    /// kernel could skip or repeat entries. A snapshot cannot shift. POSIX
+    /// leaves concurrent modification during a scan unspecified, which is what
+    /// lets us take the stable reading rather than the live one.
+    fn opendir(&mut self, inode: u64) -> Result<u64> {
         let path = self.path(inode)?;
-        let entries = aloelite_core::ops::list(&mut self.db, &self.mount, &path)?;
-        for (i, e) in entries.iter().filter(|e| e.visible).enumerate() {
-            if (i as u64) < offset {
+        let entries: Vec<DirEntry> = aloelite_core::ops::list(&mut self.db, &self.mount, &path)?
+            .into_iter()
+            .filter(|e| e.visible)
+            .collect();
+        let fh = self.next_fh();
+        self.dirs.insert(fh, entries);
+        Ok(fh)
+    }
+
+    fn readdir(&mut self, fh: u64, offset: u64, reply: &mut ReplyDirectory) -> Result<()> {
+        // Taken OUT of the map for the walk so the snapshot and `self.db` are
+        // disjoint borrows, then put back. Cloning it per call instead would
+        // reintroduce a per-call cost proportional to the directory, which is
+        // the whole thing this is removing.
+        let Some(entries) = self.dirs.remove(&fh) else {
+            return Err(FsError::not_found(format!("directory handle {fh}")));
+        };
+        self.emit_dir(&entries, offset, reply);
+        self.dirs.insert(fh, entries);
+        Ok(())
+    }
+
+    fn emit_dir(&mut self, entries: &[DirEntry], offset: u64, reply: &mut ReplyDirectory) {
+        for (i, e) in entries.iter().enumerate().skip(offset as usize) {
+            let Ok(info) = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &e.node)
+            else {
+                // Unlinked since the snapshot. POSIX lets a scan omit an entry
+                // removed while it runs, and omitting it is far better than
+                // failing the whole readdir over one racing unlink.
                 continue;
-            }
+            };
             let child = self.register(e.node.clone());
-            let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &e.node)?;
             if reply.add(
                 INodeNo(child),
                 i as u64 + 1,
@@ -323,7 +368,10 @@ impl Inner {
                 break;
             }
         }
-        Ok(())
+    }
+
+    fn releasedir(&mut self, fh: u64) {
+        self.dirs.remove(&fh);
     }
 
     // -- create / delete ----------------------------------------------------
@@ -1043,19 +1091,34 @@ impl Filesystem for AloeFuse {
         }
     }
 
-    fn opendir(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        reply.opened(FileHandle(0), fuser::FopenFlags::empty());
+    fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        match guard!(self).opendir(ino.0) {
+            Ok(fh) => reply.opened(FileHandle(fh), fuser::FopenFlags::empty()),
+            Err(e) => reply.error(err(&e)),
+        }
+    }
+
+    fn releasedir(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _flags: OpenFlags,
+        reply: ReplyEmpty,
+    ) {
+        guard!(self).releasedir(fh.0);
+        reply.ok();
     }
 
     fn readdir(
         &self,
         _req: &Request,
-        ino: INodeNo,
-        _fh: FileHandle,
+        _ino: INodeNo,
+        fh: FileHandle,
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        match guard!(self).readdir(ino.0, offset, &mut reply) {
+        match guard!(self).readdir(fh.0, offset, &mut reply) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(err(&e)),
         }

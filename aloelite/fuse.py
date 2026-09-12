@@ -25,11 +25,21 @@ a 15 GB copy no longer buffers the whole file. A read-only file is served by a
 ranged-read Descriptor (only the chunks covering each read are fetched).
 
 Caching: the kernel page cache and attr/entry caches are enabled (direct_io
-dropped). Attr/entry TTL is 1s, bounding staleness for out-of-process
-changes to the backing file; a fresh open drops cached pages
-(keep_cache=False, the pyfuse3 default), so cross-process changes are seen
-on the next open. Within one mount, sizes reported by getattr are overlaid
-with any unflushed append/rw-handle state, keyed by inode.
+dropped). Attr/entry TTL is 1s, bounding staleness for out-of-process changes
+to the backing file. Cached pages SURVIVE a fresh open -- open() returns a
+bare handle, so pyfuse3 supplies its FileInfo defaults, and keep_cache there
+is True; repeat reads of an unchanged file are served by the kernel and never
+reach this daemon. (An earlier version of this note claimed keep_cache=False
+was the pyfuse3 default and that a fresh open dropped the cache. Both were
+wrong -- measured, a re-read goes about 20x faster than the first read, which
+it could not if the pages had been dropped.) Within one mount, sizes reported
+by getattr are overlaid with any unflushed append/rw-handle state, keyed by
+inode.
+
+Directories: the visible listing is snapshotted at opendir and every readdir
+instalment is served from it, because the kernel calls readdir repeatedly with
+a rising offset and rebuilding the listing per call made a scan cost one
+listing per call.
 
 Writes buffer only the touched byte ranges, reads overlay them on ranged reads
 of committed content, and flush/fsync/ release commit each coalesced extent as
@@ -245,6 +255,10 @@ class AloeFuse(pyfuse3.Operations):
         # inode -> _OpenFile: ONE dirty-extent overlay per inode, shared by
         # every rw fh on it and consulted/flushed by cross-handle reads.
         self._files: dict[int, _OpenFile] = {}
+        # fh -> the directory listing snapshotted at opendir. Deliberately NOT
+        # in _open: nothing that walks file handles (flush, settle, the getattr
+        # size overlay) should have to know directories exist.
+        self._dirs: dict[int, list] = {}
         self._fh = 0
 
     # -- inode bookkeeping --------------------------------------------------
@@ -387,22 +401,51 @@ class AloeFuse(pyfuse3.Operations):
 
     # -- directories --------------------------------------------------------
     async def opendir(self, inode, ctx):
-        return inode
+        """Snapshot the listing once, for the life of the handle.
 
-    async def readdir(self, inode, start, token):
+        The kernel reads a directory in buffer-sized instalments: readdir is
+        called again and again with a rising `start` until the directory is
+        exhausted. Rebuilding the listing inside readdir therefore cost one
+        full listing PER CALL -- O(calls x entries) on top of whatever a
+        single listing costs, which is the difference between listing a
+        10,000-entry directory in seconds and in minutes.
+
+        Snapshotting also fixes the cookies. A readdir offset has to mean the
+        same entry on the next call; against a freshly built listing, an entry
+        created or removed mid-scan shifted every cookie after it and the
+        kernel could skip or repeat entries. A snapshot cannot shift. POSIX
+        leaves concurrent modification during a scan unspecified, which is
+        what lets us take the stable reading rather than the live one.
+        """
         try:
             entries = [e for e in self.m.list(self._path(inode)) if e.visible]
         except Exception as e:
             raise _wrap(e)
-        for i, e in enumerate(entries):
-            if i < start:
+        fh = self._next_fh()
+        self._dirs[fh] = entries
+        return fh
+
+    async def readdir(self, fh, start, token):
+        entries = self._dirs.get(fh)
+        if entries is None:
+            raise pyfuse3.FUSEError(errno.EBADF)
+        for i in range(start, len(entries)):
+            e = entries[i]
+            try:
+                info = self.m.stat_by_id(e.node)
+            except Exception:
+                # Unlinked since the snapshot. POSIX lets a scan omit an entry
+                # removed while it runs, and omitting it is far better than
+                # failing the whole readdir over one racing unlink.
                 continue
-            info = self.m.stat_by_id(e.node)
             ino = self._register(e.node)
             if not pyfuse3.readdir_reply(
                 token, os.fsencode(e.name), self._attr(ino, info), i + 1
             ):
                 break
+
+    async def releasedir(self, fh):
+        self._dirs.pop(fh, None)
 
     # -- create / delete ----------------------------------------------------
     async def mkdir(self, parent_inode, name, mode, ctx):

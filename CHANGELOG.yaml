@@ -60,6 +60,49 @@ schema: 1
 repo: Aloecraft-org/aloelite
 
 planned:
+  - title: "FUSE: cache the directory listing for the life of the handle"
+    branch: claude/aloelite-ci-benchmarks-9ts6he
+    summary: |
+      **Both daemons rebuilt the whole directory listing on every kernel
+      `readdir` continuation call.** The kernel reads a directory in
+      buffer-sized instalments, calling `readdir` again and again with a
+      rising offset, so a scan cost one full listing PER CALL -- and since a
+      listing is already O(N^2) (`directory_listing` resolves NODE-5
+      visibility with a correlated subquery per row), a scan through a mount
+      was close to cubic.
+
+      `AloeFuse.opendir` and `Inner::opendir` now snapshot the visible
+      listing, `readdir` serves every instalment from it, and `releasedir`
+      drops it. The Python handle table is a separate `_dirs` dict and the
+      Rust one a separate `dirs` map, so nothing that walks FILE handles
+      (flush, release, the getattr size overlay) has to know directories
+      exist.
+
+      Measured, one `readdir` of a 5,000-entry directory:
+
+      | | before | after |
+      |---|---|---|
+      | `fuse` | 328 s | 12.8 s (26x) |
+      | `rust-fuse` | 88 s | 11.5 s (7.7x) |
+
+      Fitted growth falls from n^2.94 to n^2.0 (Python) and n^2.74 to n^2.1
+      (Rust). At 10,000 entries neither daemon could be measured before --
+      the benchmark projected 2,524 s and 592 s and skipped both -- and both
+      now finish in about the time the library itself takes (52 s and 47 s
+      against 51 s). The mount's own contribution to readdir cost is gone;
+      what remains is the O(N^2) listing underneath, which is a schema
+      question (an index on `node (name)`, or D-5's `edge.name`) and not the
+      daemons'.
+
+      The snapshot also fixes the offset cookies, which were never stable: a
+      readdir offset has to mean the same entry on the next call, and against
+      a freshly built listing an entry created or removed mid-scan shifted
+      every cookie after it, so the kernel could skip or repeat entries. A
+      snapshot cannot shift. POSIX leaves concurrent modification during a
+      scan unspecified, which is what lets both daemons take the stable
+      reading; an entry unlinked after the snapshot is omitted rather than
+      failing the whole scan.
+
   - title: "Benchmark suite and CI benchmark job"
     branch: claude/aloelite-ci-benchmarks-9ts6he
     summary: |
@@ -125,15 +168,10 @@ planned:
       the edge, which D-5 already plans -- a schema question that belongs
       with the era-2 work, not with a benchmark.
 
-      Through a mount it is worse again, for a second and independent reason,
-      and in BOTH daemons: `AloeFuse.readdir` calls `Mount.list()` and then
-      skips the first `start` entries, so the kernel's continuation calls
-      recompute the whole listing each time; `aloelite-fuse`'s `readdir` is a
-      faithful handler-for-handler port and does the same, plus a
-      `stat_by_id` per entry. The FUSE-to-library ratio is therefore not
-      constant -- 9.5x at 1,000 entries, 27x at 5,000, where one `ls` takes
-      211 s. That half needs no schema change in either language: cache the
-      listing for the life of the open directory handle.
+      Through a mount it was worse again, for a second and independent
+      reason, and in BOTH daemons -- the listing was rebuilt on every kernel
+      continuation call. That half needed no schema change and is fixed; see
+      the entry above.
 
       **Second finding, Rust side:** `aloelite-fuse` replies to `open` with
       `FopenFlags::empty()`, so the kernel invalidates a file's page cache on

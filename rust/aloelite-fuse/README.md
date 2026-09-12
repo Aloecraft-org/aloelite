@@ -35,6 +35,7 @@ opened decides how its bytes move:
 | `O_WRONLY \| O_TRUNC` | sequential stream writer | writes straight to the engine (bounded memory for any size); a non-sequential write is `ENOTSUP`; `flush` commits and the handle becomes random-access so a dup'd fd keeps working |
 | `O_WRONLY \| O_APPEND` | append batcher | buffered, committed per 1 MiB and on flush; a reader that arrives mid-batch still sees the bytes |
 | `O_RDWR`, or a partial `O_WRONLY` | dirty-extent overlay, **one per inode** shared by every such handle | writes buffer as sorted extents flushed as atomic `write_range`s; reads overlay them on committed content |
+| `opendir` | listing snapshot, one per handle | the visible listing is taken once at `opendir` and every `readdir` instalment is served from it; dropped at `releasedir`. Rebuilding it per continuation call made a scan cost one listing per call |
 
 Memory is bounded by dirty bytes, never file size. `getattr` reports a size
 overlaid with unflushed state, so `fstat` agrees with what a second fd can

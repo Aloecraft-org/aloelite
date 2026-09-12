@@ -617,10 +617,10 @@ database. Encryption is close to free on top of that.
 **Avoid** large directories. Nothing in the schema can turn "the child of this
 directory named X" into an index seek, so a `stat` costs a scan of the whole
 directory and a `readdir` costs one such scan per entry — linear and
-quadratic where ext4 is flat and linear. At 10,000 entries that is 6.2 ms to
-stat one file and 49 s to list them all, against ext4's 0.005 ms and 2.9 ms
-on the same disk. Both implementations share it. Keep directories in the
-low thousands until that changes.
+quadratic where ext4 is flat and linear. At 10,000 entries that is 6.3 ms to
+stat one file and 51 s to list them all, against ext4's 0.005 ms and 2.8 ms
+on the same disk. Both implementations share it, and it needs a schema
+change to fix. Keep directories in the low thousands until that happens.
 
 **Two implementations, one format.** A volume written by either `aloelite`
 binary reads correctly in the other, plain and encrypted. The Rust CLI starts

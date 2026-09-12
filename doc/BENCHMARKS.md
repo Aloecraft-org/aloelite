@@ -414,58 +414,74 @@ is aloelite's or whether every filesystem pays it:
 
 | entries | ext4 | `direct` | `fuse` | `rust-fuse` |
 |---:|---:|---:|---:|---:|
-| 1,000 | 0.005 ms | 0.53 ms | 0.87 ms | 0.59 ms |
-| 5,000 | 0.005 ms | 2.99 ms | 3.40 ms | 2.98 ms |
-| 10,000 | 0.005 ms | 6.20 ms | 6.58 ms | 5.75 ms |
+| 1,000 | 0.005 ms | 0.54 ms | 0.91 ms | 0.59 ms |
+| 5,000 | 0.005 ms | 3.06 ms | 3.63 ms | 3.00 ms |
+| 10,000 | 0.005 ms | 6.34 ms | 6.69 ms | 5.79 ms |
 | growth | **flat** | **linear** | linear | linear |
 
 **One full `readdir`**
 
 | entries | ext4 | `direct` | `fuse` | `rust-fuse` |
 |---:|---:|---:|---:|---:|
-| 1,000 | 0.32 ms | 358 ms | 2.9 s | 1.1 s |
-| 5,000 | 1.45 ms | 9.5 s | **328 s** | **88 s** |
-| 10,000 | 2.92 ms | 49 s | not run (proj. 2,524 s) | not run (proj. 592 s) |
-| fitted | **linear** | **n^2.1** | **n^2.94** | **n^2.74** |
+| 1,000 | 0.32 ms | 375 ms | 453 ms | 369 ms |
+| 5,000 | 1.52 ms | 10.2 s | 12.8 s | 11.5 s |
+| 10,000 | 2.83 ms | 51.0 s | 51.7 s | 47.0 s |
+| fitted | **linear** | **n^2.1** | **n^2.0** | **n^2.1** |
 
 ext4 is flat on lookup because its directories are hashed (htree) and linear
 on `readdir` because that is the floor for reading N names. Those are the
 right shapes. aloelite is one power worse on both: **linear lookup and
-quadratic readdir** in the library, and readdir through a mount is close to
-cubic because the quadratic listing is recomputed on every kernel
-continuation call.
+quadratic readdir**, in every frontend.
 
 At 10,000 entries — a mail spool, a `node_modules`, a month of daily files —
-that is **1,100x ext4 to `stat` one file and ~17,000x to list the
-directory**. Through a mount at 5,000 entries, one `ls` takes 5.5 minutes
-against ext4's 1.5 ms.
+that is **1,160x ext4 to `stat` one file and ~18,000x to list the
+directory**.
+
+The three aloelite columns now agree with each other, which is the point of
+the next section: they did not used to.
 
 Both the constant and the exponent matter, and only the exponent is
 alarming: a constant factor is a port away, an exponent is a schema away.
 
-**Through a mount it is worse again, and for a second, separate reason —
-in both daemons.** `AloeFuse.readdir(inode, start, token)` in
-`aloelite/fuse.py` calls `self.m.list(...)` — the whole O(N²) listing — and
-then skips the first `start` entries. The kernel calls `readdir` repeatedly
-with a rising `start` until the directory is exhausted, because one reply
-buffer holds only so many entries, so the full listing is recomputed on
-every continuation call. That is why the FUSE-to-library ratio is not a
-constant: 9.5x at 1,000 entries, 27x at 5,000.
+**Through a mount this used to be far worse, and no longer is.** Both daemons
+rebuilt the whole listing on every kernel continuation call. The kernel reads
+a directory in buffer-sized instalments, calling `readdir` again and again
+with a rising offset, so a scan cost one full O(N^2) listing *per call* —
+close to cubic in wall-clock terms, and the reason a listing that the library
+did in 9.5 s took minutes through a mount.
 
-`rust/aloelite-fuse/src/fs.rs` does the same thing — `ops::list(...)` per
-call, then `.enumerate()` and skip to `offset`, plus a `stat_by_id` per
-entry. The port is faithful handler-for-handler, and it inherited this. So
-the `dir_scale` suite measures both daemons: the constant factor differs,
-the shape does not.
+Both daemons now snapshot the listing at `opendir`, serve every `readdir`
+from it, and drop it at `releasedir`:
 
-This half is fixable without touching the schema, in either language: cache
-the listing for the life of the open directory handle instead of rebuilding
-it per call.
+| one `readdir` of 5,000 entries | before | after | |
+|---|---:|---:|---|
+| `fuse` | 328 s | **12.8 s** | 26x |
+| `rust-fuse` | 88 s | **11.5 s** | 7.7x |
+| fitted exponent, `fuse` | n^2.94 | **n^2.0** | |
+| fitted exponent, `rust-fuse` | n^2.74 | **n^2.1** | |
+
+At 10,000 entries neither daemon could previously be measured at all — the
+harness projected 2,524 s and 592 s and skipped them. Both now complete in
+about the same time as the library does, which is the correct outcome: **the
+mount's own contribution to readdir cost is gone**, and what remains is the
+O(N^2) listing underneath, which is the schema issue above and not the
+daemons'.
+
+The snapshot also fixes the offsets. A readdir cookie has to mean the same
+entry on the next call; against a freshly built listing, an entry created or
+removed mid-scan shifted every cookie after it and the kernel could skip or
+repeat entries. A snapshot cannot shift. POSIX leaves concurrent modification
+during a scan unspecified, which is what lets both daemons take the stable
+reading — and an entry unlinked after the snapshot is simply omitted rather
+than failing the whole scan.
 
 The harness will not sit through the worst of these. `dir_scale` fits the
 growth exponent from the last two measurements and skips a size it projects
 past a 120-second budget, recording the projection and the fitted exponent,
-so a skipped row never reads as a fast one.
+so a skipped row never reads as a fast one. It is what caught the per-call
+re-listing: the FUSE columns were pulling away from the library column
+faster than the library column grew, which a single size could not have
+shown.
 
 Two candidate fixes, neither of them this change's to make: an index on
 `node (name)`, which lets the planner drive the join from the name side
