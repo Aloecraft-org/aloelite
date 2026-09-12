@@ -1,14 +1,18 @@
 ROOT_DIR:=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 __TECHNO_PROJECT_FILE:=${ROOT_DIR}/.technoproj
-TECHNO_VERSION:=$(shell jq -r '.TECHNO_VERSION | "\(.major).\(.minor).\(.patch)" + (if .build != 0 and .build != "0" then "\(.build)" else "" end)' .technoproj)
 
 -include ${ROOT_DIR}/script/version.mk
 -include ${ROOT_DIR}/script/python.mk
 
+# The image tag is the PEP 440 spelling, derived in version.mk with every
+# other one. It used to be assembled by a second jq expression here, which is
+# how a version gets two definitions and then two values.
+TECHNO_VERSION:=${__VERSION_PEP440}
+
 echo:
-	@echo ${TECHNO_VERSION}
-	@echo VERSION: ${__VERSION_FULL}
-	@echo TAG: ${__TAG}
+	@echo VERSION: ${__VERSION_PEP440}
+	@echo SEMVER:  ${__VERSION_SEMVER}
+	@echo TAG:     ${__TAG}
 
 clean:
 

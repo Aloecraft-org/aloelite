@@ -154,6 +154,44 @@ releases:
         author's page.
     changed:
       - |
+        **Release artifacts carry no version, and the checksum manifest is
+        `SHA256SUMS.txt`.** Both from `doc/ALIGNMENT.md`, the Aloecraft-wide
+        standard this repository is moving to. The mirror materialises
+        `latest/` as a symlink to the tag directory, so a versioned filename
+        means no download URL that stays put, and the mirror looks for the
+        manifest by name -- that missing extension was the only reason
+        aloelite's mirror was switched off.
+
+        Names follow a fixed platform vocabulary rather than Rust triples:
+        `aloelite-0.4.0-x86_64-unknown-linux-gnu.tar.gz` becomes
+        `aloelite_linux_x86_64_gnu`, a bare binary. Each platform now ships
+        its binaries separately -- the CLI, and `aloelite_fuse_*` where the
+        daemon builds -- plus one `aloelite_<platform>_complete` bundle
+        carrying everything built for it. The wasm leaves are
+        `aloelite_wasi.wasm` and `aloelite_web.tar.gz`. The wheel and sdist
+        keep their versioned names, which PyPI mandates.
+
+        Nothing published is renamed: 0.3.7's assets stay as they are, and
+        0.4.0 published none.
+      - |
+        **`.technoproj` says `pre` where it said `build`.** `null` for a
+        release, `{"kind": "rc", "n": 1}` for a candidate. The old field
+        meant three different things in three repositories and was typed two
+        ways; this one has a single meaning and a defined spelling in each
+        ecosystem.
+
+        `script/version.mk` derives all three from it -- `0.5.0rc1` for
+        PyPI, `0.5.0-rc.1` for Cargo, `v0.5.0-rc.1` for the tag -- so there
+        is no second definition of any of them, and `make echo` prints what
+        you are about to stamp. `make pre_set KIND=rc N=1`, `make pre_bump`
+        and `make pre_clear` replace `make inc_build`. The Makefile's own
+        second jq expression for the image tag is gone with it.
+
+        `changelog.py consistency` now holds `pre` against `pyproject.toml`,
+        so the field cannot drift from what it describes, and candidate tags
+        resolve under both `vX.Y.Z-rc.N` and the legacy `vX.Y.ZrcN` -- new
+        candidates use the first, already-pushed tags keep working.
+      - |
         **New crate: `aloelite-api`, the Mount API dispatched by name.** It
         holds `OPS` (the spec's operations and their parameter names, as
         data), the coercions that turn named arguments into the engine's

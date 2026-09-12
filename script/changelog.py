@@ -87,6 +87,22 @@ def candidates_of(r):
     return r.get("candidates") or []
 
 
+def candidate_tags(c):
+    """Every tag spelling a candidate answers to.
+
+    The scheme is `v0.4.0-rc.1` (doc/ALIGNMENT.md §1): the tag is canonical
+    and SemVer-spelled, and PEP 440's `0.4.0rc1` is what pyproject and PyPI
+    derive from it. The legacy `v0.4.0rc1` is still accepted because tags
+    already pushed under it exist and re-running one of their releases must
+    keep working -- new candidates get the first spelling."""
+    version = c.get("version")
+    if not version:
+        return ()
+    semver = pep440_to_semver(version)
+    return tuple(dict.fromkeys(t for t in ("v%s" % semver if semver else None,
+                                           "v%s" % version) if t))
+
+
 def find_tag(doc, tag):
     """-> (release, candidate or None) for a release tag or a candidate tag
     listed under a release; (None, None) when nothing claims the tag."""
@@ -94,7 +110,7 @@ def find_tag(doc, tag):
         if tag_of(r) == tag:
             return r, None
         for c in candidates_of(r):
-            if isinstance(c, dict) and "v%s" % c.get("version") == tag:
+            if isinstance(c, dict) and tag in candidate_tags(c):
                 return r, c
     return None, None
 
@@ -110,6 +126,21 @@ def pep440_to_semver(v):
     if not kind:
         return base
     return "%s-%s.%s" % (base, {"a": "alpha", "b": "beta", "rc": "rc"}[kind], n)
+
+
+def pep440_pre(pre):
+    """The PEP 440 suffix a `.technoproj` TECHNO_VERSION.pre spells: "" for a
+    release, `.dev7` / `a1` / `b2` / `rc1` for a prerelease. None when it is
+    not a shape the scheme allows (doc/ALIGNMENT.md §1)."""
+    if pre is None:
+        return ""
+    if not isinstance(pre, dict):
+        return None
+    marker = {"dev": ".dev", "alpha": "a", "beta": "b", "rc": "rc"}.get(pre.get("kind"))
+    n = pre.get("n")
+    if marker is None or isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        return None
+    return "%s%d" % (marker, n)
 
 
 def load():
@@ -433,6 +464,23 @@ def consistency(doc):
                     ".technoproj TECHNO_VERSION.%s is %r but %s implies "
                     "%r" % (key, proj.get(key), where, want)
                 )
+
+        # `pre` is the prerelease this tree is on, and it has to spell what
+        # pyproject spells. Without this the field that replaced `build` is
+        # decorative, and the drift the whole check exists to catch walks
+        # straight past it. doc/ALIGNMENT.md §1 and §2.
+        suffix = pep440_pre(proj.get("pre"))
+        if suffix is None:
+            bad.append(
+                ".technoproj TECHNO_VERSION.pre is %r; it is null for a "
+                "release, or {kind, n} with kind in dev/alpha/beta/rc"
+                % (proj.get("pre"),)
+            )
+        elif got and got != "%s%s" % (version, suffix):
+            bad.append(
+                ".technoproj pre spells %r but pyproject.toml is %r"
+                % ("%s%s" % (version, suffix), got)
+            )
 
     # The era the code actually stamps into PRAGMA user_version. An entry
     # claiming an era the build does not write is the mistake worth catching

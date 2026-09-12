@@ -14,11 +14,17 @@ name: Release
 #
 # What a tag produces, and from where:
 #   Python wheel + sdist          `python -m build`
-#   aloelite, aloelite-fuse       Linux x86_64 (glibc, musl), aarch64
-#   aloelite                      macOS arm64 and x86_64, Windows x86_64
-#   aloelite-<v>-wasm32-wasip2.wasm   the CLI as a WASI component
-#   aloelite-wasm-<v>.tar.gz      the browser package (ES module, .wasm, .d.ts)
-#   SHA256SUMS                    over all of the above
+#   aloelite_<platform>           the CLI, one bare binary per platform
+#   aloelite_fuse_<platform>      the FUSE daemon, where it builds
+#   aloelite_<platform>_complete  every binary for that platform, plus README
+#   aloelite_wasi.wasm            the CLI as a WASI component
+#   aloelite_web.tar.gz           the browser package (ES module, .wasm, .d.ts)
+#   SHA256SUMS.txt                over all of the above
+#
+# Asset names follow doc/ALIGNMENT.md §4: a fixed platform vocabulary rather
+# than Rust triples, the profile token last, and NO VERSION IN THE FILENAME --
+# the release mirror materialises `latest/` as a symlink to the tag directory,
+# so a versioned filename means no stable download URL exists.
 #   ghcr.io/<owner>/aloelite:<v>  the manager image, amd64 + arm64
 #                                 (`:latest` too when the release is stable)
 # The release body is CHANGELOG.yaml's entry for the tag, rendered by
@@ -128,30 +134,41 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `platform` is the asset-name vocabulary (ALIGNMENT.md §4): os,
+          # arch, and libc where it distinguishes two builds of the same
+          # thing. It is carried rather than derived because a Rust triple is
+          # not a platform name and mapping one to the other in bash is how
+          # the two drift.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            platform: linux_x86_64_gnu
             crates: -p aloelite-cli -p aloelite-fuse
             bins: aloelite aloelite-fuse
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            platform: linux_aarch64_gnu
             crates: -p aloelite-cli -p aloelite-fuse
             bins: aloelite aloelite-fuse
             cross: true
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            platform: linux_x86_64_musl
             crates: -p aloelite-cli -p aloelite-fuse
             bins: aloelite aloelite-fuse
             musl: true
           - os: macos-latest
             target: aarch64-apple-darwin
+            platform: darwin_aarch64
             crates: -p aloelite-cli
             bins: aloelite
           - os: macos-latest
             target: x86_64-apple-darwin
+            platform: darwin_x86_64
             crates: -p aloelite-cli
             bins: aloelite
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            platform: windows_x86_64
             crates: -p aloelite-cli
             bins: aloelite.exe
     runs-on: ${{ matrix.os }}
@@ -180,17 +197,29 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.crates }}
+      # Two shapes per platform, because they answer different questions.
+      # A bare binary is what `curl -O && chmod +x` wants and what a stable
+      # `latest/` URL is for. The `_complete` bundle is everything built for
+      # this platform in one file, for someone who wants the daemon and the
+      # CLI together; on the platforms that build one binary it is that one
+      # binary plus the README, which is the uniform rule rather than a
+      # special case.
       - name: Package
         run: |
-          V="${{ needs.plan.outputs.version }}"
           T="${{ matrix.target }}"
-          STAGE="aloelite-$V-$T"
+          P="${{ matrix.platform }}"
+          STAGE="aloelite_$P"
           mkdir -p "$STAGE" ../dist
-          for b in ${{ matrix.bins }}; do cp "target/$T/release/$b" "$STAGE/"; done
+          for b in ${{ matrix.bins }}; do
+            base="${b%.exe}"; ext="${b#$base}"      # "" or ".exe"
+            cp "target/$T/release/$b" "../dist/${base//-/_}_$P$ext"
+            cp "target/$T/release/$b" "$STAGE/"
+          done
+          cp ../README.md "$STAGE/"
           if [[ "$T" == *windows* ]]; then
-            7z a "../dist/$STAGE.zip" "$STAGE" > /dev/null
+            7z a "../dist/${STAGE}_complete.zip" "$STAGE" > /dev/null
           else
-            tar czf "../dist/$STAGE.tar.gz" "$STAGE"
+            tar czf "../dist/${STAGE}_complete.tar.gz" "$STAGE"
           fi
           ls -la ../dist
       - uses: actions/upload-artifact@v4
@@ -228,18 +257,16 @@ jobs:
           cargo install wasm-bindgen-cli --version "$WBG" --locked
       - name: The browser package
         run: |
-          V="${{ needs.plan.outputs.version }}"
           cargo build --release --locked -p aloelite-wasm --target wasm32-unknown-unknown
-          PKG="aloelite-wasm-$V"
+          PKG="aloelite_web"
           wasm-bindgen --target web --typescript --out-dir "$PKG" target/wasm32-unknown-unknown/release/aloelite_wasm.wasm
           cp aloelite-wasm/README.md "$PKG/"
           mkdir -p ../dist
           tar czf "../dist/$PKG.tar.gz" "$PKG"
       - name: The CLI as a WASI component
         run: |
-          V="${{ needs.plan.outputs.version }}"
           cargo build --release --locked -p aloelite-cli --target wasm32-wasip2
-          cp target/wasm32-wasip2/release/aloelite.wasm "../dist/aloelite-$V-wasm32-wasip2.wasm"
+          cp target/wasm32-wasip2/release/aloelite.wasm "../dist/aloelite_wasi.wasm"
           ls -la ../dist
       - uses: actions/upload-artifact@v4
         with:
@@ -297,7 +324,7 @@ jobs:
           merge-multiple: true
       - shell: bash
         run: |
-          cd dist && sha256sum * | tee SHA256SUMS
+          cd dist && sha256sum * | tee SHA256SUMS.txt
           {
             echo "### Release dry run: ${{ needs.plan.outputs.version }} from \`${{ needs.plan.outputs.ref }}\`"
             echo
@@ -322,7 +349,7 @@ jobs:
           name: release-notes
           path: notes
       - shell: bash
-        run: cd dist && sha256sum * | tee SHA256SUMS
+        run: cd dist && sha256sum * | tee SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.plan.outputs.tag }}

@@ -3,33 +3,45 @@
 How a version of Aloelite goes out, end to end. Everything downstream of
 `CHANGELOG.yaml` is derived; the tag is the only manual push.
 
-> **This describes the current shape, not the agreed one.**
 > [`ALIGNMENT.md`](/doc/ALIGNMENT.md) is the org-wide standard every
-> Aloecraft project is moving to, and §8 lists what this repository has to
-> change to reach it: the tag spelling, the artifact names, `SHA256SUMS.txt`,
-> and `.technoproj`'s `pre`. That file is shared verbatim across
-> repositories, so it is not edited here; this one changes as each item
-> lands.
+> Aloecraft project is moving to; it is shared verbatim across repositories
+> and is not edited here. What this document describes now conforms to its
+> §1, §2 and §4 — the version scheme, `.technoproj`'s `pre`, and artifact
+> names with no version in them — and to §6's `SHA256SUMS.txt`. Still owed
+> from its §8 checklist: the shared changelog engine with `script/checks.py`,
+> `emit_json` if aloelite is to be mirrored from its changelog, §5's
+> `BUILDINFO.txt`, and §7's `-dev.<n>` builds.
 
 ## Where the version lives
 
 | file | field | spelling |
 |---|---|---|
 | `pyproject.toml` | `version` | PEP 440: `0.4.0rc1`, then `0.4.0` |
-| `.technoproj` | `TECHNO_VERSION` | `major`/`minor`/`patch`, `build: "rc1"` or `0` |
+| `.technoproj` | `TECHNO_VERSION` | `major`/`minor`/`patch`, plus `pre: null` or `{"kind": "rc", "n": 1}` |
 | `rust/Cargo.toml` | `[workspace.package] version` | SemVer: `0.4.0-rc.1`, then `0.4.0` |
 | `CHANGELOG.yaml` | the newest `releases` entry | `version: "0.4.0"`, with candidates listed under it |
 
 `script/changelog.py consistency` holds the four together and runs in CI's
 `lint` job, so they cannot drift quietly: the newest entry's `X.Y.Z` must
-match `.technoproj`, `pyproject.toml` must be that version or a candidate of
-it (and the newest candidate listed, if any), and `rust/Cargo.toml` must
-spell the same version SemVer's way.
+match `.technoproj`, `.technoproj`'s `pre` must spell what `pyproject.toml`
+spells, `pyproject.toml` must be that version or a candidate of it (and the
+newest candidate listed, if any), and `rust/Cargo.toml` must spell the same
+version SemVer's way.
+
+`make echo` prints all three spellings, derived from `.technoproj` alone by
+`script/version.mk` — there is no second definition of any of them:
+
+```
+VERSION: 0.5.0rc1      # PEP 440, what pyproject and PyPI carry
+SEMVER:  0.5.0-rc.1    # what rust/Cargo.toml carries
+TAG:     v0.5.0-rc.1   # what you push
+```
 
 ## A release candidate
 
-1. Stamp the candidate: `pyproject.toml` to `X.Y.ZrcN`, `.technoproj` build
-   to `"rcN"`, `rust/Cargo.toml` to `X.Y.Z-rc.N`.
+1. Stamp the candidate: `make pre_set KIND=rc N=<n>`, then `pyproject.toml`
+   to `X.Y.ZrcN` and `rust/Cargo.toml` to `X.Y.Z-rc.N` — the two spellings
+   `make echo` just printed.
 2. In `CHANGELOG.yaml`, under the `X.Y.Z` entry (which stays
    `status: unreleased`, `stable: false`), add the candidate:
    ```yaml
@@ -39,11 +51,16 @@ spell the same version SemVer's way.
    ```
 3. `script/changelog.py generate`, then `consistency` and
    `release-check --tag vX.Y.ZrcN --publish`; commit `CHANGELOG.md` with it.
-4. Tag and push: `git tag -a vX.Y.ZrcN -m "vX.Y.ZrcN" && git push origin vX.Y.ZrcN`.
+4. Tag and push: `git tag -a vX.Y.Z-rc.N -m "vX.Y.Z-rc.N" && git push origin vX.Y.Z-rc.N`.
+   The tag is `make echo`'s `TAG` line. Candidates tagged the old way
+   (`vX.Y.ZrcN`) still resolve, so an old release can be re-run; new ones use
+   the spelling above (`ALIGNMENT.md` §1 — the dot before the number is what
+   makes candidate 10 sort after candidate 2).
 
 ## The final
 
-1. Stamp `X.Y.Z` everywhere (Cargo `X.Y.Z`, `.technoproj` build `0`).
+1. Stamp `X.Y.Z` everywhere: `make pre_clear`, then `pyproject.toml` and
+   `rust/Cargo.toml` to `X.Y.Z`.
 2. The entry: `status: released`, a `date`, `stable: true`, and move
    `latest: true` onto it (off the previous release). Keep `candidates`; they
    are the record of what preceded it.
@@ -63,17 +80,22 @@ Three workflows run on `v*`, independently:
 
 `release.yml` publishes, for a version `V`:
 
+Asset names carry no version, by `ALIGNMENT.md` §4: the release mirror
+materialises `latest/` as a symlink to the tag directory, so a versioned
+filename would mean no download URL that stays put. The platform vocabulary
+is `<os>_<arch>[_<libc>]`, not Rust triples, and a profile token comes last.
+
 | asset | contents |
 |---|---|
-| `aloelite-V-py3-none-any.whl`, `aloelite-V.tar.gz` | the Python package |
-| `aloelite-V-x86_64-unknown-linux-gnu.tar.gz` | `aloelite`, `aloelite-fuse` |
-| `aloelite-V-aarch64-unknown-linux-gnu.tar.gz` | `aloelite`, `aloelite-fuse` |
-| `aloelite-V-x86_64-unknown-linux-musl.tar.gz` | `aloelite`, `aloelite-fuse`, static |
-| `aloelite-V-aarch64-apple-darwin.tar.gz`, `aloelite-V-x86_64-apple-darwin.tar.gz` | `aloelite` |
-| `aloelite-V-x86_64-pc-windows-msvc.zip` | `aloelite.exe` |
-| `aloelite-V-wasm32-wasip2.wasm` | the CLI as a WASI component (`wasmtime run --dir=.::/work aloelite.wasm -f /work/x.fs ls /`) |
-| `aloelite-wasm-V.tar.gz` | the browser package: ES module, `.wasm`, `.d.ts`, README |
-| `SHA256SUMS` | over all of the above |
+| `aloelite-V-py3-none-any.whl`, `aloelite-V.tar.gz` | the Python package — the one pair that keeps a version, because PyPI mandates the name |
+| `aloelite_linux_x86_64_gnu`, `_aarch64_gnu`, `_x86_64_musl` | the `aloelite` CLI, one bare binary each |
+| `aloelite_fuse_linux_x86_64_gnu`, `_aarch64_gnu`, `_x86_64_musl` | the FUSE daemon, same three |
+| `aloelite_darwin_aarch64`, `aloelite_darwin_x86_64` | the CLI on macOS |
+| `aloelite_windows_x86_64.exe` | the CLI on Windows |
+| `aloelite_<platform>_complete.tar.gz` (`.zip` on Windows) | every binary built for that platform, plus the README |
+| `aloelite_wasi.wasm` | the CLI as a WASI component (`wasmtime run --dir=.::/work aloelite_wasi.wasm -f /work/x.fs ls /`) |
+| `aloelite_web.tar.gz` | the browser package: ES module, `.wasm`, `.d.ts`, README |
+| `SHA256SUMS.txt` | over all of the above |
 | `ghcr.io/aloecraft-org/aloelite:V` | the manager image, amd64 and arm64; `:latest` too for a stable release |
 
 Docker Hub (`aloecraft/aloelite`) is not part of this; the Makefile's
