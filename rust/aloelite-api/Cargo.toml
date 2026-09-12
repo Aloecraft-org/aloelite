@@ -1,0 +1,19 @@
+[package]
+name = "aloelite-api"
+description = "The Mount API as a dispatch table: one `call(op, args)` over aloelite-core, driven by the spec's operation and parameter names, generic over the value type a frontend speaks. No I/O, no platform, no cfg."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aloelite-core = { path = "../aloelite-core" }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_norway = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }

@@ -1,21 +1,23 @@
-//! `Fs.call`'s table against `mount-api.yaml`, in both directions: every
+//! The dispatch table against `mount-api.yaml`, in both directions: every
 //! operation the spec declares is dispatched with exactly the spec's
 //! parameter names, and nothing is dispatched that the spec (or the
 //! documented extras) does not declare. Runs natively and in the browser —
 //! the table is data, it needs no JS.
+//!
+//! It lives with the table rather than with any one frontend, because every
+//! frontend dispatches from it: holding it here holds all of them at once.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use aloelite_api::{EXTRA_CODES, EXTRA_OPS, OPS};
 use aloelite_core::FsError;
-use aloelite_wasm::fs::{EXTRA_OPS, OPS};
-use aloelite_wasm::value::EXTRA_CODES;
 use serde_norway::Value as Yaml;
 
 const MOUNT_API: &str = include_str!("../../../aloelite/config/mount-api.yaml");
 
-/// The handle's own lifecycle, not messages: `open` is a constructor
-/// (`Fs.openMemory`, `Pool.open`); the session `close` is the method, and
-/// its name is taken by the streaming `close` in the table.
+/// The handle's own lifecycle, not messages: `open` is how a frontend
+/// builds a handle in the first place; the session `close` is the handle's
+/// method, and its name is taken by the streaming `close` in the table.
 const HANDLE_OPS: &[&str] = &["open"];
 
 /// The parameter that names the handle itself.
@@ -114,7 +116,7 @@ projection_test!(
         let have: BTreeSet<&str> = table.keys().copied().collect();
         assert_eq!(
             want, have,
-            "operations differ between mount-api.yaml and Fs::OPS"
+            "operations differ between mount-api.yaml and OPS"
         );
         for (name, params) in &declared {
             assert_eq!(

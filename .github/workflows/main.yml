@@ -266,10 +266,10 @@ jobs:
       run: cargo test --workspace
 
     - name: "The rule: browser crates build for wasm32-unknown-unknown"
-      run: cargo check -p aloelite-core -p aloelite-store -p aloelite-conformance -p aloelite-wasm --target wasm32-unknown-unknown
+      run: cargo check -p aloelite-core -p aloelite-api -p aloelite-store -p aloelite-conformance -p aloelite-wasm --target wasm32-unknown-unknown
 
     - name: "The rule: WASI crates build for wasm32-wasip2"
-      run: cargo check -p aloelite-core -p aloelite-store -p aloelite-conformance -p aloelite-cli --target wasm32-wasip2
+      run: cargo check -p aloelite-core -p aloelite-api -p aloelite-store -p aloelite-conformance -p aloelite-cli --target wasm32-wasip2
 
     # The runner must match the wasm-bindgen crate version in Cargo.lock
     # EXACTLY — the bindgen schema is unstable and it refuses a mismatch.
@@ -300,18 +300,18 @@ jobs:
     - name: Conformance in headless Firefox
       run: |
         set -o pipefail
-        cargo test -p aloelite-conformance -p aloelite-store -p aloelite-wasm \
+        cargo test -p aloelite-conformance -p aloelite-api -p aloelite-store -p aloelite-wasm \
           --target wasm32-unknown-unknown 2>&1 | tee browser-tests.log
         # An empty test binary passes, so a dropped run_in_browser directive
         # or a crate that stopped building tests for this target would go
         # green in silence -- the guard armed but never fired. Count what
-        # actually ran in the browser and hold it to a floor. 143 run today
+        # actually ran in the browser and hold it to a floor. 144 run today
         # (94 of them conformance scenarios); raise this when tests are added,
         # and lower it only on purpose.
         N=$(sed -n 's/.*test result: ok\. \([0-9]*\) passed.*/\1/p' browser-tests.log \
             | awk '{s+=$1} END {print s+0}')
         echo "browser tests passed: $N"
-        test "$N" -ge 140
+        test "$N" -ge 141
       env:
         # The unlock-key vectors run Argon2id at the format's pinned factors
         # (64 MiB / 3 / 4) twice, in a debug wasm build. wasm-bindgen-test's

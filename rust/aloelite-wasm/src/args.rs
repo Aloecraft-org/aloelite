@@ -1,26 +1,21 @@
-//! A request's arguments, read out of a JS object by the spec's parameter
-//! names and coerced to the engine's types — the inbound half of the
-//! boundary that [`crate::value`] is the outbound half of.
+//! How a `JsValue` answers the questions `aloelite_api::Value` asks — the
+//! inbound half of the boundary that [`crate::value`] is the outbound half
+//! of.
 //!
 //! Lenient where JavaScript is naturally loose, strict where a mistake
 //! would be silent: an integer may arrive as a `Number` (if it is a safe
 //! integer) or a `BigInt`; bytes as a `Uint8Array`, an `ArrayBuffer`, or a
-//! string (UTF-8); `null` and `undefined` both mean "not given". An unknown
-//! argument name is refused rather than ignored, because a misspelled
-//! optional (`ttl_ms` as `ttlMs`) would otherwise change behaviour in
-//! silence.
+//! string (UTF-8); `undefined` means "not given", and `null` means "given,
+//! and empty" — which is why a misspelled optional set to null is still
+//! reported as an unknown argument rather than ignored.
+//!
+//! Which argument each operation takes, and what happens when one is
+//! missing or wrong, is not here: that is one implementation in
+//! `aloelite_api::args`, shared with every other frontend.
 
-use std::collections::BTreeMap;
-
-use aloelite_core::FsError;
-use aloelite_core::crypto::EncMode;
-use aloelite_core::types::{
-    Access, LockId, MountId, NodeId, NodeType, VolumeId, Whence, WriteMode,
-};
+use aloelite_api::Value;
 use js_sys::{Array, ArrayBuffer, BigInt, Object, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
-
-pub type Result<T> = std::result::Result<T, FsError>;
 
 // ---------------------------------------------------------------------------
 // surface
@@ -30,269 +25,105 @@ pub type Result<T> = std::result::Result<T, FsError>;
 /// must be a `BigInt`.
 pub const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
-/// One request's arguments, with typed accessors. Every accessor's failure
-/// is a `usage` error naming the operation and the argument.
-pub struct Args {
-    op: String,
-    map: BTreeMap<String, JsValue>,
+/// A `JsValue` in argument position.
+///
+/// The wrapper is the orphan rule's doing — `aloelite_api::Value` and
+/// `JsValue` are both someone else's type — and it costs one refcount bump
+/// per call, since a `JsValue` is a handle into the JS heap.
+#[derive(Clone, Debug)]
+pub struct JsArg(pub JsValue);
+
+impl From<&JsValue> for JsArg {
+    fn from(v: &JsValue) -> JsArg {
+        JsArg(v.clone())
+    }
 }
 
-impl Args {
-    /// `args` may be `undefined` / `null` (no arguments) or a plain object.
-    pub fn read(op: &str, args: &JsValue) -> Result<Args> {
-        let mut map = BTreeMap::new();
-        if !absent(args) {
-            if !args.is_object() || Array::is_array(args) {
-                return Err(usage(format!("{op}: args must be an object")));
-            }
-            let obj: &Object = args.unchecked_ref();
-            for key in Object::keys(obj).iter() {
-                let name = key.as_string().unwrap_or_default();
-                let v = Reflect::get(args, &key).unwrap_or(JsValue::UNDEFINED);
-                if !v.is_undefined() {
-                    map.insert(name, v);
-                }
-            }
-        }
-        Ok(Args {
-            op: op.to_owned(),
-            map,
-        })
+impl Value for JsArg {
+    const WANTED_INT: &'static str = "an integer (a safe Number or a BigInt)";
+    const WANTED_BYTES: &'static str = "bytes (Uint8Array, ArrayBuffer or string)";
+    const WANTED_MAP: &'static str = "an object of strings";
+    const WANTED_OBJECT: &'static str = "an object";
+
+    fn is_omitted(&self) -> bool {
+        self.0.is_undefined()
     }
 
-    /// Refuse arguments the operation does not take.
-    pub fn allow(&self, names: &[&str]) -> Result<()> {
-        let unknown: Vec<&str> = self
-            .map
-            .keys()
-            .map(String::as_str)
-            .filter(|k| !names.contains(k))
-            .collect();
-        if unknown.is_empty() {
-            Ok(())
-        } else {
-            Err(usage(format!(
-                "{}: unknown argument(s) {unknown:?}; it takes {names:?}",
-                self.op
-            )))
-        }
+    fn is_absent(&self) -> bool {
+        self.0.is_undefined() || self.0.is_null()
     }
 
-    pub fn str(&self, name: &str) -> Result<String> {
-        self.opt_str(name)?.ok_or_else(|| self.missing(name))
+    fn as_str(&self) -> Option<String> {
+        self.0.as_string()
     }
 
-    pub fn opt_str(&self, name: &str) -> Result<Option<String>> {
-        match self.get(name) {
-            None => Ok(None),
-            Some(v) => v
-                .as_string()
-                .map(Some)
-                .ok_or_else(|| self.wrong(name, "a string", v)),
+    fn as_bytes(&self) -> Option<Vec<u8>> {
+        if let Some(u8s) = self.0.dyn_ref::<Uint8Array>() {
+            return Some(u8s.to_vec());
         }
+        if let Some(buf) = self.0.dyn_ref::<ArrayBuffer>() {
+            return Some(Uint8Array::new(buf).to_vec());
+        }
+        self.0.as_string().map(String::into_bytes)
     }
 
-    pub fn bytes(&self, name: &str) -> Result<Vec<u8>> {
-        self.opt_bytes(name)?.ok_or_else(|| self.missing(name))
-    }
-
-    pub fn opt_bytes(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        let Some(v) = self.get(name) else {
-            return Ok(None);
-        };
-        if let Some(u8s) = v.dyn_ref::<Uint8Array>() {
-            return Ok(Some(u8s.to_vec()));
+    fn as_int(&self) -> Option<i64> {
+        if let Some(f) = JsValue::as_f64(&self.0) {
+            return (f.fract() == 0.0 && f.abs() <= MAX_SAFE_INTEGER).then_some(f as i64);
         }
-        if let Some(buf) = v.dyn_ref::<ArrayBuffer>() {
-            return Ok(Some(Uint8Array::new(buf).to_vec()));
-        }
-        if let Some(s) = v.as_string() {
-            return Ok(Some(s.into_bytes()));
-        }
-        Err(self.wrong(name, "bytes (Uint8Array, ArrayBuffer or string)", v))
-    }
-
-    pub fn int(&self, name: &str) -> Result<i64> {
-        self.opt_int(name)?.ok_or_else(|| self.missing(name))
-    }
-
-    pub fn opt_int(&self, name: &str) -> Result<Option<i64>> {
-        let Some(v) = self.get(name) else {
-            return Ok(None);
-        };
-        if let Some(f) = v.as_f64() {
-            if f.fract() == 0.0 && f.abs() <= MAX_SAFE_INTEGER {
-                return Ok(Some(f as i64));
-            }
-            return Err(self.wrong(name, "an integer (a safe Number or a BigInt)", v));
-        }
-        if v.is_bigint() {
-            let big: &BigInt = v.unchecked_ref();
-            let text = big
+        if self.0.is_bigint() {
+            let big: &BigInt = self.0.unchecked_ref();
+            return big
                 .to_string(10)
-                .map(String::from)
-                .map_err(|_| self.wrong(name, "an integer", v))?;
-            return text
-                .parse::<i64>()
-                .map(Some)
-                .map_err(|_| self.wrong(name, "an integer that fits 64 bits", v));
+                .ok()
+                .and_then(|s| String::from(s).parse::<i64>().ok());
         }
-        Err(self.wrong(name, "an integer (a safe Number or a BigInt)", v))
+        None
     }
 
-    /// A non-negative integer: sizes and offsets.
-    pub fn uint(&self, name: &str) -> Result<u64> {
-        let n = self.int(name)?;
-        u64::try_from(n).map_err(|_| usage(format!("{}: {name} must not be negative", self.op)))
+    // Named rather than inferred: `JsValue` has an inherent `as_bool`, and
+    // an inherent method wins over a trait one, so `self.as_bool()` here
+    // would be this method calling itself.
+    fn as_bool(&self) -> Option<bool> {
+        JsValue::as_bool(&self.0)
     }
 
-    pub fn opt_bool(&self, name: &str) -> Result<Option<bool>> {
-        match self.get(name) {
-            None => Ok(None),
-            Some(v) => v
-                .as_bool()
-                .map(Some)
-                .ok_or_else(|| self.wrong(name, "a boolean", v)),
+    fn is_oversized_int(&self) -> bool {
+        self.0.is_bigint() && self.as_int().is_none()
+    }
+
+    fn entries(&self) -> Option<Vec<(String, JsArg)>> {
+        if !self.0.is_object() || Array::is_array(&self.0) {
+            return None;
         }
+        let obj: &Object = self.0.unchecked_ref();
+        Some(
+            Object::keys(obj)
+                .iter()
+                .map(|key| {
+                    let name = key.as_string().unwrap_or_default();
+                    let v = Reflect::get(&self.0, &key).unwrap_or(JsValue::UNDEFINED);
+                    (name, JsArg(v))
+                })
+                .collect(),
+        )
     }
 
-    /// A `{string: string}` object; absent means empty.
-    pub fn map(&self, name: &str) -> Result<BTreeMap<String, String>> {
-        let Some(v) = self.get(name) else {
-            return Ok(BTreeMap::new());
-        };
-        if !v.is_object() || Array::is_array(v) {
-            return Err(self.wrong(name, "an object of strings", v));
+    /// `typeof`, plus the constructor name for objects: what an error
+    /// message says the caller passed.
+    fn describe(&self) -> String {
+        if self.0.is_null() {
+            return "null".to_owned();
         }
-        let obj: &Object = v.unchecked_ref();
-        let mut out = BTreeMap::new();
-        for key in Object::keys(obj).iter() {
-            let k = key.as_string().unwrap_or_default();
-            let val = Reflect::get(v, &key).unwrap_or(JsValue::UNDEFINED);
-            let Some(s) = val.as_string() else {
-                return Err(usage(format!(
-                    "{}: {name}.{k} must be a string, got {}",
-                    self.op,
-                    describe(&val)
-                )));
-            };
-            out.insert(k, s);
+        let ty = self.0.js_typeof().as_string().unwrap_or_default();
+        if ty == "object"
+            && let Some(name) = Reflect::get(&self.0, &"constructor".into())
+                .ok()
+                .and_then(|c| Reflect::get(&c, &"name".into()).ok())
+                .and_then(|n| n.as_string())
+        {
+            return name;
         }
-        Ok(out)
+        ty
     }
-
-    // -- the spec's scalars and enums ------------------------------------
-
-    pub fn mount(&self) -> Result<MountId> {
-        Ok(MountId(self.str("mount")?))
-    }
-
-    pub fn volume(&self, name: &str) -> Result<VolumeId> {
-        Ok(VolumeId(self.str(name)?))
-    }
-
-    pub fn opt_volume(&self, name: &str) -> Result<Option<VolumeId>> {
-        Ok(self.opt_str(name)?.map(VolumeId))
-    }
-
-    pub fn node(&self, name: &str) -> Result<NodeId> {
-        Ok(NodeId(self.str(name)?))
-    }
-
-    pub fn lock(&self, name: &str) -> Result<LockId> {
-        Ok(LockId(self.str(name)?))
-    }
-
-    pub fn opt_lock(&self, name: &str) -> Result<Option<LockId>> {
-        Ok(self.opt_str(name)?.map(LockId))
-    }
-
-    pub fn node_type(&self, name: &str) -> Result<NodeType> {
-        let s = self.str(name)?;
-        NodeType::parse(&s).ok_or_else(|| self.unknown(name, "node type", &s))
-    }
-
-    /// `open_write`'s mode; the spec's default is `truncate`.
-    pub fn write_mode(&self, name: &str) -> Result<WriteMode> {
-        match self.opt_str(name)? {
-            None => Ok(WriteMode::Truncate),
-            Some(s) => WriteMode::parse(&s).ok_or_else(|| self.unknown(name, "write mode", &s)),
-        }
-    }
-
-    /// `seek`'s origin; the spec's default is `set`.
-    pub fn whence(&self, name: &str) -> Result<Whence> {
-        match self.opt_str(name)? {
-            None => Ok(Whence::Set),
-            Some(s) => Whence::parse(&s).ok_or_else(|| self.unknown(name, "whence", &s)),
-        }
-    }
-
-    /// `create_volume`'s encryption mode; the spec's default is `convergent`.
-    pub fn enc_mode(&self, name: &str) -> Result<EncMode> {
-        match self.opt_str(name)? {
-            None => Ok(EncMode::Convergent),
-            Some(s) => EncMode::parse(&s).ok_or_else(|| self.unknown(name, "enc_mode", &s)),
-        }
-    }
-
-    /// `mount`'s access mode; the spec's default is `rw`.
-    pub fn access(&self, name: &str) -> Result<Access> {
-        match self.opt_str(name)? {
-            None => Ok(Access::Rw),
-            Some(s) => Access::parse(&s).ok_or_else(|| self.unknown(name, "access", &s)),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// depth
-// ---------------------------------------------------------------------------
-
-impl Args {
-    fn get(&self, name: &str) -> Option<&JsValue> {
-        self.map.get(name).filter(|v| !absent(v))
-    }
-
-    fn missing(&self, name: &str) -> FsError {
-        usage(format!("{}: missing argument {name}", self.op))
-    }
-
-    fn wrong(&self, name: &str, wanted: &str, got: &JsValue) -> FsError {
-        usage(format!(
-            "{}: {name} must be {wanted}, got {}",
-            self.op,
-            describe(got)
-        ))
-    }
-
-    fn unknown(&self, name: &str, what: &str, got: &str) -> FsError {
-        usage(format!("{}: {got:?} is not a {what} ({name})", self.op))
-    }
-}
-
-fn absent(v: &JsValue) -> bool {
-    v.is_undefined() || v.is_null()
-}
-
-fn usage(msg: String) -> FsError {
-    FsError::usage(msg)
-}
-
-/// `typeof`, plus the constructor name for objects: what an error message
-/// says the caller passed.
-fn describe(v: &JsValue) -> String {
-    if v.is_null() {
-        return "null".to_owned();
-    }
-    let ty = v.js_typeof().as_string().unwrap_or_default();
-    if ty == "object"
-        && let Some(name) = Reflect::get(v, &"constructor".into())
-            .ok()
-            .and_then(|c| Reflect::get(&c, &"name".into()).ok())
-            .and_then(|n| n.as_string())
-    {
-        return name;
-    }
-    ty
 }

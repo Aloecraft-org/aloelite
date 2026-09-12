@@ -5,12 +5,13 @@
 
 use std::rc::Rc;
 
+use aloelite_api::Args;
 use aloelite_store::StoreError;
 use aloelite_store::opfs::{OpfsConfig, Pool as StorePool};
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
-use crate::args::Args;
+use crate::args::JsArg;
 use crate::fs::Fs;
 use crate::value;
 use crate::weblock;
@@ -113,7 +114,7 @@ impl Pool {
 // ---------------------------------------------------------------------------
 
 fn install_config(options: &JsValue) -> Result<OpfsConfig, aloelite_core::FsError> {
-    let a = Args::read("Pool.install", options)?;
+    let a = Args::read("Pool.install", &JsArg::from(options))?;
     a.allow(INSTALL_OPTIONS)?;
     let mut cfg = OpfsConfig::default();
     if let Some(d) = a.opt_str("directory")? {

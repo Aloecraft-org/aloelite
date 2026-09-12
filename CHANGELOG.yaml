@@ -62,6 +62,61 @@ repo: Aloecraft-org/aloelite
 planned: []
 
 releases:
+  - version: "0.5.0"
+    date: null
+    status: unreleased
+    stable: false
+    api_version: 3
+    summary: |
+      **The Mount API dispatch is a crate of its own.** `aloelite-wasm` held
+      the only copy of the table that maps the spec's operation names onto
+      `aloelite_core::ops`, and it was typed on `JsValue` from end to end. A
+      second frontend would have had to copy it, and two copies of the spec
+      surface with nothing holding them together is the one thing this tree
+      has consistently refused. The table, the argument coercions and the
+      dispatch now live in `aloelite-api`, generic over the value type a
+      frontend speaks. The browser is its first implementation, and nothing
+      a page can see has changed.
+    changed:
+      - |
+        **New crate: `aloelite-api`, the Mount API dispatched by name.** It
+        holds `OPS` (the spec's operations and their parameter names, as
+        data), the coercions that turn named arguments into the engine's
+        types, and `Handle` -- the engine plus its open streaming
+        descriptors, with `call(op, args)` over both. Like `aloelite-core`
+        it performs no I/O, names no platform and carries no `cfg`, so it
+        compiles for native, `wasm32-wasip2` and `wasm32-unknown-unknown`
+        alike; CI checks all three.
+
+        A frontend supplies two traits over its own value type -- `Value`
+        for an argument (six questions, each answered `Option`) and
+        `Surface` for the pair of value types -- and gets every operation.
+        It cannot get half of them, and two frontends cannot disagree about
+        what `create_volume` takes.
+      - |
+        **`aloelite-wasm` is now only the browser's half of that.** The
+        `Fs` class, the `postMessage` server and the OPFS pool are
+        unchanged; what left is the 600 lines of dispatch and the 300 of
+        argument reading. What stayed is what is genuinely about
+        JavaScript: `JsSurface` (records as objects, every integer a
+        `BigInt`, bytes as `Uint8Array`), `JsArg` (a `Number` or a `BigInt`
+        is an integer; a `Uint8Array`, `ArrayBuffer` or string is bytes;
+        `undefined` is absent and `null` is present-and-empty), and the
+        `Error` with a `code` that a failure throws.
+
+        The ES module's surface is identical, down to the error messages:
+        the strings that named JavaScript's own vocabulary ("a safe Number
+        or a BigInt") are associated constants on the trait, so they follow
+        the frontend rather than the dispatch.
+      - |
+        **The projection test moved with the table it guards.** It holds
+        `OPS` against `mount-api.yaml` in both directions -- every declared
+        operation dispatched with exactly the spec's parameter names, and
+        nothing dispatched the spec does not declare -- and now does it for
+        every frontend at once rather than for the browser's copy. It still
+        runs in headless Firefox as well as natively; the browser surface
+        keeps its own test for the three error codes (`busy`, `opfs`, `io`)
+        that are its alone.
   - version: "0.4.0"
     date: 2026-09-12
     status: released

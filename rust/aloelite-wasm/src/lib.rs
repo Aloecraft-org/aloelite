@@ -8,7 +8,7 @@
 //!
 //! | export | what it is | where it runs |
 //! |---|---|---|
-//! | [`Fs`] | the engine behind one handle: `call(op, args)` runs any Mount API operation by its spec name, with the spec's parameter names ([`fs::OPS`] is the table) | anywhere the wasm loads; `Fs.openMemory()` needs no storage at all |
+//! | [`Fs`] | the engine behind one handle: `call(op, args)` runs any Mount API operation by its spec name, with the spec's parameter names ([`aloelite_api::OPS`] is the table) | anywhere the wasm loads; `Fs.openMemory()` needs no storage at all |
 //! | [`serve`] | the message protocol: `{id, op, args}` in, `{id, ok}` or `{id, error: {code, message}}` out, over the Worker's own `self` or one end of a `MessageChannel` | a Worker, usually |
 //! | `Pool` | the OPFS pool: `install` once per Worker, `open(name)` a volume file under the Web Lock that makes it single-writer, plus export / import / delete | a Dedicated Worker only |
 //!

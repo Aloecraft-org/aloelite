@@ -1,6 +1,6 @@
 # aloelite-rs — the Rust implementation of the Aloelite Mount API.
 #
-# One workspace, six crates, three targets. The crates split along the line
+# One workspace, seven crates, three targets. The crates split along the line
 # that keeps WebAssembly first-class rather than aspirational: aloelite-core
 # compiles to every target with zero `cfg`, and anything that cannot is by
 # definition a different crate. CI enforces that from the first commit
@@ -8,9 +8,9 @@
 # later" from becoming a decision nobody made.
 #
 #   target                   crates
-#   x86_64 / aarch64 native  all six
-#   wasm32-wasip2            core, store, conformance, cli
-#   wasm32-unknown-unknown   core, store, conformance, wasm
+#   x86_64 / aarch64 native  all seven
+#   wasm32-wasip2            core, api, store, conformance, cli
+#   wasm32-unknown-unknown   core, api, store, conformance, wasm
 #
 # doc/RUST_PORT.md is the plan; doc/DECISIONS.md D-7 is the storage decision.
 
@@ -18,6 +18,7 @@
 resolver = "3"
 members = [
     "aloelite-core",
+    "aloelite-api",
     "aloelite-store",
     "aloelite-conformance",
     "aloelite-fuse",
@@ -26,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"

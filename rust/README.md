@@ -1,11 +1,13 @@
 # aloelite-rs
 
-The Rust implementation of the Aloelite Mount API. One workspace, six crates,
-three targets. `doc/RUST_PORT.md` is the plan; `doc/DECISIONS.md` D-7 is the
+The Rust implementation of the Aloelite Mount API. One workspace, seven
+crates, three targets. `doc/RUST_PORT.md` is the plan; `doc/DECISIONS.md` D-7 is the
 storage decision this layout follows from.
 
 ```
 aloelite-core/          the engine. compiles to every target with zero cfg
+aloelite-api/           the Mount API dispatched by name, over any value type.
+                        the table every frontend shares. zero cfg too
 aloelite-store/         how a connection is opened: file / memory+blob / OPFS
 aloelite-conformance/   conformance/ scenarios + vectors, under cargo test and
                         wasm-bindgen-test alike
@@ -16,9 +18,9 @@ aloelite-cli/           the aloelite command. native + wasm32-wasip2
 
 | target | crates |
 |---|---|
-| native | all six |
-| `wasm32-wasip2` | core, store, conformance, cli |
-| `wasm32-unknown-unknown` | core, store, conformance, wasm |
+| native | all seven |
+| `wasm32-wasip2` | core, api, store, conformance, cli |
+| `wasm32-unknown-unknown` | core, api, store, conformance, wasm |
 
 ## The one rule
 
@@ -27,15 +29,20 @@ I/O of its own, and never asks which platform it is on. CI checks it on every
 push (`.github/workflows/main.yml`, job `rust`). Anything that cannot meet
 that bar is a different crate.
 
+`aloelite-api` meets it too, and for the same reason: which operations exist
+and what each takes is the spec's business, not the platform's. A frontend is
+then the part that is genuinely about its own world -- two traits over its
+value type, and whatever wrapper its callers expect.
+
 ## Build
 
 ```sh
 cargo check                                                    # native, everything
-cargo check -p aloelite-core -p aloelite-store \
+cargo check -p aloelite-core -p aloelite-api -p aloelite-store \
   --target wasm32-unknown-unknown                              # the rule, checked
-cargo check -p aloelite-core -p aloelite-store --target wasm32-wasip2
+cargo check -p aloelite-core -p aloelite-api -p aloelite-store --target wasm32-wasip2
 cargo test                                                     # native
-cargo test -p aloelite-conformance -p aloelite-store -p aloelite-wasm \
+cargo test -p aloelite-conformance -p aloelite-api -p aloelite-store -p aloelite-wasm \
   --target wasm32-unknown-unknown                              # in Firefox, headless
 cargo build -p aloelite-wasm --target wasm32-unknown-unknown --release
 wasm-bindgen --target web --typescript --out-dir pkg \
@@ -56,7 +63,7 @@ in containers without IPv6, so silence it:
 
 ```sh
 CHROMEDRIVER=/path/to/chromedriver CHROMEDRIVER_ARGS=--silent \
-  cargo test -p aloelite-conformance -p aloelite-store -p aloelite-wasm \
+  cargo test -p aloelite-conformance -p aloelite-api -p aloelite-store -p aloelite-wasm \
     --target wasm32-unknown-unknown
 ```
 

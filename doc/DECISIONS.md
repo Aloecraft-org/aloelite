@@ -15,7 +15,7 @@ decision rather than a conversation. Uses the vocabulary of
 | D-4 | POSIX byte-range locks are per mount through FUSE; engine locks arbitrate across mounts; admission defaults to one rw mount per subtree, overlap is an opt-in. | 2026-08-26, amended 08-28 | implemented |
 | D-5 | Hardlinks: a leaf may be placed many times, a placement carries its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02; amended era 3 | implemented; the record was written after the fact, and the name became unconditional in era 3 |
 | D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
-| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store; wire protocol; fuse), 09-03 (cli contract) | implemented: all six crates; every point left open is settled below |
+| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store; wire protocol; fuse), 09-03 (cli contract), 09-12 (dispatch crate) | implemented: all seven crates; every point left open is settled below |
 | D-8 | The pack blob format moves to v2 once, carrying uid/gid/mode, xattrs and retention; not atime, ctime or hardlink identity. v1 stays readable forever. | 2026-09-02 | implemented (Python and Rust) |
 
 How to read a record: what was decided, why, what it obliges, and what it
@@ -456,10 +456,11 @@ storage — never what a mount, a lock, or an operation means.
   spec's parameter names, as `{id, op, args}`, answered with `{id, ok}` or
   `{id, error: {code, message}}` — and the same call is available directly
   as `Fs.call(op, args)`, the protocol being that call with an envelope
-  around it. The dispatch is one table (`aloelite_wasm::fs::OPS`) that
-  `tests/projection.rs` holds against `mount-api.yaml` in both directions,
-  so an operation cannot be on the wire and not in the spec, or in the spec
-  and not on the wire, and a parameter name cannot drift. Implication: there
+  around it. The dispatch is one table (`aloelite_api::OPS`, `aloelite-wasm`
+  at the time; see below) that `aloelite-api/tests/projection.rs` holds
+  against `mount-api.yaml` in both directions, so an operation cannot be on
+  the wire and not in the spec, or in the spec and not on the wire, and a
+  parameter name cannot drift. Implication: there
   is no second vocabulary to document or to port; a client library is a
   thin typed wrapper the host writes for its own language; and the one
   extra (`resolve_volume_name`, the facade's duplicate-name rule) is
@@ -536,6 +537,35 @@ Nothing remains open in D-7. Follow-ups that came out of the port live
 where they belong: the cross-mount lock upgrade at D-4, the pack
 concealment gap noted under D-8, and the era-1 migration policy in
 `doc/RUST_PORT.md`.
+
+### Settled since (2026-09-12, when a second frontend was scoped)
+
+- **The dispatch is a crate, not a frontend's private business.** The
+  question arrived with the second frontend: `aloelite-wasm` held the only
+  copy of the table, the argument coercions and the mapping onto
+  `aloelite_core::ops`, all typed on `JsValue`. Copying it per frontend puts
+  two copies of the spec surface in the tree with nothing holding them
+  together — the failure this decision exists to prevent, one layer up from
+  where it was first prevented. So the whole of it moved to `aloelite-api`,
+  generic over the value type, and a frontend implements two traits: `Value`
+  (what an argument is: six questions, each answered `Option`) and `Surface`
+  (the pair of value types, and how a record, bytes and a unit are built).
+  Implication: a frontend gets every operation or none, `projection.rs`
+  holds all frontends at once rather than the browser's copy, and the
+  question a new frontend has to answer shrinks to "how does this world
+  spell an integer".
+- **What is genuinely per-frontend stays per-frontend, including error
+  prose.** The strings that name a surface's own vocabulary ("a safe Number
+  or a BigInt") are associated constants on `Value`, not literals in the
+  shared coercion, so moving the dispatch did not flatten the browser's
+  messages into something generic. The same applies to the extra error
+  codes: `usage`, `internal` and `sqlite` are the dispatch's and live with
+  it; `busy`, `opfs` and `io` are the browser's and stay there, with their
+  own test.
+- **`aloelite-api` meets the rule.** No I/O, no platform, no `cfg`; CI
+  builds it for all three targets alongside `aloelite-core`. Which is the
+  test of whether the split was drawn in the right place: if the shared
+  dispatch had needed a `cfg`, the line was wrong.
 
 ## D-8: The pack format moves to v2 once, carrying what v1 drops, before any further port writes a pack
 

@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aloelite-core = { path = "../aloelite-core" }
+aloelite-api = { path = "../aloelite-api" }
 aloelite-store = { path = "../aloelite-store" }
 rusqlite = { workspace = true }
 ego_platform = { workspace = true }

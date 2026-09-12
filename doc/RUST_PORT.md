@@ -51,6 +51,9 @@ question the engine cannot.
 rust/
   aloelite-core/          the engine: schema, templates, id mint, ENC-2 ladder,
                           resolution, every operation. no I/O, no platform, no cfg
+  aloelite-api/           the Mount API dispatched by name: the spec's operation
+                          table, the argument coercions, and Handle. generic over
+                          the value type a frontend speaks. no I/O, no cfg either
   aloelite-store/         connection provisioning: file / memory image + blob /
                           OPFS sahpool (see D-7's table)
   aloelite-conformance/   the conformance/ runner, under cargo test natively and
@@ -66,6 +69,10 @@ Each crate's `README`/`lib.rs` states its contract and target set.
 **The rule:** `aloelite-core` compiles to all three targets with zero `cfg`.
 It takes a `rusqlite::Connection` someone else opened, a `Clock`, and a
 `CryptoRngCore`. Anything that cannot meet that bar is a different crate.
+`aloelite-api` sits directly on it and meets the same bar: an operation's
+name, its parameters and what running it means are the spec's business, so a
+frontend inherits all of them and supplies only what its own world decides --
+how a value spells an integer, and what a record looks like on the way out.
 
 **The mechanism:** the `rust` job in `.github/workflows/main.yml` builds
 core for all three targets and runs the conformance suite in headless
@@ -320,7 +327,7 @@ ported case for case through the built binary. It builds for
 `wasm32-wasip2` and runs as a component under wasmtime with the volume on a
 preopened host directory; CI builds and drives it there.
 
-**The six crates are done.** What the port leaves as recorded follow-ups,
+**The seven crates are done.** What the port leaves as recorded follow-ups,
 not as missing pieces: the cross-mount POSIX lock upgrade (D-4), the pack
 concealment gap (D-8's finding), the era-1 migration policy (above), and the
 Postgres and MariaDB dialects, which were never in this sequence.
