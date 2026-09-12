@@ -16,9 +16,10 @@ name: Release
 #   Python wheel + sdist          `python -m build`
 #   aloelite_<platform>           the CLI, one bare binary per platform
 #   aloelite_fuse_<platform>      the FUSE daemon, where it builds
-#   aloelite_<platform>_complete  every binary for that platform, plus README
+#   aloelite_complete_<platform>  every binary for that platform, + BUILDINFO
 #   aloelite_wasi.wasm            the CLI as a WASI component
 #   aloelite_web.tar.gz           the browser package (ES module, .wasm, .d.ts)
+#   BUILDINFO.txt                 tag, version, commit, branch, schema era
 #   SHA256SUMS.txt                over all of the above
 #
 # Asset names follow doc/ALIGNMENT.md §4: a fixed platform vocabulary rather
@@ -70,6 +71,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
+          # `git branch -r --contains` needs the remote branches, and the
+          # default shallow clone has none. BUILDINFO's `branch` line is the
+          # only thing that distinguishes two dev builds cut from different
+          # branches (ALIGNMENT.md §5), so it is worth a full fetch here.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -106,6 +112,37 @@ jobs:
           # The commit, not the ref: `github.sha` is the dispatching ref on a
           # workflow_dispatch, which is not necessarily what is being built.
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      # What `.technoproj` cannot hold -- committing the file changes the
+      # commit it would claim -- and what the filename must not carry.
+      # ALIGNMENT.md §5. `schema_era` is this project's compatibility fact,
+      # and it is the one a consumer must actually check: it decides whether
+      # an existing volume file still opens.
+      - name: BUILDINFO.txt
+        shell: bash
+        run: |
+          SHA="${{ steps.plan.outputs.sha }}"
+          # A tag push carries no branch: github.ref IS the tag. Find one that
+          # contains the commit and record what was found, not a guess.
+          BRANCH="${{ inputs.ref }}"
+          if [[ -z "$BRANCH" || "$BRANCH" == v* ]]; then
+            BRANCH=$(git branch -r --contains "$SHA" --format='%(refname:lstrip=3)' \
+                     | grep -vx HEAD | head -1)
+          fi
+          FIELD() { python -c "import re,sys; m=re.search(sys.argv[2], open(sys.argv[1]).read(), re.M); print(m.group(1) if m else '')" "$1" "$2"; }
+          mkdir -p dist
+          {
+            echo "tag: ${{ steps.plan.outputs.tag || '(untagged)' }}"
+            echo "version: ${{ steps.plan.outputs.version }}"
+            echo "pep440: $(FIELD pyproject.toml '^version\s*=\s*"([^"]+)"')"
+            echo "commit: $SHA"
+            echo "branch: ${BRANCH:-(detached)}"
+            echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "schema_era: $(FIELD aloelite/db.py '^SCHEMA_ERA\s*=\s*(\d+)')"
+          } | tee dist/BUILDINFO.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-buildinfo
+          path: dist/BUILDINFO.txt
       - name: Release notes, from the changelog
         if: steps.plan.outputs.tag != ''
         run: python script/changelog.py render md --tag "${{ steps.plan.outputs.tag }}" | tee release-notes.md
@@ -150,7 +187,7 @@ jobs:
             bins: aloelite aloelite-fuse
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            platform: linux_aarch64_gnu
+            platform: linux_arm64_gnu
             crates: -p aloelite-cli -p aloelite-fuse
             bins: aloelite aloelite-fuse
             cross: true
@@ -162,7 +199,7 @@ jobs:
             musl: true
           - os: macos-latest
             target: aarch64-apple-darwin
-            platform: darwin_aarch64
+            platform: darwin_arm64
             crates: -p aloelite-cli
             bins: aloelite
           - os: macos-latest
@@ -201,29 +238,34 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.crates }}
+      # BUILDINFO travels inside every `complete` archive, so someone who
+      # unpacked one can still read what they have.
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-buildinfo
+          path: buildinfo
       # Two shapes per platform, because they answer different questions.
       # A bare binary is what `curl -O && chmod +x` wants and what a stable
-      # `latest/` URL is for. The `_complete` bundle is everything built for
-      # this platform in one file, for someone who wants the daemon and the
-      # CLI together; on the platforms that build one binary it is that one
-      # binary plus the README, which is the uniform rule rather than a
-      # special case.
+      # `latest/` URL is for -- ALIGNMENT.md §4: single binaries ship bare so
+      # that `latest/` resolves to something directly executable. `complete`
+      # is a reserved COMPONENT name (second field, not a trailing profile)
+      # and is an archive because it holds more than one file.
       - name: Package
         run: |
           T="${{ matrix.target }}"
           P="${{ matrix.platform }}"
-          STAGE="aloelite_$P"
+          STAGE="aloelite_complete_$P"
           mkdir -p "$STAGE" ../dist
           for b in ${{ matrix.bins }}; do
             base="${b%.exe}"; ext="${b#$base}"      # "" or ".exe"
             cp "target/$T/release/$b" "../dist/${base//-/_}_$P$ext"
             cp "target/$T/release/$b" "$STAGE/"
           done
-          cp ../README.md "$STAGE/"
+          cp ../buildinfo/BUILDINFO.txt "$STAGE/"
           if [[ "$T" == *windows* ]]; then
-            7z a "../dist/${STAGE}_complete.zip" "$STAGE" > /dev/null
+            7z a "../dist/$STAGE.zip" "$STAGE" > /dev/null
           else
-            tar czf "../dist/${STAGE}_complete.tar.gz" "$STAGE"
+            tar czf "../dist/$STAGE.tar.gz" "$STAGE"
           fi
           ls -la ../dist
       - uses: actions/upload-artifact@v4

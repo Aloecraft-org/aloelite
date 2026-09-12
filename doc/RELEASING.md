@@ -11,16 +11,21 @@ How a version of Aloelite goes out, end to end. Everything downstream of
 > question, whether releasing gates on tests, is answered below: it does.
 > Still owed from its §8 checklist: the shared changelog engine with
 > `script/checks.py`, `emit_json` if aloelite is to be mirrored from its
-> changelog, §5's `BUILDINFO.txt`, and §7's `-dev.<n>` builds.
+> changelog, and §7's `-dev.<n>` builds — the tag spelling for those is
+> supported, but nothing cuts one yet.
 
 ## Where the version lives
 
 | file | field | spelling |
 |---|---|---|
-| `pyproject.toml` | `version` | PEP 440: `0.4.0rc1`, then `0.4.0` |
+| `pyproject.toml` | `version` | **derived** — PEP 440: `0.5.0rc1`, then `0.5.0` |
 | `.technoproj` | `TECHNO_VERSION` | `major`/`minor`/`patch`, plus `pre: null` or `{"kind": "rc", "n": 1}` |
-| `rust/Cargo.toml` | `[workspace.package] version` | SemVer: `0.4.0-rc.1`, then `0.4.0` |
-| `CHANGELOG.yaml` | the newest `releases` entry | `version: "0.4.0"`, with candidates listed under it |
+| `rust/Cargo.toml` | `[workspace.package] version` | the tag body: `0.5.0-rc.1`, then `0.5.0` |
+| `CHANGELOG.yaml` | the newest `releases` entry | the tag body: `version: "0.5.0"`, with candidates listed under it |
+
+The tag is canonical and the **tag body** — the tag without its `v` — is what
+`CHANGELOG.yaml` and `rust/Cargo.toml` hold. PEP 440 is a *derived* spelling
+that exists only in `pyproject.toml` and on PyPI (`ALIGNMENT.md` §1).
 
 `script/changelog.py consistency` holds the four together and runs in CI's
 `lint` job, so they cannot drift quietly: the newest entry's `X.Y.Z` must
@@ -47,9 +52,12 @@ TAG:     v0.5.0-rc.1   # what you push
    `status: unreleased`, `stable: false`), add the candidate:
    ```yaml
    candidates:
-     - version: "X.Y.ZrcN"
+     - version: "X.Y.Z-rc.N"
        date: "YYYY-MM-DD"
    ```
+
+   The tag body, not PEP 440. Candidates written the old way (`X.Y.ZrcN`)
+   still resolve and are not rewritten.
 3. `script/changelog.py generate`, then `consistency` and
    `release-check --tag vX.Y.ZrcN --publish`; commit `CHANGELOG.md` with it.
 4. Tag and push: `git tag -a vX.Y.Z-rc.N -m "vX.Y.Z-rc.N" && git push origin vX.Y.Z-rc.N`.
@@ -73,8 +81,11 @@ TAG:     v0.5.0-rc.1   # what you push
 Three workflows run on `v*`, independently:
 
 - **`main.yml`** — the CI matrix, on the tagged commit.
-- **`publish.yml`** — PyPI, by trusted publishing. Unchanged by the release
-  work; a candidate is a PyPI pre-release, which `pip` skips unless asked.
+- **`publish.yml`** — PyPI, by trusted publishing. A candidate is a PyPI
+  pre-release, which `pip` skips unless asked. It ignores `v*-dev.*` tags:
+  `0.5.0-dev.7` is a valid PEP 440 version and would upload without
+  complaint, and a PyPI upload can be yanked but never replaced or reused
+  (`ALIGNMENT.md` §7).
 - **`release.yml`** — the GitHub release and the image. It refuses a tag the
   changelog does not claim, renders the release body from the entry, and
   derives `prerelease` (a candidate always; a final from `stable`).
@@ -111,11 +122,12 @@ is `<os>_<arch>[_<libc>]`, not Rust triples, and a profile token comes last.
 | asset | contents |
 |---|---|
 | `aloelite-V-py3-none-any.whl`, `aloelite-V.tar.gz` | the Python package — the one pair that keeps a version, because PyPI mandates the name |
-| `aloelite_linux_x86_64_gnu`, `_aarch64_gnu`, `_x86_64_musl` | the `aloelite` CLI, one bare binary each |
-| `aloelite_fuse_linux_x86_64_gnu`, `_aarch64_gnu`, `_x86_64_musl` | the FUSE daemon, same three |
-| `aloelite_darwin_aarch64`, `aloelite_darwin_x86_64` | the CLI on macOS |
+| `aloelite_linux_x86_64_gnu`, `_arm64_gnu`, `_x86_64_musl` | the `aloelite` CLI, one bare binary each |
+| `aloelite_fuse_linux_x86_64_gnu`, `_arm64_gnu`, `_x86_64_musl` | the FUSE daemon, same three |
+| `aloelite_darwin_arm64`, `aloelite_darwin_x86_64` | the CLI on macOS |
 | `aloelite_windows_x86_64.exe` | the CLI on Windows |
-| `aloelite_<platform>_complete.tar.gz` (`.zip` on Windows) | every binary built for that platform, plus the README |
+| `aloelite_complete_<platform>.tar.gz` (`.zip` on Windows) | every binary built for that platform, plus `BUILDINFO.txt` |
+| `BUILDINFO.txt` | tag, version, PEP 440 spelling, commit, branch, build time, and the schema era this build writes |
 | `aloelite_wasi.wasm` | the CLI as a WASI component (`wasmtime run --dir=.::/work aloelite_wasi.wasm -f /work/x.fs ls /`) |
 | `aloelite_web.tar.gz` | the browser package: ES module, `.wasm`, `.d.ts`, README |
 | `SHA256SUMS.txt` | over all of the above |

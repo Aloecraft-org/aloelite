@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - "v*"
+    # A -dev.<n> tag must never reach PyPI. `0.4.0-dev.7` normalises to the
+    # perfectly valid PEP 440 version `0.4.0.dev7` and uploads without
+    # complaint -- and a PyPI upload is IMMUTABLE: yankable, never replaced
+    # and never reused. Pruning works on GitHub releases and does not work
+    # here, which is why this exclusion goes in before the first dev tag is
+    # cut rather than after. doc/ALIGNMENT.md §7, non-negotiable 7.
+    tags-ignore:
+      - "v*-dev.*"
   # A tag pushes once. When the tag-triggered run dies for reasons that have
   # nothing to do with the code -- the 2026-08-06 Actions outage failed every
   # job at "Getting action download info" -- there is otherwise no way to

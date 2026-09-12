@@ -34,8 +34,15 @@ __VERSION_FULL:=${__VERSION_PEP440}
 # The git tag is canonical and every spelling above derives from it.
 __TAG:=v${__VERSION_SEMVER}
 
-_sync_version:
-	@echo "$$(tq -f pyproject.toml '.' -o=json | jq '.package.version="${__VERSION_PEP440}"' | jyt jt)" > pyproject.toml
+# There is deliberately no `_sync_version`. The one that used to be here
+# wrote `.package.version` -- a CARGO path -- so in a Python repository it
+# added a bogus [package] table and left [project].version stale. It never
+# worked anywhere, and was harmless only because tq and jyt are installed
+# nowhere. What replaces it is a CHECK rather than a writer: `changelog.py
+# consistency` already holds pyproject.toml, rust/Cargo.toml and .technoproj
+# against the changelog, and fails when any two disagree. Stamping is a human
+# edit the gate catches, not a target that silently rewrites a manifest.
+# doc/ALIGNMENT.md §8.
 
 inc_maj:
 	tmp=$$(mktemp) && jq '.TECHNO_VERSION.major += 1' ${__TECHNO_PROJECT_FILE} > "$$tmp" && mv "$$tmp" ${__TECHNO_PROJECT_FILE}

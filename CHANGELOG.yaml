@@ -164,15 +164,42 @@ releases:
 
         Names follow a fixed platform vocabulary rather than Rust triples:
         `aloelite-0.4.0-x86_64-unknown-linux-gnu.tar.gz` becomes
-        `aloelite_linux_x86_64_gnu`, a bare binary. Each platform now ships
-        its binaries separately -- the CLI, and `aloelite_fuse_*` where the
-        daemon builds -- plus one `aloelite_<platform>_complete` bundle
-        carrying everything built for it. The wasm leaves are
-        `aloelite_wasi.wasm` and `aloelite_web.tar.gz`. The wheel and sdist
-        keep their versioned names, which PyPI mandates.
+        `aloelite_linux_x86_64_gnu`, a bare binary. The arch token is
+        `arm64` on every platform, Linux included -- the vocabulary is ours
+        rather than the toolchain's, which is the whole reason for not using
+        triples. Each platform ships its binaries separately -- the CLI, and
+        `aloelite_fuse_*` where the daemon builds -- plus one
+        `aloelite_complete_<platform>` archive carrying everything built for
+        it and `BUILDINFO.txt`. `complete` is a reserved component name, so
+        it sits in the second field rather than trailing as a profile. The
+        wasm leaves are `aloelite_wasi.wasm` and `aloelite_web.tar.gz`. The
+        wheel and sdist keep their versioned names, which PyPI mandates.
 
         Nothing published is renamed: 0.3.7's assets stay as they are, and
         0.4.0 published none.
+      - |
+        **A `-dev.<n>` tag can never reach PyPI.** `publish.yml` now ignores
+        `v*-dev.*`. Nothing cuts a dev tag yet, and that is the point:
+        `0.5.0-dev.7` normalises to the perfectly valid PEP 440 version
+        `0.5.0.dev7` and would have uploaded without complaint, and a PyPI
+        upload can be yanked but never replaced or reused. Pruning works on
+        GitHub releases and does not work there, so the exclusion has to land
+        before the first dev tag rather than after.
+      - |
+        **`BUILDINFO.txt` ships with every release**, and travels inside each
+        `complete` archive so someone who unpacked one can still read what
+        they have. It carries what `.technoproj` cannot -- committing the
+        file would change the commit it claims -- and what a filename must
+        not: tag, version, the PEP 440 spelling, commit, branch, build time,
+        and `schema_era`.
+
+        That last one is the point of the file rather than a detail. It is
+        the fact a consumer has to check, because it decides whether an
+        existing volume opens, and `ALIGNMENT.md` is explicit that
+        compatibility is verified by named field and never by reading digits
+        out of a version. The `branch` line is derived from which remote
+        branch contains the commit, since a tag push carries no branch at
+        all.
       - |
         **Releasing gates on the tests.** `release.yml`'s builds ran in
         parallel with `main.yml`'s matrix on the same commit -- two
@@ -206,6 +233,17 @@ releases:
         so the field cannot drift from what it describes, and candidate tags
         resolve under both `vX.Y.Z-rc.N` and the legacy `vX.Y.ZrcN` -- new
         candidates use the first, already-pushed tags keep working.
+
+        The **tag body** is the canonical spelling: it is what
+        `CHANGELOG.yaml` and `rust/Cargo.toml` hold, and PEP 440 is derived
+        from it for `pyproject.toml` and PyPI alone. `semver_to_pep440` is
+        that derivation and round-trips against `pep440_to_semver` for all
+        five kinds. `version.mk`'s `_sync_version` target is gone rather than
+        fixed: it wrote `.package.version`, a Cargo path, so in this
+        repository it would have added a bogus `[package]` table and left
+        `[project].version` stale. What replaces it is the check that already
+        exists -- stamping is a human edit a gate catches, not a target that
+        rewrites a manifest.
       - |
         **New crate: `aloelite-api`, the Mount API dispatched by name.** It
         holds `OPS` (the spec's operations and their parameter names, as

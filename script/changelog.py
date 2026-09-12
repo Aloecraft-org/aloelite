@@ -116,16 +116,39 @@ def find_tag(doc, tag):
 
 
 def pep440_to_semver(v):
-    """The Python version as Cargo spells it: 0.4.0rc1 -> 0.4.0-rc.1,
-    0.4.0a2 -> 0.4.0-alpha.2, 0.4.0 -> 0.4.0. None when it is not a shape
-    this project uses."""
-    m = re.match(r"^(\d+\.\d+\.\d+)(?:(a|b|rc)(\d+))?$", v)
+    """The PEP 440 spelling as the tag body spells it: 0.4.0rc1 ->
+    0.4.0-rc.1, 0.4.0a2 -> 0.4.0-alpha.2, 0.4.0.dev7 -> 0.4.0-dev.7,
+    0.4.0 -> 0.4.0. None when it is not a shape this scheme allows.
+    doc/ALIGNMENT.md §1."""
+    m = re.match(r"^(\d+\.\d+\.\d+)(?:\.dev(\d+)|(a|b|rc)(\d+))?$", v)
+    if not m:
+        return None
+    base, dev, kind, n = m.groups()
+    if dev is not None:
+        return "%s-dev.%s" % (base, dev)
+    if not kind:
+        return base
+    return "%s-%s.%s" % (base, {"a": "alpha", "b": "beta", "rc": "rc"}[kind], n)
+
+
+def semver_to_pep440(v):
+    """The inverse: the tag body as PEP 440 spells it. 0.4.0-rc.1 ->
+    0.4.0rc1, 0.4.0-dev.7 -> 0.4.0.dev7, 0.4.0 -> 0.4.0.
+
+    The canonical spelling is the tag body; PEP 440 is DERIVED from it and
+    lives only in pyproject.toml and on PyPI (doc/ALIGNMENT.md §1). This is
+    that derivation."""
+    m = re.match(r"^(\d+\.\d+\.\d+)(?:-(dev|alpha|beta|rc)\.(\d+))?$", v)
     if not m:
         return None
     base, kind, n = m.groups()
     if not kind:
         return base
-    return "%s-%s.%s" % (base, {"a": "alpha", "b": "beta", "rc": "rc"}[kind], n)
+    return "%s%s%s" % (
+        base,
+        {"dev": ".dev", "alpha": "a", "beta": "b", "rc": "rc"}[kind],
+        n,
+    )
 
 
 def pep440_pre(pre):
@@ -421,11 +444,20 @@ def consistency(doc):
                     "prerelease of it (%s)" % (got, version, where)
                 )
             cands = candidates_of(r)
-            if cands and got != cands[-1].get("version"):
-                bad.append(
-                    "pyproject.toml is %r but the newest candidate "
-                    "listed under %s is %r" % (got, where, cands[-1].get("version"))
-                )
+            if cands:
+                # A candidate's `version` is the TAG BODY; pyproject holds the
+                # PEP 440 derivation of it. Both spellings are accepted here
+                # because entries written before the scheme carry PEP 440
+                # directly, and ALIGNMENT.md §1 is explicit that nothing in
+                # the changelog gets rewritten.
+                newest = cands[-1].get("version")
+                spellings = {s for s in (newest, semver_to_pep440(newest)) if s}
+                if got not in spellings:
+                    bad.append(
+                        "pyproject.toml is %r but the newest candidate "
+                        "listed under %s is %r, which PEP 440 spells %r"
+                        % (got, where, newest, semver_to_pep440(newest) or newest)
+                    )
         elif got != version:
             bad.append("pyproject.toml is %r but %s says %r" % (got, where, version))
         # The Rust workspace spells the same version SemVer's way.
