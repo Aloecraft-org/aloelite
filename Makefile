@@ -7,12 +7,11 @@ __TECHNO_PROJECT_FILE:=${ROOT_DIR}/.technoproj
 # The image tag is the PEP 440 spelling, derived in version.mk with every
 # other one. It used to be assembled by a second jq expression here, which is
 # how a version gets two definitions and then two values.
-TECHNO_VERSION:=${__VERSION_PEP440}
+TECHNO_VERSION:=${__PEP440}
 
-echo:
-	@echo VERSION: ${__VERSION_PEP440}
-	@echo SEMVER:  ${__VERSION_SEMVER}
-	@echo TAG:     ${__TAG}
+# `make version` is version.mk's own and prints all four spellings; `echo` is
+# kept because fingers know it.
+echo: version
 
 clean:
 

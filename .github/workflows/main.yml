@@ -31,19 +31,34 @@ jobs:
     - name: Check formatting
       run: ruff format --check .
 
-    # CHANGELOG.yaml is the source of truth for release notes; CHANGELOG.md is
-    # generated from it and committed. `check` is what stops that copy going
-    # stale, and `consistency` is what catches the version drifting between
-    # pyproject.toml, .technoproj and db.py's SCHEMA_ERA -- which is exactly
-    # what happened at v0.3.6rc1, where only pyproject.toml moved.
-    - name: Install changelog deps
-      run: pip install pyyaml
+    # CHANGELOG.yaml is the source of truth for release notes; CHANGELOG.md
+    # is generated from it and committed, and `check` is what stops that copy
+    # going stale.
+    #
+    # The shared release engine (doc/ALIGNMENT.md §3). Pinned to a commit
+    # rather than a tag only because technoproj has cut none yet -- a commit
+    # is the stricter pin of the two. A release pipeline that tracks a moving
+    # branch is one that changes when nobody touched it. It brings PyYAML,
+    # which is why there is no separate install for it.
+    - name: The shared release engine
+      run: pip install "git+https://github.com/Aloecraft-org/technoproj@d0f5382fbcb081898bec304949937e0b3f339bc8"
+
+    # script/version.mk is a COPY of the engine's, placed by `technoproj
+    # sync`. This is what makes it a copy that is checked rather than one
+    # that is trusted, which is the whole difference between this and the
+    # three drifted forks it replaces.
+    - name: The shared make fragment has not drifted
+      run: technoproj check
 
     - name: Changelog is generated from its source
-      run: python script/changelog.py check
+      run: technoproj-changelog check
 
+    # `consistency` catches the version drifting between pyproject.toml,
+    # .technoproj and rust/Cargo.toml, and calls script/checks.py for the one
+    # invariant that is aloelite's alone: db.py's SCHEMA_ERA against the
+    # era the newest entry claims. v0.3.6rc1 is why -- only pyproject moved.
     - name: Tree version agrees with the changelog
-      run: python script/changelog.py consistency
+      run: technoproj-changelog consistency
 
   test:
     runs-on: ubuntu-latest

@@ -12,12 +12,24 @@ How a version of Aloelite goes out, end to end. Everything downstream of
 > What this document describes conforms to its §1, §2 and §4 — the version
 > scheme, `.technoproj`'s `pre`, and artifact names with no version in them —
 > to §5's `BUILDINFO.txt`, §6's `SHA256SUMS.txt`, §7's PyPI exclusion, and
-> §9's two gates. Still owed: **the shared engine itself**, which is what
-> `script/changelog.py` and `script/version.mk` here become
-> (`technoproj-changelog` and `technoproj sync`), along with the
-> `script/checks.py` that `SCHEMA_ERA` moves into and the `TECHNO_CHANGELOG`
-> declaration; `emit_json` if aloelite is to be mirrored from its changelog
-> rather than from GitHub; and actually cutting a `-dev.<n>` build.
+> §9's two gates, and to §3 — the release tooling is
+> [technoproj](https://github.com/Aloecraft-org/technoproj), installed in CI
+> and pinned, rather than a copy of it living here. Still owed: `emit_json`
+> if aloelite is to be mirrored from its changelog rather than from GitHub,
+> and actually cutting a `-dev.<n>` build.
+
+## The tooling
+
+`technoproj-changelog` renders and checks `CHANGELOG.yaml`; `technoproj
+sync` places `script/version.mk` and `technoproj check` fails when that copy
+has drifted. What differs per repository is declared rather than forked:
+`.technoproj`'s `TECHNO_CHANGELOG` block holds this project's facts,
+required keys and version stamps, and `script/checks.py` holds the one
+invariant that does not generalise — `SCHEMA_ERA` in `aloelite/db.py`
+against the era the newest entry claims.
+
+`make` has to read `version.mk` with no network and no virtualenv, which is
+why that one file is copied into the tree instead of imported.
 
 ## Where the version lives
 
@@ -32,27 +44,28 @@ The tag is canonical and the **tag body** — the tag without its `v` — is wha
 `CHANGELOG.yaml` and `rust/Cargo.toml` hold. PEP 440 is a *derived* spelling
 that exists only in `pyproject.toml` and on PyPI (`ALIGNMENT.md` §1).
 
-`script/changelog.py consistency` holds the four together and runs in CI's
+`technoproj-changelog consistency` holds the four together and runs in CI's
 `lint` job, so they cannot drift quietly: the newest entry's `X.Y.Z` must
 match `.technoproj`, `.technoproj`'s `pre` must spell what `pyproject.toml`
 spells, `pyproject.toml` must be that version or a candidate of it (and the
 newest candidate listed, if any), and `rust/Cargo.toml` must spell the same
 version SemVer's way.
 
-`make echo` prints all three spellings, derived from `.technoproj` alone by
+`make version` prints every spelling, derived from `.technoproj` alone by
 `script/version.mk` — there is no second definition of any of them:
 
 ```
-VERSION: 0.5.0rc1      # PEP 440, what pyproject and PyPI carry
-SEMVER:  0.5.0-rc.1    # what rust/Cargo.toml carries
-TAG:     v0.5.0-rc.1   # what you push
+version: 0.5.0 rc 1
+tag:     v0.5.0-rc.1   # what you push
+pep440:  0.5.0rc1      # what pyproject and PyPI carry
+semver:  0.5.0-rc.1    # what rust/Cargo.toml carries
 ```
 
 ## A release candidate
 
-1. Stamp the candidate: `make pre_set KIND=rc N=<n>`, then `pyproject.toml`
-   to `X.Y.ZrcN` and `rust/Cargo.toml` to `X.Y.Z-rc.N` — the two spellings
-   `make echo` just printed.
+1. Stamp the candidate: `make set_pre KIND=rc N=<n>`, then `pyproject.toml`
+   and `rust/Cargo.toml` to the `pep440:` and `semver:` lines `make version`
+   just printed.
 2. In `CHANGELOG.yaml`, under the `X.Y.Z` entry (which stays
    `status: unreleased`, `stable: false`), add the candidate:
    ```yaml
@@ -63,22 +76,24 @@ TAG:     v0.5.0-rc.1   # what you push
 
    The tag body, not PEP 440. Candidates written the old way (`X.Y.ZrcN`)
    still resolve and are not rewritten.
-3. `script/changelog.py generate`, then `consistency` and
-   `release-check --tag vX.Y.ZrcN --publish`; commit `CHANGELOG.md` with it.
+3. `technoproj-changelog generate`, then `consistency` and
+   `release-check --tag vX.Y.Z-rc.N --publish`; commit `CHANGELOG.md` with
+   it.
 4. Tag and push: `git tag -a vX.Y.Z-rc.N -m "vX.Y.Z-rc.N" && git push origin vX.Y.Z-rc.N`.
-   The tag is `make echo`'s `TAG` line. Candidates tagged the old way
+   The tag is `make version`'s `tag:` line. Candidates tagged the old way
    (`vX.Y.ZrcN`) still resolve, so an old release can be re-run; new ones use
    the spelling above (`ALIGNMENT.md` §1 — the dot before the number is what
    makes candidate 10 sort after candidate 2).
 
 ## The final
 
-1. Stamp `X.Y.Z` everywhere: `make pre_clear`, then `pyproject.toml` and
+1. Stamp `X.Y.Z` everywhere: `make clear_pre`, then `pyproject.toml` and
    `rust/Cargo.toml` to `X.Y.Z`.
 2. The entry: `status: released`, a `date`, `stable: true`, and move
    `latest: true` onto it (off the previous release). Keep `candidates`; they
    are the record of what preceded it.
-3. `generate`, `consistency`, `release-check --tag vX.Y.Z --publish`; commit.
+3. `technoproj-changelog generate`, `consistency`,
+   `release-check --tag vX.Y.Z --publish`; commit.
 4. Tag and push `vX.Y.Z` as above.
 
 ## What a tag triggers

@@ -5,6 +5,38 @@
     "patch": 0,
     "pre": null
   },
+  "TECHNO_CHANGELOG": {
+    "project": "Aloelite",
+    "intro_extra": "`schema era` is the volume's on-disk `api_version`: a file written by\none era is readable by a build of that era, and an era bump is a\nmigration rather than a compatible change.\n",
+    "facts": [
+      {
+        "keys": [
+          "api_version"
+        ],
+        "fmt": "schema era `{api_version}`"
+      }
+    ],
+    "tag_rule": "derive",
+    "required": [
+      "version",
+      "status",
+      "stable",
+      "summary"
+    ],
+    "latest_requires": [
+      "stable"
+    ],
+    "candidates": true,
+    "planned": true,
+    "emit_json": false,
+    "stamps": [
+      {
+        "file": "rust/Cargo.toml",
+        "find": "^version\\s*=\\s*\"([^\"]+)\"",
+        "spelling": "semver"
+      }
+    ]
+  },
   "TECHNO_INIT_DIRS": [
     ".nogit",
     ".dump",

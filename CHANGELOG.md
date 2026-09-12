@@ -3,7 +3,7 @@
 All notable changes to Aloelite are recorded here.
 
 Generated from `CHANGELOG.yaml`, which is the source of truth --
-edit that file, then run `script/changelog.py generate`.
+edit that file, then run `technoproj-changelog generate`.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 `schema era` is the volume's on-disk `api_version`: a file written by
@@ -121,6 +121,34 @@ host path the manifest grants.
 
   Nothing published is renamed: 0.3.7's assets stay as they are, and
   0.4.0 published none.
+- **The release tooling is `technoproj`, not a copy of it.**
+  `script/changelog.py` -- 576 lines here, and 423 and 484 in two
+  sibling repositories, one tool copied twice and then drifted -- is
+  gone. What replaces it is
+  [Aloecraft-org/technoproj](https://github.com/Aloecraft-org/technoproj),
+  installed in CI and pinned to a commit.
+
+  The divergence between the three copies turned out to be a schema and
+  a fact table rather than logic, so what is aloelite's now lives in
+  `.technoproj`'s `TECHNO_CHANGELOG` block -- the project name, the
+  `schema era` fact, the keys an entry must carry, the candidate and
+  planned sections, and a stamp for `rust/Cargo.toml`. The acceptance
+  bar was byte-for-byte reproduction of the committed `CHANGELOG.md`,
+  and it holds: the whole diff is the one intended line, the preamble
+  naming `technoproj-changelog generate` instead of the old path.
+
+  `script/version.mk` is still a copy, because `make` must read it with
+  no network and no virtualenv -- but `technoproj sync` places it and
+  `technoproj check` now runs in CI, so it is a copy that is checked
+  rather than one that is trusted. That is the whole difference between
+  this and the three forks it replaces.
+- **The one invariant that does not generalise moved to
+  `script/checks.py`.** The engine calls it if it exists. For aloelite
+  it is `SCHEMA_ERA` in `aloelite/db.py` against the era the newest
+  entry claims -- the field that decides whether a volume someone
+  already has still opens, and the reason `ALIGNMENT.md` insists
+  compatibility is checked by name rather than by reading digits out of
+  a version.
 - **A `-dev.<n>` tag can never reach PyPI.** `publish.yml` now ignores
   `v*-dev.*`. Nothing cuts a dev tag yet, and that is the point:
   `0.5.0-dev.7` normalises to the perfectly valid PEP 440 version
