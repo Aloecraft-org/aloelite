@@ -67,6 +67,7 @@ engine's charter (doc/DECISIONS.md D-4).
 | Cross-mount `mmap MAP_SHARED` coherence | Same page cache is per mount; staleness bounded by the attr TTL, not eliminated |
 | `copy_file_range` | No pyfuse3 handler; the kernel falls back to read/write loops (correct, no reflink speedup) |
 | Random writes on an `O_WRONLY\|O_TRUNC` streaming handle | ENOTSUP by design; open O_RDWR for random access (see `aloelite/fuse.py` module docs) |
+| A directory scan concurrent with a change to that directory | The listing is snapshotted at `opendir` and every `readdir` instalment is served from it, in both daemons. An entry created after the snapshot is not returned until the next scan; one unlinked after it is omitted rather than failing the scan. POSIX leaves this unspecified, and the alternative — rebuilding the listing per continuation call — is what made a scan cost one listing per call, and never gave stable offset cookies anyway |
 
 ## Engine-level guarantees that back the table
 

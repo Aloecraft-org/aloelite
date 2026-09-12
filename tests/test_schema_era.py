@@ -185,11 +185,12 @@ PRAGMA user_version = 1;
 """
 
 
-def test_era1_file_migrates_to_era2_on_open(tmp_path: Path):
-    """The break-once migration, end to end on a genuine era-1 file: ownership
-    and placement columns appear, ms timestamps become ns (x1e6, exactly
-    once even after a crash-rerun), the era-1 PI-1 unique index is gone, and
-    the file then just works — resolve, create, list, remove."""
+def test_era1_file_migrates_to_current_on_open(tmp_path: Path):
+    """The break-once migration, end to end on a genuine era-1 file, through
+    EVERY step to the current era: ownership and placement columns appear, ms
+    timestamps become ns (x1e6, exactly once even after a crash-rerun), the
+    era-1 PI-1 unique index is gone, every placement carries a name (era 3),
+    and the file then just works — resolve, create, list, remove."""
     from aloelite._sqlite import sqlite3 as sq
 
     p = tmp_path / "era1.fs"
@@ -228,6 +229,13 @@ def test_era1_file_migrates_to_era2_on_open(tmp_path: Path):
         ).fetchone()
         is None
     )
+    # era 3: every active placement carries its name, and the index that
+    # makes a child lookup a seek is installed
+    assert c.execute("SELECT count(*) FROM edge WHERE name IS NULL").fetchone()[0] == 0
+    assert (
+        c.execute("SELECT 1 FROM sqlite_master WHERE name='edge_from_name'").fetchone()
+        is not None
+    )
     # and the migrated file WORKS, with ids fenced above the era-1 watermark
     vol = "0198a000-0000-7000-8000-000000000001"
     mid = ops.mount(db, vol, "/", ttl_ms=60_000)
@@ -247,6 +255,101 @@ def test_era1_file_migrates_to_era2_on_open(tmp_path: Path):
         "SELECT created_at FROM node WHERE name='f'"
     ).fetchone()[0]
     assert created2 == created  # x1e6 did not apply twice
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# Era 2 -> 3: edge.name materialised
+# --------------------------------------------------------------------------
+def test_era2_file_materialises_placement_names_on_open(tmp_path: Path):
+    """Era 2 -> 3 on a file in genuine era-2 shape.
+
+    In era 2 a null `edge.name` meant "use the node's name" and only a D-5
+    override was stored, so this winds a current file back to that: drop the
+    era-3 guard, null every name that merely repeats its node's, and re-stamp
+    the version. Reopening must backfill the inherited names, leave the
+    override alone, and leave the volume usable by path -- which is the whole
+    point, since era 3 matches on `edge.name` directly and a null row would
+    be unreachable.
+    """
+    p = tmp_path / "era2.fs"
+    db = _open(p)
+    vol = ops.create_volume(db, "v", 1 << 20).id
+    mid = ops.mount(db, vol, "/", ttl_ms=60_000)
+    ops.create_container(db, mid, "/dir")
+    for i in range(5):
+        ops.create_entry(db, mid, f"/dir/f{i}.txt", bytes([i]))
+    ops.link(db, mid, "/dir/f0.txt", "/dir/alias.txt")  # D-5: a real override
+    c = db.connection
+    c.execute("DROP TRIGGER IF EXISTS edge_guard_name")
+    c.execute(
+        "UPDATE edge SET name = NULL WHERE name = "
+        "(SELECT n.name FROM node n WHERE n.node_id = edge.to_id)"
+    )
+    inherited = c.execute("SELECT count(*) FROM edge WHERE name IS NULL").fetchone()[0]
+    overrides = c.execute(
+        "SELECT count(*) FROM edge WHERE name IS NOT NULL"
+    ).fetchone()[0]
+    assert inherited > 0 and overrides == 1, (inherited, overrides)
+    c.execute("PRAGMA user_version = 2")
+    db.close()
+
+    db = _open(p)
+    c = db.connection
+    assert _user_version(db) == SCHEMA_ERA
+    assert c.execute("SELECT count(*) FROM edge WHERE name IS NULL").fetchone()[0] == 0
+    # the override survived rather than being overwritten by the node's name
+    assert (
+        c.execute(
+            "SELECT count(*) FROM edge WHERE name = 'alias.txt' AND archived = 0"
+        ).fetchone()[0]
+        == 1
+    )
+    # and every path still resolves, the hardlink included. allow_overlap
+    # because the first handle closed without unmounting, so its row is still
+    # there -- which is exactly what a reopened file looks like.
+    mid = ops.mount(db, vol, "/", ttl_ms=60_000, allow_overlap=True)
+    assert ops.read_all(db, mid, "/dir/f3.txt") == bytes([3])
+    assert ops.read_all(db, mid, "/dir/alias.txt") == bytes([0])
+    assert sorted(e.name for e in ops.list(db, mid, "/dir")) == [
+        "alias.txt",
+        "f0.txt",
+        "f1.txt",
+        "f2.txt",
+        "f3.txt",
+        "f4.txt",
+    ]
+    db.close()
+
+    # idempotence: a crash between migration and stamp reruns the backfill
+    db = _open(p)
+    db.connection.execute("PRAGMA user_version = 2")
+    db.close()
+    db = _open(p)
+    assert (
+        db.connection.execute(
+            "SELECT count(*) FROM edge WHERE name = 'alias.txt' AND archived = 0"
+        ).fetchone()[0]
+        == 1
+    )
+    db.close()
+
+
+def test_era3_guard_refuses_a_null_placement_name(tmp_path: Path):
+    """The backstop for anything inserting outside create_edge."""
+    from aloelite._sqlite import sqlite3 as sq
+
+    db = _open(tmp_path / "guard.fs")
+    vol = ops.create_volume(db, "v", 1 << 20).id
+    mid = ops.mount(db, vol, "/", ttl_ms=60_000)
+    node = ops.create_entry(db, mid, "/f.txt", b"x")
+    root = ops.stat(db, mid, "/").id
+    with pytest.raises(sq.IntegrityError, match="edge.name must be set"):
+        db.connection.execute(
+            "INSERT INTO edge (edge_id, from_id, to_id, volume_id, archived, name) "
+            "VALUES ('e-null', ?, ?, ?, 0, NULL)",
+            (str(root), str(node), str(vol)),
+        )
     db.close()
 
 

@@ -59,221 +59,7 @@
 schema: 1
 repo: Aloecraft-org/aloelite
 
-planned:
-  - title: "Schema era 3: edge.name is the placement's name, always"
-    branch: claude/aloelite-ci-benchmarks-9ts6he
-    summary: |
-      **Child lookup becomes a covering-index seek.** Era 2 added `edge.name`
-      as a D-5 override where NULL meant "use the node's name", so every
-      lookup matched on `coalesce(edge.name, node.name)` -- a predicate
-      spanning two tables, which no index can serve. Finding a child by name
-      therefore scanned the container, making `stat` linear in directory
-      size.
-
-      Era 3 makes the column always hold the placement's name. `create_edge`
-      materialises the node's name when the caller supplies no override, so
-      the coalesce moves from every read to one write; `resolve_segment`,
-      `resolve_path`, `archive_placement`, `rename_placement` and
-      `directory_listing` all match on `edge.name` directly; and a new
-      `edge (from_id, name, to_id) WHERE archived = 0` answers the lookup
-      from the index alone --
-      `SEARCH edge USING COVERING INDEX edge_from_name (from_id=? AND name=?)`.
-
-      | `stat` p50 | before | after |
-      |---|---|---|
-      | 1,000 entries | 0.54 ms | 0.051 ms |
-      | 5,000 entries | 3.04 ms | 0.056 ms |
-      | 10,000 entries | 6.32 ms | 0.063 ms (100x) |
-
-      Flat where it was linear. Against ext4 on the same disk the gap falls
-      from 1,170x to 12x. The index's write cost did not show above
-      run-to-run noise: `create_ops` 1,618/s against 1,470/s, ingest
-      3,064-3,341 rows/s against 2,952-3,206.
-
-      `migrate_to_era3` backfills existing rows (idempotent by its own
-      WHERE), `edge_guard_name` refuses a null placement name thereafter, and
-      a genuine D-5 override is left untouched -- verified by winding a file
-      back to era-2 shape, reopening it, and reading the migrated volume from
-      BOTH implementations.
-
-      **An index on `node (name)` was measured first and discarded.** Without
-      ANALYZE the planner ignores it entirely; with ANALYZE it is used and
-      picks a worse shape (a full `SCAN edge` for the outer query), making
-      `stat` slower while barely moving `readdir`.
-
-  - title: "Listing visibility as a window, not a correlated subquery"
-    branch: claude/aloelite-ci-benchmarks-9ts6he
-    summary: |
-      **`directory_listing` was O(N^2) and is now linear.** NODE-5 says the
-      greatest `node_id` per effective name is the visible one, and the view
-      derived that with a correlated scalar subquery: for every row, re-read
-      the container's whole child set and take the max. As a window function
-      it is one pass --
-      `max(n.node_id) OVER (PARTITION BY ae.from_id, coalesce(ae.name, n.name))`.
-
-      One `readdir`, measured against ext4 on the same disk:
-
-      | entries | ext4 | before | after |
-      |---|---|---|---|
-      | 1,000 | 0.33 ms | 375 ms | 8.2 ms |
-      | 5,000 | 1.63 ms | 10.2 s | 41 ms |
-      | 10,000 | 2.81 ms | 51.0 s | 96 ms |
-
-      532x at 10,000 entries through the library, 103x through the Python
-      mount and 342x through the Rust one, and the gap widens with N because
-      the shape changed rather than the constant. Per-entry cost is now flat
-      (8.2 -> 9.6 us), which is what linear looks like. Writes are untouched:
-      a view is not an index, and `create_ops` and the ingest curve are
-      unchanged.
-
-      Output is byte-identical. The rewrite was adopted against a row-for-row
-      differential covering hardlinked placements carrying per-placement names
-      (D-5) and hidden same-name siblings, which are the two cases `visible`
-      exists for.
-
-      The view is DROPped and recreated rather than `CREATE VIEW IF NOT
-      EXISTS`, inside a transaction, so an existing file picks the rewrite up
-      on its next open without a schema-era bump and without a concurrent
-      opener ever observing the gap between the two statements. A view holds
-      no data and this one returns exactly what the old one did, so an older
-      build loses nothing: it reinstalls its own equivalent definition.
-
-      **The obvious fix does not work, and was measured before being
-      discarded.** An index on `node (name)` is ignored by the planner
-      outright; with `ANALYZE` it is used and picks a WORSE shape -- a full
-      `SCAN edge` for the outer query -- making `stat` slower (1.53 -> 2.57 ms)
-      while barely moving `readdir`. No index on one table can serve a
-      predicate that spans two.
-
-      **Lookup is still linear and is NOT fixed by this.** `resolve_segment`
-      and `resolve_path` carry the same two-table predicate and do not go
-      through the view: finding a child by name still scans the container.
-      6.3 ms at 10,000 entries against ext4's 0.005 ms, 1,170x. Fixing it
-      needs `edge.name` populated unconditionally so `edge (from_id, name)
-      WHERE archived = 0` becomes a real covering index -- a data migration
-      and an era bump, which is era-3 work.
-
-  - title: "FUSE: cache the directory listing for the life of the handle"
-    branch: claude/aloelite-ci-benchmarks-9ts6he
-    summary: |
-      **Both daemons rebuilt the whole directory listing on every kernel
-      `readdir` continuation call.** The kernel reads a directory in
-      buffer-sized instalments, calling `readdir` again and again with a
-      rising offset, so a scan cost one full listing PER CALL -- and since a
-      listing is already O(N^2) (`directory_listing` resolves NODE-5
-      visibility with a correlated subquery per row), a scan through a mount
-      was close to cubic.
-
-      `AloeFuse.opendir` and `Inner::opendir` now snapshot the visible
-      listing, `readdir` serves every instalment from it, and `releasedir`
-      drops it. The Python handle table is a separate `_dirs` dict and the
-      Rust one a separate `dirs` map, so nothing that walks FILE handles
-      (flush, release, the getattr size overlay) has to know directories
-      exist.
-
-      Measured, one `readdir` of a 5,000-entry directory:
-
-      | | before | after |
-      |---|---|---|
-      | `fuse` | 328 s | 12.8 s (26x) |
-      | `rust-fuse` | 88 s | 11.5 s (7.7x) |
-
-      Fitted growth falls from n^2.94 to n^2.0 (Python) and n^2.74 to n^2.1
-      (Rust). At 10,000 entries neither daemon could be measured before --
-      the benchmark projected 2,524 s and 592 s and skipped both -- and both
-      now finish in about the time the library itself takes (52 s and 47 s
-      against 51 s). The mount's own contribution to readdir cost is gone;
-      what remains is the O(N^2) listing underneath, which is a schema
-      question (an index on `node (name)`, or D-5's `edge.name`) and not the
-      daemons'.
-
-      The snapshot also fixes the offset cookies, which were never stable: a
-      readdir offset has to mean the same entry on the next call, and against
-      a freshly built listing an entry created or removed mid-scan shifted
-      every cookie after it, so the kernel could skip or repeat entries. A
-      snapshot cannot shift. POSIX leaves concurrent modification during a
-      scan unspecified, which is what lets both daemons take the stable
-      reading; an entry unlinked after the snapshot is omitted rather than
-      failing the whole scan.
-
-  - title: "Benchmark suite and CI benchmark job"
-    branch: claude/aloelite-ci-benchmarks-9ts6he
-    summary: |
-      **`bench/`, a measurement harness, and a CI job that publishes what it
-      finds.** Nineteen suites across four axes -- frontend (`ext4` baseline,
-      `direct`, both FUSE daemons, both `aloelite` binaries), volume mode
-      (plain / convergent / random), cache state (cold / warm), and size --
-      with every row carrying all four labels so two numbers can never be
-      averaged into one that means nothing.
-
-      Because the tree now holds two implementations of one format, the
-      frontend axis is also an implementation axis: `rust-fuse` is an entry
-      in the daemon table, so every suite reports it beside `fuse` without
-      naming it. Two comparisons get their own suites -- `cli` (both
-      binaries over the shared verb contract, with the process-startup floor
-      measured separately) and `interop` (one implementation writes a volume,
-      the other reads it back, both directions and both volume modes, bytes
-      compared).
-
-      - Throughput, small-file ops, random `pread` p50/p99, and append commit
-        latency, each against an ext4 baseline on the same disk and under one
-        durability barrier for every backend (an ext4 buffered write and a WAL
-        commit are not the same promise).
-      - Space: on-disk over logical for unique / template-cloned / sparse
-        corpora; dedup within a volume and ACROSS volumes, which is the row
-        that confirms per-volume key separation (plain 1.0, encrypted 0.0);
-        bytes per version for a small edit; prune's freed pages reported
-        separately from VACUUM's file shrink.
-      - Scale curves rather than averages: ingest rate against chunk-table
-        depth, lookup and readdir against directory size, and peak RSS for a
-        long stream (measured in a child, since `ru_maxrss` never falls).
-      - Maintenance: unlock and `change_pin` against volume size, verify
-        seconds per GiB shallow and deep, and export/snapshot duration
-        alongside what they do to a concurrent reader's p99.
-      - Robustness: readers and a writer as separate processes with
-        SQLITE_BUSY accounting (counted by message and timed, so a refusal
-        that arrived instantly is not reported as a timeout), and a `kill -9`
-        loop that kills the writer -- or EITHER FUSE daemon -- mid-write, then
-        reopens and deep-verifies every file whose write had been confirmed.
-        6,993 confirmed files over 48 rounds, none lost or corrupt.
-      - `gocryptfs` and `restic` as outside comparators, so the numbers mean
-        something to a reader who has never used aloelite.
-
-      `doc/BENCHMARKS.md` records the method, the findings, and what the
-      harness deliberately does not measure. Nothing asserts: the job fails
-      only when a suite crashes, never on a slow number.
-
-      **Finding worth acting on:** directory size is a scaling wall, and one
-      missing capability causes both halves of it. `name` lives on `node` and
-      `from_id` lives on `edge`, so no index can answer "the child of
-      container C named X" as a seek. `resolve_segment` (and the same shape
-      inside `resolve_path`'s CTE) therefore seeks `edge_from_active` on
-      `from_id` alone and filters the container's whole child set by name,
-      making a single `stat` O(entries in that directory); and
-      `directory_listing` runs that as a correlated scalar subquery per row,
-      making `readdir` O(N^2). Measured against ext4 on the same disk, which
-      is flat on lookup (htree) and linear on readdir: at 10,000 entries
-      aloelite needs 6.2 ms to stat one file where ext4 needs 0.005 ms, and
-      49 s to list the directory where ext4 needs 2.9 ms -- 1,100x and
-      ~17,000x. The exponent is the problem, not the constant. Candidate
-      fixes
-      are an index on `node (name)` (additive) or denormalising the name onto
-      the edge, which D-5 already plans -- a schema question that belongs
-      with the era-2 work, not with a benchmark.
-
-      Through a mount it was worse again, for a second and independent
-      reason, and in BOTH daemons -- the listing was rebuilt on every kernel
-      continuation call. That half needed no schema change and is fixed; see
-      the entry above.
-
-      **Second finding, Rust side:** `aloelite-fuse` replies to `open` with
-      `FopenFlags::empty()`, so the kernel invalidates a file's page cache on
-      every open and no read is ever served from cache. The Python daemon
-      gets `keep_cache = True` (pyfuse3's default) and its repeat reads
-      accelerate about 20x -- measured at 279 -> 5,359 MiB/s over four reads
-      of the same file, against a flat ~270 MiB/s for the Rust daemon. The
-      comment in `aloelite/fuse.py` describing `keep_cache=False` as "the
-      pyfuse3 default" is also wrong: the default is True.
+planned: []
 
 releases:
   - version: "0.4.0"
@@ -284,25 +70,64 @@ releases:
         date: "2026-09-03"
     api_version: 3
     summary: |
-      **Schema era 2: the break-once release.** A file written by this build
-      does not open on an older one, by design — `PRAGMA user_version` is 2
+      **Schema era 3: the break-once release.** A file written by this build
+      does not open on an older one, by design — `PRAGMA user_version` is 3
       and a newer era is refused rather than half-read. The first open of an
-      era-1 file migrates it in place: additive columns and a millisecond ->
-      nanosecond rescale, crash-idempotent, with no other table data touched.
+      older file migrates it in place, crash-idempotently, with no other
+      table data touched: era 1 -> 2 adds columns and rescales milliseconds
+      to nanoseconds, era 2 -> 3 materialises every placement's name.
 
-      Era 2 is where the POSIX surface became real (ownership, hardlinks,
+      This is where the POSIX surface became real (ownership, hardlinks,
       xattrs, fifos), where id generation moved out of SQL and into the host,
       and where the cross-implementation contract grew teeth: the conformance
       suite, the id and format vectors, and a spec that is asserted against
-      the implementation rather than describing it.
+      the implementation rather than describing it. Alongside it, a second
+      implementation — `rust/`, six crates on three targets — and the
+      benchmark suite that measures the two against each other and against
+      ext4.
+
+      Era 3 itself is one change with one purpose: directory operations no
+      longer get slower as directories get larger. Lookup was linear and
+      listing quadratic; both are now flat and linear respectively, which
+      took a schema change (`edge.name`, below), a view rewrite, and a fix
+      in both FUSE daemons.
     upgrading: |
       **Timestamps are nanoseconds, not milliseconds** (NODE-4). Anything
       that renders an engine timestamp must divide by 1e9. This is the one
       change that breaks code which never mentions it: three frontends have
       been caught dividing by 1000 and rendering the year 56,672,999.
 
-      **Era-2 files do not open on 0.3.x builds.** Export before downgrading.
+      **Era-3 files do not open on 0.3.x builds, nor on 0.4.0rc1**, which
+      shipped era 2. Opening an era-1 or era-2 file with this build migrates
+      it in place and there is no way back; export first if you need to keep
+      reading it with an older build.
+
+      **`edge.name` is now always populated** (era 3). It arrived in era 2 as
+      a D-5 placement-name override where NULL meant "use the node's name",
+      and anything reading the table directly matched on
+      `coalesce(edge.name, node.name)`. It now always holds the placement's
+      name, and `edge_guard_name` refuses a NULL on insert. Code that reads
+      `edge` through the templates or either implementation needs no change;
+      code that hand-wrote that coalesce can drop it.
     added:
+      - |
+        **`bench/` — a measurement suite, and a CI job that publishes it.**
+        Nineteen suites across four axes: frontend (`ext4` baseline, the
+        library, both FUSE daemons, both `aloelite` binaries), volume mode
+        (plain / convergent / random), cache state, and size. Every row
+        carries all four labels, because a throughput number without them is
+        unattributable. It covers throughput, small-file ops, random `pread`,
+        append latency, on-disk-over-logical for three corpus shapes, dedup
+        within and ACROSS volumes (which is where per-volume key separation
+        gets confirmed rather than asserted), bytes per version, prune vs
+        VACUUM, ingest against chunk-table depth, lookup and readdir against
+        directory size, peak RSS, unlock/change_pin/verify/export/snapshot,
+        reader-writer contention with SQLITE_BUSY accounting, and a `kill -9`
+        loop. `gocryptfs` and `restic` appear as outside comparators, and
+        `interop` writes a volume with one implementation and reads it back
+        with the other. Nothing asserts: the job fails when a suite crashes,
+        never on a slow number. `doc/BENCHMARKS.md` records the method, the
+        findings, and what it deliberately does not measure.
       - |
         **Pack format v2 (D-8).** A pack now carries each node's uid, gid and
         mode, its xattrs, and its retention policy, so a pack/unpack cycle no
@@ -417,6 +242,31 @@ releases:
         omission.
     changed:
       - |
+        **`edge.name` always holds the placement's name (era 3).** It arrived
+        in era 2 as an override where NULL meant "use the node's name", so
+        every lookup matched on `coalesce(edge.name, node.name)` — a
+        predicate spanning two tables, which no index can serve. Finding a
+        child by name therefore scanned the container and `stat` was linear
+        in directory size. `create_edge` now materialises the node's name
+        when the caller gives no override, moving that coalesce from every
+        read onto one write, and `edge (from_id, name, to_id) WHERE
+        archived = 0` answers the lookup from the index alone. At 10,000
+        entries `stat` goes 6.32 ms -> 0.063 ms and stops growing; against
+        ext4 on the same disk the gap falls from 1,170x to 12x. The index's
+        write cost did not show above run-to-run noise. `migrate_to_era3`
+        backfills, idempotent by its own WHERE; `edge_guard_name` keeps it
+        true; a genuine D-5 override is left alone.
+      - |
+        **Listing visibility is a window, not a correlated subquery.** NODE-5
+        makes the greatest `node_id` per effective name visible, and
+        `directory_listing` derived that per row by re-reading the whole
+        child set — O(N^2). As `max(...) OVER (PARTITION BY ...)` it is one
+        pass: a 10,000-entry `readdir` goes 51.0 s -> 93 ms, and the shape
+        changes rather than the constant, so the gap widens with N. Output is
+        byte-identical, held to that against a row-for-row differential over
+        hardlinked placements and hidden same-name siblings. A view is not an
+        index, so writes are untouched.
+      - |
         **All stored timestamps are nanoseconds** (see Upgrading). The era-1
         rescale is bounded by magnitude and is safe to re-run after a crash.
       - |
@@ -429,6 +279,19 @@ releases:
         active placements, which is what makes hardlinks possible; the
         container graph is still a tree.
     fixed:
+      - |
+        **Both FUSE daemons rebuilt the directory listing on every kernel
+        `readdir` call.** The kernel reads a directory in buffer-sized
+        instalments, so a scan cost one full listing per call — on top of a
+        listing that was itself quadratic, which made a scan through a mount
+        close to cubic. `opendir` now snapshots the listing, `readdir` serves
+        every instalment from it, and `releasedir` drops it, in both the
+        Python and Rust daemons. A 5,000-entry `readdir` went 328 s -> 12.8 s
+        (Python) and 88 s -> 11.5 s (Rust) before the view rewrite above took
+        both to tens of milliseconds. The snapshot also makes the offset
+        cookies stable, which they never were: against a freshly built
+        listing, an entry created or removed mid-scan shifted every cookie
+        after it and the kernel could skip or repeat entries.
       - |
         `unpack` answers `corrupt` for a garbage or malformed pack blob (bad
         MsgPack, a top-level array, a node without a type) instead of

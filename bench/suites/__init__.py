@@ -42,6 +42,7 @@ SUITES: dict[str, str] = {
     "concurrency": "bench.suites.robustness:concurrency",
     "durability": "bench.suites.robustness:durability",
     "external": "bench.suites.external:comparators",
+    "resolve": "bench.suites.resolve:resolve",
     "cli": "bench.suites.rust:cli",
     "interop": "bench.suites.rust:interop",
 }
@@ -56,6 +57,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "prune",
         "ingest_scale",
         "dir_scale",
+        "resolve",
         "memory",
         "unlock",
         "verify",

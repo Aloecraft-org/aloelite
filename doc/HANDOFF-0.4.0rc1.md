@@ -92,7 +92,10 @@ What landed, one line each (commit messages carry the detail):
   get no automatic runs.
 - **WAL fallback resolved** — see §4 below; `db.py` now probes the returned
   journal mode instead of trusting an exception.
-- **Benchmarks written** — `script/benchmark.py` and `doc/BENCHMARKS.md`.
+- **Benchmarks written** — `bench/` and `doc/BENCHMARKS.md`. (This began as
+  `script/benchmark.py`; `bench/` replaced it and carries everything it
+  measured, including the resolve CTE-vs-fold comparison, now
+  `python -m bench --suite resolve`.)
 - **Manager HTTP contract extracted** — `manager/api-spec.yaml` plus
   `manager/test_api_spec.py`, which projects it onto the live Flask url_map
   and fails in both drift directions (both verified by deliberately
@@ -110,8 +113,10 @@ In rough priority order; none blocks the others.
 2. **Benchmarks on real hardware.** The numbers in `doc/BENCHMARKS.md` were
    taken in a containerized VM whose throughput varies by multiples between
    runs; the doc says so and reports ranges. The *ratios* are sound, the
-   absolute figures are not. Rerun `script/benchmark.py --fuse` on a real
-   machine before quoting any absolute number in release material.
+   absolute figures are not. Rerun `python -m bench --group all --scale ci`
+   on a real machine before quoting any absolute number in release
+   material — `--scale full` is the profile that needs a real host outright
+   (100 GiB streams, million-entry directories).
 3. **Manager, remaining steps.** The HTTP contract is now extracted
    (`manager/api-spec.yaml`); what is left is optional and not urgent:
    splitting `api.py` (1,100 lines) into route modules per resource, and

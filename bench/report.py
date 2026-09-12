@@ -113,6 +113,12 @@ SECTIONS: dict[str, tuple[str, str]] = {
         "`confirmed_then_lost` counts files whose write was confirmed and "
         "which are then missing or fail deep verify. The target is zero.",
     ),
+    "resolve": (
+        "One query per path, or one per segment",
+        "The local columns are measured; `modelled_at_1ms_rtt_ms` adds a "
+        "fixed per-round-trip cost to them and is a model, not a "
+        "measurement.",
+    ),
     "cli": (
         "The two `aloelite` binaries, verb for verb",
         "One process per operation, driven through the verb contract in "
@@ -153,6 +159,7 @@ DETAIL_COLUMNS: dict[str, tuple[str, ...]] = {
     "concurrency": ("scaling_efficiency", "MiB_s_per_worker", "busy"),
     "durability": ("files_confirmed", "missing_after_crash", "p99_ms"),
     "external": ("elapsed_s", "min", "max"),
+    "resolve": ("depth", "round_trips", "modelled_at_1ms_rtt_ms"),
     "cli": ("p99_ms", "startup_floor_ms", "above_floor_ms", "MiB_s"),
     "interop": ("bytes_match", "write_MiB_s", "read_MiB_s"),
 }
