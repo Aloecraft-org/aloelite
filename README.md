@@ -109,6 +109,7 @@ It is designed for situations where you want filesystem semantics (paths, direct
 - **At-rest encryption** per volume (ChaCha20-Poly1305, Argon2id); the PIN is used only at mount time and never stored
 - **Content deduplication** — identical data is stored once per volume, including across repeated backups
 - **Live snapshots** — export a consistent, self-contained SQLite file while the volume is mounted and in use
+- **Two implementations** — the Python engine, and a Rust workspace (`rust/`) built to the same on-disk format and the same CLI contract: a native `aloelite` and `aloelite-fuse`, and a browser build that runs the engine over OPFS. A volume written by either reads in the other, encrypted or not
 
 **Implementation Status**
 
@@ -116,8 +117,9 @@ It is designed for situations where you want filesystem semantics (paths, direct
 - **Content storage** — content-addressed chunk pool with deduplication, per-version manifests, configurable retention, and bounded-memory streaming I/O; production-validated against files in the tens of gigabytes.
 - **Random access** — `write_range` and `truncate` are first-class engine operations: unchanged chunks carry into the new version by reference, so partial overwrites of large files are cheap and bounded-memory.
 - **Encryption** — at-rest at the storage boundary (ChaCha20-Poly1305, Argon2id, per-volume wrapped key), with convergent and random nonce modes.
-- **FUSE** — O_RDWR access through a dirty-extent handle (memory bounded by dirty bytes, flushed atomically on fsync/release); symlinks and permission bits (chmod, executables) persist across remounts; honors utimens; streaming writes commit at flush time, synchronously with the application's `close()`, so a crashed daemon loses only truly in-flight data; hardened handlers return EIO rather than detaching the mount. Hard links, shared-writable mmap, and byte-range locks across separate mounts are not yet implemented.
+- **FUSE** — O_RDWR access through a dirty-extent handle (memory bounded by dirty bytes, flushed atomically on fsync/release); symlinks and permission bits (chmod, executables) persist across remounts; honors utimens; streaming writes commit at flush time, synchronously with the application's `close()`, so a crashed daemon loses only truly in-flight data; hardened handlers return EIO rather than detaching the mount. Hard links are first-class (a leaf may be placed many times, each placement carrying its own name). Shared-writable mmap and byte-range locks across separate mounts are not yet implemented.
 - **CLI** — covers the library verbs for scripting.
+- **Rust** (`rust/`) — six crates on three targets. `aloelite-core` is the engine and compiles unchanged for native, WASI and the browser; `aloelite-cli` and `aloelite-fuse` are the native frontends, parsed from the same verb contract as the Python ones; `aloelite-wasm` is the browser surface. The conformance suite is what holds the two implementations to one behaviour, and `doc/BENCHMARKS.md` measures them against each other.
 - **Volume manager** (`manager/`) — an HTTP API + WebUI with two frontends per volume: **direct** (a held engine session serving the browser file explorer — no FUSE, no privileges, runs anywhere Python does) and **FUSE** (volumes exposed as directories for Docker/Podman consumers). Filesystem files can be imported and exported through the WebUI.
 
 Reserved but not yet realized:
