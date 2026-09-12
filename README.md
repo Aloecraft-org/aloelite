@@ -614,13 +614,12 @@ with the volume (unlock and `change_pin` are flat).
 on small files — the price of a content-addressed pool inside a transactional
 database. Encryption is close to free on top of that.
 
-**Avoid** large directories. Nothing in the schema can turn "the child of this
-directory named X" into an index seek, so a `stat` costs a scan of the whole
-directory and a `readdir` costs one such scan per entry — linear and
-quadratic where ext4 is flat and linear. At 10,000 entries that is 6.3 ms to
-stat one file and 51 s to list them all, against ext4's 0.005 ms and 2.8 ms
-on the same disk. Both implementations share it, and it needs a schema
-change to fix. Keep directories in the low thousands until that happens.
+**Avoid** large directories — for path lookups, not for listings. Nothing in
+the schema can turn "the child of this directory named X" into an index seek,
+so a `stat` scans the whole directory: 6.3 ms at 10,000 entries against
+ext4's 0.005 ms. Listing one is fine now (96 ms for 10,000, linear); it used
+to be quadratic. Keep directories in the low thousands until lookup is fixed
+too, which needs a schema change.
 
 **Two implementations, one format.** A volume written by either `aloelite`
 binary reads correctly in the other, plain and encrypted. The Rust CLI starts
