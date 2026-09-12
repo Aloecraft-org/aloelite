@@ -600,14 +600,29 @@ concealment gap noted under D-8, and the era-1 migration policy in
   because the host SDK brings wasmtime, that CI runs against the built
   `.wasm`. Nothing on the plug-in's own side of the ABI could have caught
   this.
-- **Left open.** The volume is a file on a granted host path. The other
-  shape `aloelite-store` already has — the whole volume in memory,
-  checkpointed to a `BlobStore` through host functions, which would let the
-  host keep the bytes anywhere — is not implemented, and wants
-  `ego_platform` to compile for preview 1 first: its `detect()` gates the
-  WASI arm on `target_env = "p2"`, so this crate carries its own clock and
-  entropy in the meantime (`src/platform.rs`, thirty lines, deleted when
-  that lands).
+- **Both storage shapes ship, and the second needs no host functions.** The
+  volume is a file on a granted path, or it is bytes: `fs_open_image` takes
+  the whole database and `fs_snapshot` hands it back, so the host keeps it
+  wherever it already keeps things. That is the memory-image model from the
+  table above, and reaching it through the call boundary rather than through
+  Extism host functions is deliberate — host functions have to be registered
+  per language and are the roughest corner of several SDKs, while an
+  argument and a return value are the one thing every SDK does well. It also
+  makes the plug-in a pure function of its inputs: an instance in this shape
+  is given **no `allowed_paths` at all**, so the sandbox is complete and it
+  reads nothing it was not handed. `harness/` runs a volume through that
+  configuration.
+
+  What the host owns, as D-7 always said it would: when to snapshot. An
+  unsnapshotted write is a lost write, and the volume must fit in plug-in
+  memory.
+- **Left open.** `aloelite_store::image::Image` is the same shape in the
+  crate that owns storage models, and this crate cannot use it: it reaches
+  `ego_platform`, whose `detect()` gates the WASI arm on
+  `target_env = "p2"` and so does not compile for preview 1. So the image
+  handling and the clock and entropy are local here (`src/platform.rs`,
+  thirty lines). One `cfg` upstream (`target_os = "wasi"` covers p1 and p2)
+  collapses that, and is the follow-up.
 
 ## D-8: The pack format moves to v2 once, carrying what v1 drops, before any further port writes a pack
 

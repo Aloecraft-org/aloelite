@@ -11,7 +11,7 @@
 //!
 //! | module | what it is |
 //! |---|---|
-//! | `exports` | the five `#[plugin_fn]`s — `fs_open`, `fs_open_memory`, `fs_call`, `fs_close`, `fs_operations` — compiled for WebAssembly only |
+//! | `exports` | the seven `#[plugin_fn]`s — `fs_open`, `fs_open_memory`, `fs_open_image`, `fs_snapshot`, `fs_call`, `fs_close`, `fs_operations` — compiled for WebAssembly only |
 //! | [`plugin`] | the same work without the envelope, and the one handle behind it |
 //! | [`wire`] | the envelope: `{op, args}` in, `{ok}` or `{error: {code, message}}` out |
 //! | [`value`] | records, bytes and scalars on the way out, as MessagePack |
@@ -23,9 +23,10 @@
 //!
 //! ## What a host must do
 //!
-//! - **Enable WASI**, and grant the directory the volume lives in. The
-//!   plug-in reaches the host filesystem only through what the manifest
-//!   allows, and `fs_open` on anything else fails like a missing file.
+//! - **Enable WASI.** Grant the directory the volume lives in if the host
+//!   wants a file (`fs_open`); grant nothing at all if it would rather keep
+//!   the bytes itself (`fs_open_image` / `fs_snapshot`), which leaves the
+//!   plug-in able to read nothing it was not handed.
 //! - **Allow at least 96 MiB of plug-in memory.** Argon2id at the format's
 //!   pinned factors (64 MiB, t=3, p=4; ENC-2) runs inside the sandbox once
 //!   per `create_volume` and once per `mount`. A 64 MiB cap is not enough

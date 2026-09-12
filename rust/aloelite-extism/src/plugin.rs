@@ -7,10 +7,29 @@
 //! the way one `Fs` does in the browser and one process does at the CLI: to
 //! work on two volumes, a host instantiates the plug-in twice.
 //!
+//! Two storage shapes, and the second is the reason to reach for a plug-in
+//! at all (`doc/DECISIONS.md` D-7):
+//!
+//! - **A file**, through WASI, on a path the manifest granted. Durability
+//!   per transaction, and the volume can be larger than memory.
+//! - **A memory image**: `fs_open_image` takes the volume's bytes and
+//!   `fs_snapshot` hands them back, so the host decides where they live —
+//!   S3, a key/value store, a column in Postgres, an encrypted field it
+//!   already has. Such an instance needs **no filesystem grant at all**:
+//!   with no `allowed_paths`, the sandbox is complete and the plug-in reads
+//!   nothing it was not handed. The cost is that the volume must fit in
+//!   plug-in memory and a snapshot is the whole database, so durability is
+//!   per snapshot and the host decides when — which is the same trade
+//!   `aloelite_store::image::Image` makes, in the crate that owns storage
+//!   models. (This crate cannot use that one: it reaches `ego_platform`,
+//!   which does not compile for preview 1.)
+//!
 //! | export | input | what it does |
 //! |---|---|---|
 //! | `fs_open` | `{path}` | open the volume file at `path`, which the manifest must have granted |
 //! | `fs_open_memory` | — | a volume store in memory; nothing outlives the instance |
+//! | `fs_open_image` | `{image}` | a volume store in memory, loaded from bytes the host kept |
+//! | `fs_snapshot` | — | the whole database as bytes, for the host to keep |
 //! | `fs_call` | `{op, args}` | run one Mount API operation ([`aloelite_api::OPS`] is the table) |
 //! | `fs_close` | — | abort open descriptors and close the engine; idempotent |
 //! | `fs_operations` | — | every name `fs_call` accepts |
@@ -29,7 +48,7 @@ use std::cell::RefCell;
 
 use aloelite_api::Handle;
 use aloelite_core::{Db, FsError};
-use rusqlite::Connection;
+use rusqlite::{Connection, MAIN_DB};
 
 use crate::args::Msg;
 use crate::platform::{HostClock, HostEntropy};
@@ -47,13 +66,46 @@ pub fn open_file(path: &str) -> Result<(), FsError> {
 }
 
 /// A volume store in memory: nothing outlives the instance. For demos,
-/// tests, and a host that keeps its own bytes.
+/// tests, and a host that only wants a scratch volume.
 pub fn open_in_memory() -> Result<(), FsError> {
     install(Db::open(
         Connection::open_in_memory()?,
         HostClock,
         HostEntropy,
     )?)
+}
+
+/// A volume store in memory, loaded from `image` — the bytes a previous
+/// [`snapshot`] produced. An empty image is a fresh, empty volume store,
+/// which is what a host with nothing stored yet should send.
+pub fn open_image(image: &[u8]) -> Result<(), FsError> {
+    let mut conn = Connection::open_in_memory()?;
+    if !image.is_empty() {
+        // SQLite copies the image into memory it owns and grows it in place
+        // from there; nothing keeps `image` alive after this.
+        conn.deserialize_read_exact(MAIN_DB, image, image.len(), false)?;
+    }
+    install(Db::open(conn, HostClock, HostEntropy)?)
+}
+
+/// The whole database as it stands, for the host to keep.
+///
+/// Refused inside a transaction, where the image would be torn. Nothing
+/// here decides WHEN a host should call it: that policy belongs to the host
+/// (D-7 leaves it open on purpose), and an unsnapshotted write is a lost
+/// write.
+pub fn snapshot() -> Result<Vec<u8>, FsError> {
+    HANDLE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let handle = slot
+            .as_mut()
+            .ok_or_else(|| FsError::usage("snapshot: no volume is open"))?;
+        let conn = handle.db()?.connection();
+        if !conn.is_autocommit() {
+            return Err(FsError::usage("snapshot inside a transaction"));
+        }
+        Ok(conn.serialize(MAIN_DB)?.to_vec())
+    })
 }
 
 /// Run one operation on the open handle. The result is one MessagePack

@@ -230,6 +230,63 @@ fn a_handle_is_opened_once_closed_once_and_then_gone() {
 }
 
 #[test]
+fn a_volume_is_an_image_the_host_can_keep_and_hand_back() {
+    let _ = plugin::shut();
+    plugin::open_image(&[]).expect("an empty image is a fresh volume store");
+
+    let vol = call("create_volume", map(&[("name", text("kept"))])).unwrap();
+    let m = call("mount", map(&[("volume", field(&vol, "id"))])).unwrap();
+    let m = m.as_str().unwrap().to_owned();
+    call(
+        "create_entry",
+        map(&[
+            ("mount", text(&m)),
+            ("path", text("/a")),
+            ("data", text("kept bytes")),
+        ]),
+    )
+    .unwrap();
+
+    let image = plugin::snapshot().expect("snapshot");
+    assert!(
+        image.len() > 4096,
+        "a volume store is a whole SQLite database"
+    );
+    assert_eq!(
+        &image[..15],
+        b"SQLite format 3",
+        "and it is one, byte for byte"
+    );
+
+    // A different handle, loaded from nothing but those bytes.
+    plugin::shut().unwrap();
+    plugin::open_image(&image).unwrap();
+    let back = call(
+        "read_all",
+        map(&[("mount", text(&m)), ("path", text("/a"))]),
+    )
+    .unwrap();
+    assert_eq!(back, Mp::Binary(b"kept bytes".to_vec()));
+    assert_eq!(
+        call("list", map(&[("mount", text(&m)), ("path", text("/"))]))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "the mount came back with the image: a mount row is durable, and the \
+         image is the whole database"
+    );
+}
+
+#[test]
+fn a_snapshot_needs_a_volume_like_everything_else() {
+    let _ = plugin::shut();
+    let e = plugin::snapshot().unwrap_err();
+    assert!(e.to_string().contains("no volume is open"), "{e}");
+}
+
+#[test]
 fn every_operation_the_table_carries_is_reachable_by_name() {
     // Not that each one works -- the conformance suite is for that -- but
     // that the plug-in dispatches the same table as every other frontend.

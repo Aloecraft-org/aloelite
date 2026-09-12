@@ -1,4 +1,4 @@
-//! The Extism ABI: the five `#[plugin_fn]` exports, and nothing else.
+//! The Extism ABI: the seven `#[plugin_fn]` exports, and nothing else.
 //!
 //! Compiled only for WebAssembly. A `#[plugin_fn]` is a `#[no_mangle]`
 //! function that reaches for `input_load_u8`, `alloc` and `output_set` —
@@ -34,8 +34,11 @@ use crate::wire;
 // surface
 // ---------------------------------------------------------------------------
 
-/// The arguments `open` takes.
+/// The arguments `fs_open` takes.
 pub const OPEN_ARGS: &[&str] = &["path"];
+
+/// The arguments `fs_open_image` takes.
+pub const OPEN_IMAGE_ARGS: &[&str] = &["image"];
 
 #[plugin_fn]
 pub fn fs_open(input: Vec<u8>) -> FnResult<Vec<u8>> {
@@ -53,6 +56,25 @@ pub fn fs_open(input: Vec<u8>) -> FnResult<Vec<u8>> {
 pub fn fs_open_memory(_: ()) -> FnResult<Vec<u8>> {
     Ok(wire::reply(
         plugin::open_in_memory().map(|()| MsgpackSurface::unit()),
+    ))
+}
+
+#[plugin_fn]
+pub fn fs_open_image(input: Vec<u8>) -> FnResult<Vec<u8>> {
+    Ok(wire::reply(
+        wire::arguments("fs_open_image", &input)
+            .and_then(|a| {
+                a.allow(OPEN_IMAGE_ARGS)?;
+                plugin::open_image(&a.opt_bytes("image")?.unwrap_or_default())
+            })
+            .map(|()| MsgpackSurface::unit()),
+    ))
+}
+
+#[plugin_fn]
+pub fn fs_snapshot(_: ()) -> FnResult<Vec<u8>> {
+    Ok(wire::reply(
+        plugin::snapshot().map(|image| MsgpackSurface::bytes(&image)),
     ))
 }
 

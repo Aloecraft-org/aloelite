@@ -82,12 +82,13 @@ releases:
     added:
       - |
         **New crate: `aloelite-extism`, Aloelite as an Extism plug-in.**
-        Five exports -- `fs_open`, `fs_open_memory`, `fs_call`, `fs_close`,
-        `fs_operations` -- over MessagePack, dispatching the same
-        `aloelite-api` table the browser does. A host in Go, Python, Ruby,
-        PHP, Java, C# or anything else with an Extism SDK gets the Mount API
-        without a binding written for its language, and gets it inside a
-        sandbox that reaches exactly the paths the manifest names.
+        Seven exports -- `fs_open`, `fs_open_memory`, `fs_open_image`,
+        `fs_snapshot`, `fs_call`, `fs_close`, `fs_operations` -- over
+        MessagePack, dispatching the same `aloelite-api` table the browser
+        does. A host in Go, Python, Ruby, PHP, Java, C# or anything else with
+        an Extism SDK gets the Mount API without a binding written for its
+        language, and gets it inside a sandbox that reaches exactly the paths
+        the manifest names.
 
         The target is `wasm32-wasip1`, the fourth this workspace builds for,
         and it is Extism's constraint rather than a preference: its runtime
@@ -96,6 +97,22 @@ releases:
         also supplies the clock and the CSPRNG the engine asks for, so
         nothing is threaded in as a host function. CI builds the plug-in and
         runs it under a real Extism host.
+      - |
+        **Two storage shapes, and the second grants the plug-in nothing.**
+        The volume is a file on a path the manifest allows, or it is bytes:
+        `fs_open_image` takes the whole database and `fs_snapshot` hands it
+        back, so a host can keep a volume in S3, a key/value store, a
+        Postgres column or a field it already encrypts. An instance in that
+        shape is given no `allowed_paths` at all -- the sandbox is complete
+        and the plug-in reads nothing it was not handed.
+
+        It goes through the call boundary rather than through Extism host
+        functions on purpose: host functions must be registered per language
+        and are the roughest corner of several SDKs, while an argument and a
+        return value are the one thing every SDK does well. The costs are the
+        memory-image model's usual ones and belong to the host: the volume
+        must fit in plug-in memory, and durability is per snapshot, so an
+        unsnapshotted write is a lost write.
       - |
         **The wire is MessagePack, for the reason the browser's integers are
         `BigInt`.** JSON has no integer type distinct from a double and no

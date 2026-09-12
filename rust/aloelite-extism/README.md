@@ -2,12 +2,16 @@
 
 Aloelite as an [Extism](https://extism.org) plug-in: the Mount API over
 MessagePack, in a WebAssembly sandbox, callable from any language with an
-Extism SDK. The volume is a file on a host path the manifest grants.
+Extism SDK. The volume is either a file on a host path the manifest grants,
+or bytes the host keeps and hands over — in which case the manifest grants
+nothing at all.
 
 | export | input | what it does |
 |---|---|---|
 | `fs_open` | `{path}` | open the volume file at `path` |
 | `fs_open_memory` | — | a volume store in memory; nothing outlives the instance |
+| `fs_open_image` | `{image}` | a volume store in memory, loaded from bytes the host kept |
+| `fs_snapshot` | — | the whole database as bytes, for the host to keep |
 | `fs_call` | `{op, args}` | run one Mount API operation by its spec name |
 | `fs_close` | — | abort open descriptors and close the engine; idempotent |
 | `fs_operations` | — | every name `fs_call` accepts |
@@ -62,10 +66,38 @@ with Plugin(manifest, wasi=True) as p:
     call(p, "fs_close")
 ```
 
+## Two storage shapes
+
+**A file**, through WASI, on a granted path. Durability per transaction, and
+the volume can be larger than plug-in memory. What the example above uses.
+
+**A memory image**, where the host keeps the bytes:
+
+```python
+with Plugin(Manifest(wasm=[{"path": "aloelite_extism.wasm"}],
+                     memory={"max_pages": 2048}), wasi=True) as p:
+    call(p, "fs_open_image", {"image": load_from_wherever() or b""})
+    ...
+    store_wherever(call(p, "fs_snapshot"))
+```
+
+Note what that manifest does not say: there are no `allowed_paths`, so the
+plug-in can read nothing it was not handed. The volume can live in S3, a
+key/value store, a Postgres column, an encrypted field the host already has
+— Aloelite's premise is that a filesystem is one file, and this is that file
+as a value. An empty image is a fresh volume store.
+
+The costs are real and are the host's to manage: the volume must fit in
+plug-in memory, a snapshot is the whole database, and **durability is per
+snapshot** — an unsnapshotted write is a lost write. Nothing here decides
+when to take one; that policy is the host's (D-7), the same as it is for
+`aloelite_store::image::Image`, which is the same shape in the crate that
+owns storage models.
+
 ## What a host must get right
 
-- **Enable WASI and grant the directory.** The plug-in reaches the host
-  filesystem only through `allowed_paths`; `fs_open` on anything else fails
+- **Enable WASI.** Grant the directory if you want `fs_open`; grant nothing
+  if you would rather hand over bytes. `fs_open` on an ungranted path fails
   like a missing file.
 - **Allow at least 96 MiB of plug-in memory** (1536 pages; 2048 is
   comfortable). Argon2id at the format's pinned factors — 64 MiB, t=3, p=4,

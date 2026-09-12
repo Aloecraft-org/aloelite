@@ -79,6 +79,20 @@ impl Handle {
         db.close()
     }
 
+    /// The engine itself, for a frontend that needs more of it than the
+    /// operations.
+    ///
+    /// There is one caller: the Extism plug-in, whose host can keep the
+    /// volume's bytes rather than a path, and so needs to hand the whole
+    /// database out and take it back. No Mount API verb says "give me the
+    /// file" because in every other frontend the file is already where the
+    /// host put it.
+    pub fn db(&mut self) -> Result<&mut Db, FsError> {
+        self.db
+            .as_mut()
+            .ok_or_else(|| FsError::usage("this handle is closed"))
+    }
+
     /// Whether [`Handle::shut`] has run.
     pub fn is_closed(&self) -> bool {
         self.db.is_none()

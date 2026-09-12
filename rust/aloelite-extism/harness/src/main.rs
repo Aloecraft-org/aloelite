@@ -182,6 +182,62 @@ fn main() {
         "the manifest grants one directory and no other"
     );
 
+    // -- the other storage shape, with no filesystem at all ----------------
+    // A manifest that grants nothing: the plug-in can reach no host path, and
+    // the volume is bytes the host handed it and takes back.
+    let sealed = || Manifest::new([Wasm::file(&wasm)]).with_memory_max(PAGES);
+    let mut s1 = Plugin::new(sealed(), [], true).unwrap();
+    let denied = envelope(
+        &mut s1,
+        "fs_open",
+        &map(&[("path", text("/vol/harness.fs"))]),
+    );
+    assert!(denied.is_err(), "nothing is granted, so nothing opens");
+
+    ok(
+        &mut s1,
+        "fs_open_image",
+        &map(&[("image", Mp::Binary(Vec::new()))]),
+    );
+    let vol =
+        call(&mut s1, "create_volume", map(&[("name", text("sealed"))])).expect("create_volume");
+    let ms = call(&mut s1, "mount", map(&[("volume", field(&vol, "id"))])).expect("mount");
+    let ms = ms.as_str().expect("a mount id").to_owned();
+    call(
+        &mut s1,
+        "create_entry",
+        map(&[
+            ("mount", text(&ms)),
+            ("path", text("/kept")),
+            ("data", Mp::Binary(b"no path needed".to_vec())),
+        ]),
+    )
+    .expect("create_entry");
+    let image = match ok(&mut s1, "fs_snapshot", &Mp::Nil) {
+        Mp::Binary(b) => b,
+        other => panic!("a snapshot is bin, got {other}"),
+    };
+    assert_eq!(
+        &image[..15],
+        b"SQLite format 3",
+        "the snapshot is the database"
+    );
+
+    // A second instance, also granted nothing, built from those bytes alone.
+    let mut s2 = Plugin::new(sealed(), [], true).unwrap();
+    ok(
+        &mut s2,
+        "fs_open_image",
+        &map(&[("image", Mp::Binary(image.clone()))]),
+    );
+    let kept = call(
+        &mut s2,
+        "read_all",
+        map(&[("mount", text(&ms)), ("path", text("/kept"))]),
+    )
+    .expect("read_all");
+    assert_eq!(kept, Mp::Binary(b"no path needed".to_vec()));
+
     // -- the memory floor --------------------------------------------------
     let mut small = Plugin::new(manifest(TOO_FEW_PAGES), [], true).unwrap();
     ok(&mut small, "fs_open_memory", &Mp::Nil);
@@ -199,8 +255,10 @@ fn main() {
     );
 
     println!(
-        "ok  ({} exports, volume {bytes} bytes, {} MiB cap; {} MiB is not enough)",
+        "ok  ({} operations, volume {bytes} bytes on a granted path, {} bytes as an \
+         image with none granted, {} MiB cap; {} MiB is not enough)",
         names.as_array().unwrap().len(),
+        image.len(),
         PAGES as u64 * 64 / 1024,
         TOO_FEW_PAGES as u64 * 64 / 1024,
     );
