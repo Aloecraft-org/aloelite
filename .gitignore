@@ -13,6 +13,9 @@ dist
 build
 .venv
 
+# Benchmark output: `python -m bench` writes here by default
+bench-results/
+
 # Rust (rust/ workspace)
 rust/target/
 # ...and the Extism harness, which is its own workspace and so its own target
