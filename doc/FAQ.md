@@ -207,6 +207,23 @@ The Python library, CLI, and WebUI (`aloelite-web`, direct mode) run
 anywhere Python does. FUSE is Linux-only. The manager's FUSE-provisioning
 mode targets Linux containers (Docker/Podman).
 
+The Rust build (`rust/`) adds a native `aloelite` and `aloelite-fuse` for
+Linux and macOS — `aloelite-fuse` is Linux-only, as the Python one is — and
+a browser build that runs the engine over OPFS in a Dedicated Worker.
+
+### There are two implementations. Which do I use?
+
+Either. They share the on-disk format, the verb contract and the key
+ladder, and a volume written by one reads in the other, encrypted or not;
+the conformance suite is what holds them to that, and
+[Benchmarks](/doc/BENCHMARKS.md) has the interop check and the numbers.
+
+Reach for Python when you want the library, the manager and WebUI, WebDAV
+or S3 — those live only there. Reach for Rust when startup time matters
+(the binary starts in about 1.5 ms against the Python CLI's 170, which
+dominates any one-shot command), when you want a single binary with no
+interpreter, or when you need the browser.
+
 ### What license does this use?
 
 Apache 2.0.

@@ -11,6 +11,57 @@
 **Troubleshooting (This Document)** | [Requirements Spec](/doc/REQUIREMENTS.md) | [Encryption Spec](/doc/ENCRYPTION.md) | [Benchmarks](/doc/BENCHMARKS.md) | [Roadmap](/doc/ROADMAP.md)
 </div>
 
+## Files and versions
+
+### "file was written by a newer aloelite (schema era N; this build understands M)"
+
+An older build is refusing a file a newer one has opened. The file is fine;
+the build looking at it is behind.
+
+Aloelite stamps a **schema era** into the file (`PRAGMA user_version`). Open
+a file with a newer build and it migrates in place, once, to that build's
+era — and there is no migration back. From then on, older builds refuse it
+rather than half-read it, which is the point: a partial read of a schema
+they do not understand is how data gets corrupted quietly.
+
+Two things to know about the eras that exist:
+
+- **era 2** arrived in 0.4.0rc1 (ownership columns, nanosecond timestamps,
+  hardlinks). 0.3.x cannot open an era-2 file.
+- **era 3** arrived in 0.4.0 (every placement carries its own name, which is
+  what makes a child lookup an index seek). Neither 0.3.x nor 0.4.0rc1 can
+  open an era-3 file.
+
+**To fix it**, install the newer build. That is the intended path and the
+error says so.
+
+**There is no way to turn a migrated file back into an older-era one.**
+`aloelite-admin export` does not do it: the destination is opened by the
+build running the export, so it is stamped with that build's era too. Worth
+saying plainly, because export looks like the obvious escape hatch and is
+not one.
+
+What does work, if you need the DATA on an older build, is to take the
+contents out as ordinary files with the new build and put them into a fresh
+file with the old one:
+
+```bash
+# with the new build: everything under / lands in ./rescued
+aloelite -f migrated.fs -v data get -r / ./rescued
+
+# with the old build: put the CHILDREN back at the root, one per top-level
+# entry. `put -r SRC /` places SRC *under* /, so passing ./rescued itself
+# would give you /rescued/... instead of the tree you started with.
+aloelite -f oldera.fs -v data put -r ./rescued/docs /
+aloelite -f oldera.fs -v data put -r ./rescued/photos /
+```
+
+That carries the bytes and the tree, not the volume: mounts, lock state,
+superseded versions and the key ladder do not come across, and an encrypted
+volume has to be re-encrypted on the way in. Better, if you can: **copy the
+`.fs` file before upgrading.** The migration is the first open, so a copy
+taken beforehand is the only thing that preserves the original exactly.
+
 ## FUSE
 
 ### "Transport endpoint is not connected"
