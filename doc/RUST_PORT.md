@@ -6,7 +6,7 @@
 
 **Aloelite Single-File Filesystem**
 
-[Overview](/README.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | [Decisions](/doc/DECISIONS.md) | [Compatibility](/doc/COMPATIBILITY.md) | [Conformance](/conformance/README.md)
+[Overview](/README.md) | [Requirements Spec](/doc/REQUIREMENTS.md) | [Decisions](/doc/DECISIONS.md) | [Compatibility](/doc/COMPATIBILITY.md) | [Conformance](/conformance/README.md) | [Benchmarks](/doc/BENCHMARKS.md)
 </div>
 
 `rust/` is the Rust implementation of the Mount API. This document is the
