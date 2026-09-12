@@ -1,0 +1,93 @@
+# Mount policy — ACC-1b (era 2, D-4). An ro mount refuses every mutating
+# operation with the closed error `read_only`; reads flow. The harness
+# provides an rw and an ro mount on one volume (ro never conflicts with rw).
+# The admission half of D-4 (one rw mount per subtree, mount_conflict) is a
+# mount-time behavior and is pinned by each implementation's own tests; it
+# has no in-scenario operation to call.
+scenarios:
+  - scenario: an-ro-mount-reads-but-never-writes
+    requirements: [ACC-1b]
+    harness: ro_and_rw_mounts
+    description: >
+      The gate is uniform: every shape of mutation — create, whole-content
+      write, structural change, ownership, xattr, streaming — refuses with
+      read_only. Reads and listings through the same mount work.
+    steps:
+      - op: create_container
+        args: {path: /d}
+        via: rw
+      - op: create_entry
+        args: {path: /d/f, data: {utf8: "payload"}}
+        via: rw
+      - op: read_all
+        args: {path: /d/f}
+        via: ro
+        expect: {utf8: "payload"}
+      - op: list
+        args: {path: /d}
+        via: ro
+        expect:
+          - {name: f, type: entry, visible: true}
+      - op: create_entry
+        args: {path: /g, data: {utf8: "nope"}}
+        via: ro
+        raises: read_only
+      - op: write_all
+        args: {path: /d/f, data: {utf8: "nope"}}
+        via: ro
+        raises: read_only
+      - op: remove
+        args: {path: /d/f}
+        via: ro
+        raises: read_only
+      - op: rename
+        args: {path: /d/f, name: g}
+        via: ro
+        raises: read_only
+      - op: move
+        args: {"from": /d/f, to: /f}
+        via: ro
+        raises: read_only
+      - op: link
+        args: {"from": /d/f, to: /g}
+        via: ro
+        raises: read_only
+      - op: set_owner
+        args: {path: /d/f, mode: 384}
+        via: ro
+        raises: read_only
+      - op: set_xattr
+        args: {path: /d/f, name: user.a, value: {utf8: "v"}}
+        via: ro
+        raises: read_only
+      - op: open_write
+        args: {path: /d/f, mode: truncate}
+        via: ro
+        raises: read_only
+
+  - scenario: ro-refusal-leaves-the-volume-untouched
+    requirements: [ACC-1b, IO-2]
+    harness: ro_and_rw_mounts
+    description: >
+      A refused mutation is a clean no-op: the rw view afterwards shows
+      exactly the state from before the attempts.
+    steps:
+      - op: create_entry
+        args: {path: /f, data: {utf8: "original"}}
+        via: rw
+      - op: write_all
+        args: {path: /f, data: {utf8: "overwrite-attempt"}}
+        via: ro
+        raises: read_only
+      - op: remove
+        args: {path: /f}
+        via: ro
+        raises: read_only
+      - op: read_all
+        args: {path: /f}
+        via: rw
+        expect: {utf8: "original"}
+      - op: stat
+        args: {path: /f}
+        via: rw
+        expect: {size: 8, nlink: 1}

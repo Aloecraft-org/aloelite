@@ -9,7 +9,7 @@
 
 [Overview](/README.md) | [Getting Started](/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](/doc/FAQ.md) 
 
-[Troubleshooting](/doc/TROUBLESHOOTING.md) | **Requirements Spec (This Document)** | [Encryption Spec](/doc/ENCRYPTION.md) | [Roadmap](/doc/ROADMAP.md)
+[Troubleshooting](/doc/TROUBLESHOOTING.md) | **Requirements Spec (This Document)** | [Encryption Spec](/doc/ENCRYPTION.md) | [Benchmarks](/doc/BENCHMARKS.md) | [Roadmap](/doc/ROADMAP.md)
 </div>
 
 # Requirements
@@ -18,17 +18,17 @@ Each requirement is identified by a stable prefix and number for reference. Requ
 
 ## Nodes
 
-- **NODE-1** : Every node has a globally unique identity expressed as a uuid7, assigned once at creation and never reminted or backdated. The identity reflects the node's actual creation time and defines a stable time order.
-- **NODE-2** : A node is exactly one of two types, Container or Entry, fixed at creation. No other node types exist in this iteration.
-- **NODE-3** : A node carries its own name. The name is a property of node identity and is independent of where, or whether, the node is placed.
-- **NODE-4** : A node carries a `created_at` value distinct from its uuid7. Unlike the uuid7, `created_at` may hold a value other than the moment the row was created (for example, a value preserved from a source node during a copy).
-- **NODE-5** : Sibling name collisions are permitted. Among nodes sharing a name within the same container, the one with the greatest uuid7 is the resolved (visible) node; the others are hidden from normal resolution but remain fully addressable by id.
+- **NODE-1** : Every node has a globally unique identity expressed as a uuid7, assigned once at creation and never reminted or backdated. Ids are host-minted from a per-mount monotonic watermark fenced by the volume's high-water mark (D-1/D-2). The ordering contract: ids minted through one mount are strictly ordered; ids minted through different mounts separated by more than the coordination window are strictly ordered; within the window, cross-mount order is arbitrary (concurrent unlocked writers have no defined "later" — a caller that needs one takes the entry write lock, ACC-6/7).
+- **NODE-2** : A node is exactly one of a closed set of types fixed at creation: Container, Entry, and (era 2, D-3) Symlink, Fifo, and Socket. The non-container types are leaves that place like entries; a symlink's content is its target, fifo/socket carry empty content (the kernel owns their rendezvous semantics). Device nodes are refused by decision, not omission.
+- **NODE-3** : A node carries its own name, independent of where, or whether, the node is placed. Era 2 (D-5): a placement carries a name of its own. Era 3: it always carries one — the effective name at a placement IS the placement's name, and the node's own name is the default a new placement takes rather than a fallback consulted when a name is read. Rename is a placement operation (it edits the walked directory entry); the node's own name follows only while it has a single active placement.
+- **NODE-4** : A node carries a `created_at` value distinct from its uuid7. Unlike the uuid7, `created_at` may hold a value other than the moment the row was created (for example, a value preserved from a source node during a copy). All stored timestamps are integer nanoseconds since the unix epoch as of schema era 2 (era 1 stored milliseconds; the era-2 migration rescales). Era 2 also adds `atime` (set only by explicit utimens — noatime semantics), `ctime` (inode-change time, bumped by content, name, ownership, and link-count changes), and ownership columns `uid`/`gid`/`mode`.
+- **NODE-5** : Sibling name collisions are permitted. Among placements sharing an effective name (NODE-3) within the same container, the node with the greatest uuid7 is the resolved (visible) node; the others are hidden from normal resolution but remain fully addressable by id.
 - **NODE-6** : A node may carry a shallow string-to-string metadata map, independent of name and placement. Metadata is preserved across Copy and round-tripped by Pack/Unpack. Setting metadata does not alter `modified_at`.
 
 ## Edges
 
 - **EDGE-1** : An edge is a directed relationship from a `from_id` to a `to_id`, expressing that the `to_id` node is placed within the `from_id` container.
-- **EDGE-2** : Edges are immutable: once created, an edge is never modified. All structural change is expressed by creating new edges and archiving or removing existing ones.
+- **EDGE-2** : An edge's endpoints (`from_id`, `to_id`) and identity are immutable: relocation is expressed by creating new edges and archiving existing ones, never by editing endpoints. Two edge fields do change in place: `archived` (the archive/restore transitions) and, era 2 (D-5), the placement `name` (rename edits the directory entry it walked).
 - **EDGE-3** : Each edge has its own identity (uuid7) and carries `from_id`, `to_id`, `volume_id`, and an `archived` flag.
 - **EDGE-4** : `from_id` must reference a Container. `to_id` may reference either a Container or an Entry.
 - **EDGE-5** : The `archived` flag marks a placement inactive without removing the edge row. Archived edges are excluded from normal resolution but are retained for history and recovery.
@@ -43,10 +43,10 @@ Each requirement is identified by a stable prefix and number for reference. Requ
 
 ## Placement and Integrity
 
-- **PI-1** : Within a single volume, a node may be the `to_id` of at most one active (non-archived) edge. This is enforced as a uniqueness constraint over `(volume_id, to_id)` and guarantees each placed node has exactly one active parent within its volume.
+- **PI-1** : Within a single volume, a **container** may be the `to_id` of at most one active (non-archived) edge, so every placed container has exactly one active parent and the container graph is a tree. Era 2 narrowed this from all nodes to containers (exercising EXT-1): non-container leaves may hold multiple active placements — hardlinks — with `nlink` derived as the count of active placements. Enforced by refuse-only guard triggers (the era-1 partial unique index could not consult the node type).
 - **PI-2** : Every node that is part of a volume and is not that volume's root must have exactly one active incoming edge; a volume root has none.
 - **PI-3** : A node with no incoming edge that is not a volume root is in a volatile (orphaned) state: addressable by id, excluded from tree traversal, and eligible for later pruning.
-- **PI-4** : The uniqueness constraint of PI-1 prevents any cycle formed by giving an already-placed node an additional parent.
+- **PI-4** : The uniqueness constraint of PI-1 prevents any cycle formed by giving an already-placed container an additional parent. (Leaves cannot be a `from_id` — EDGE-4 — so multi-placement leaves cannot form cycles.)
 - **PI-5** : A cycle formed by relocation (i.e. placing a container beneath one of its own descendants) is not caught by PI-1 and must be prevented by an ancestor check at reparent time. The proposed new parent must be neither the node being moved nor any descendant of it.
 - **PI-6** : An edge's `volume_id` must equal the volume of its `from_id`; placements never span volumes. Moving a subtree between volumes re-stamps `volume_id` across the entire moved subtree.
 - **PI-7** : Because archived edges are retained, a subtree detached in error remains recoverable by walking archived edges. The eager prevention of PI-5 is the primary defense; this recoverability is the backstop.
@@ -64,6 +64,8 @@ Each requirement is identified by a stable prefix and number for reference. Requ
 ## Access
 
 - **ACC-1a** : A mount is a durable immutable access point bound to an explicit node in exactly one volume. All access to a volume is brokered through a mount; access is never ambient.
+- **ACC-1b** : Era 2 (D-4): a mount carries an access mode, `ro` or `rw`, fixed at creation. Every mutating operation through an `ro` mount is refused (read_only). A mount may also carry a `principal` — an opaque tenant/user identity recorded for policy and future ACLs.
+- **ACC-1c** : Era 2 (D-4) admission policy: by default at most one `rw` mount per subtree — a new `rw` mount whose point equals, contains, or is contained by a valid `rw` mount's point in the same volume is refused (mount_conflict) unless overlap is explicitly requested. This is authorization, not correctness: id generation is safe under arbitrary overlap (D-1/D-2) and entry write locks arbitrate write-write conflicts. `ro` mounts never conflict.
 - **ACC-2** : A mount has a mount point: a reference to a node within its volume that anchors the session for resolution and scoping.
 - **ACC-3** : A mount carries a ttl. The mounts table is part of the schema, but its contents are not held to the same persistence expectations as the rest of the model.
 - **ACC-4** : Mount state is actively managed across a lifecycle (open → active → unmount); mount and unmount are operations. Unmount marks the mount invalid; reclamation of what it held is deferred to pruning rather than performed eagerly.
@@ -73,7 +75,9 @@ Each requirement is identified by a stable prefix and number for reference. Requ
 - **ACC-8** : A lock carries validity comprising `read_count`, `write_count`, and `ttl`. The counts are recorded but not yet enforced against; they forward-provision a future multi-reader policy without committing to one now.
 - **ACC-9** : A lock is valid only while its mount exists and its ttl has not elapsed, and a lock must not outlive its mount. A long-lived streaming lock is an ordinary mount-scoped lock with a generous ttl, not a distinct category.
 - **ACC-10** : Mounts are the only actively-managed access state. Lock invalidity follows from mount disappearance or ttl expiry rather than from active invalidation, and invalid locks are reclaimed lazily by pruning. This is the same sweep named in PI-3 for volatile nodes, applied here to the lock side.
-- **ACC-11** : A lock excludes another mount from changing the locked node's content, its metadata map, its placement, or its existence. Content writes, `set_metadata`, `move` and `remove` are all refused at the locked node. Destruction is additionally checked *transitively*: a recursive remove is refused if any member of the subtree is locked, because it would archive that member. Relocation is **not** transitive — moving an ancestor of a locked node is permitted, since it changes the node's path but neither its content nor its existence, and checking ancestors would make one open file freeze every directory above it.
+- **ACC-11** : A lock excludes another mount from changing the locked node's content, its metadata map, its placement, or its existence. The excluded set is closed and enumerated (D-6): content writes (`write_all`, `append`, `truncate`, `write_range`, `open_write`), `set_metadata`, `move`, `rename`, `link`, `remove`, `remove_recursive`, `pack` and `unpack`. Destruction is additionally checked *transitively*: `remove_recursive` and `pack` are refused if any member of the subtree is locked, because both archive every member.
+
+    Equally closed is what a lock does **not** exclude, and this is a decision rather than an omission (D-6): POSIX ownership and times (`set_owner`, `set_atime`, `set_mtime`), extended attributes (`set_xattr`, `remove_xattr`), and `copy`. Advisory locks do not gate `chmod`/`chown`/`utimes`/`setxattr` on any POSIX system, and a kernel binding holds an engine lock for the whole life of an open write handle, so excluding them would fail an ordinary `chmod` from a second mount against a file someone merely has open. The protocol case that wants property exclusion — WebDAV PROPPATCH — stores its dead properties in the NODE-6 metadata map, which *is* excluded, so nothing is lost by leaving the POSIX surface open. `copy` never overwrites and reads the source at its committed version (CV-3), so it has nothing of the locked node to disturb. Both halves are pinned in `conformance/scenarios/locking.yaml`, exclusions and permissions alike: a port that refuses a `chmod` under a lock is as wrong as one that permits a `rename`. Relocation is **not** transitive — moving an ancestor of a locked node is permitted, since it changes the node's path but neither its content nor its existence, and checking ancestors would make one open file freeze every directory above it.
 
 ## Operations
 
@@ -83,7 +87,7 @@ Each requirement is identified by a stable prefix and number for reference. Requ
 - **OP-4** : Copy produces a new node with a fresh uuid7 whose `created_at` is preserved from the source, with content duplicated. Copying a container into its own subtree copies the source as it existed at the start of the operation.
     + **OP-4r1** : Copy produces a new node with a fresh uuid7 whose created_at and metadata are preserved from the source, with content duplicated. Copying a container into its own subtree copies the source as it existed at the start of the operation.
 - **OP-5** : Delete removes a node's active placement. Deleting a container detaches its children, which become volatile per PI-3 unless re-homed. Hard removal of a node and its content is a separate, explicit step.
-- **OP-6** : Pack consolidates a subtree into a portable serialized form (MsgPack), realized as an Entry whose payload is that serialized form, and supersedes the original placement.
+- **OP-6** : Pack consolidates a subtree into a portable serialized form (MsgPack), realized as an Entry whose payload is that serialized form, and supersedes the original placement. Era 2 (D-8): the serialized form is pack format v2, carrying per placement the type, effective name, created/modified times, NODE-6 metadata, uid/gid/mode, xattrs, retention policy and bytes; v1 blobs remain readable and a newer version is refused rather than half-read.
 - **OP-7** : Unpack is the inverse of Pack: it restores a packed subtree from its serialized form and supersedes the packed Entry.
 - **OP-8** : Mount and Unmount are operations whose structure and lifecycle are defined under Access (ACC-1 through ACC-5).
 
@@ -103,7 +107,7 @@ Each requirement is identified by a stable prefix and number for reference. Requ
 - **CV-7** : Reclamation of unreferenced content — manifest rows beyond an Entry's retention policy, and pool chunks referenced by no retained version of any node — is performed lazily by a content prune, distinct from but parallel to the node/lock sweep of PI-3 and ACC-10. A chunk is reclaimable only after retained-version resolution; retained versions are resolved before any chunk is collected.
 ## Extensibility and Deferred Scope
 
-- **EXT-1** : The per-volume single-parent uniqueness of PI-1 is the sole constraint enforcing a tree. The design must permit relaxing it to admit multiple placements per node (e.g. links and a general graph layout) without redesign.
+- **EXT-1** : The per-volume single-parent uniqueness of PI-1 is the sole constraint enforcing a tree. The design must permit relaxing it to admit multiple placements per node without redesign. **Exercised in era 2**: entries relaxed to multiple placements (hardlinks, D-5); containers remain single-parent. A future general graph layout would extend the same relaxation.
 - **EXT-2** : The Mount API (OP-1) must reserve a hook allowing Merkle hash recomputation over affected ancestors to be added without changing operation semantics.
 - **EXT-3** : Child ordering is reserved to be defined as edge id, then node uuid7, within a container. Nothing in the present design may foreclose this ordering or its path-aware and Merkle implications.
 - **EXT-4** : An edge must remain able to carry an optional per-placement alias that overrides a node's display name in that location, without altering name-on-node identity semantics.

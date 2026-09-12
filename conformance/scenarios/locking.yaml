@@ -360,3 +360,203 @@ scenarios:
         args: {path: /contended.txt}
         via: second
         expect: {utf8: "now permitted"}
+
+  - scenario: a-write-lock-excludes-another-mounts-rename
+    requirements: [ACC-6, ACC-7, ACC-11]
+    harness: two_mounts_one_volume
+    description: >
+      RENAME AND MOVE MUST AGREE. Renaming edits the directory entry the path
+      walked, which is a placement change, so a lock refuses it exactly as it
+      refuses move. The two differ only in mechanism — rename edits the edge
+      name in place, move archives and recreates the edge — never in what a
+      lock protects. An implementation that guards one and not the other has a
+      hole shaped like its host's syscall routing: a kernel FUSE binding sends
+      a same-directory `mv` to rename and a cross-directory `mv` to move, so
+      the same user gesture would be guarded or not depending on whether the
+      parent changed.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: rename
+        args: {path: /contended.txt, name: stolen.txt}
+        via: second
+        raises: lock_held
+      - op: exists
+        args: {path: /contended.txt}
+        via: first
+        expect: true
+
+  - scenario: a-write-lock-excludes-another-mounts-link
+    requirements: [ACC-6, ACC-7, ACC-11, PI-1]
+    harness: two_mounts_one_volume
+    description: >
+      A hardlink adds an active placement to the locked node and changes its
+      derived nlink, so it is a placement change like any other. Milder than
+      rename — a link can never carry the node away, because remove is already
+      refused — but the rule does not have exceptions for mildness.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: link
+        args: {from: /contended.txt, to: /alias.txt}
+        via: second
+        raises: lock_held
+      - op: exists
+        args: {path: /alias.txt}
+        via: first
+        expect: false
+
+  - scenario: a-pack-is-refused-by-a-lock-deep-in-the-subtree
+    requirements: [ACC-6, ACC-7, ACC-11, OP-6]
+    harness: two_mounts_one_volume
+    description: >
+      PACK IS DESTRUCTION, SO IT IS CHECKED TRANSITIVELY. Pack archives every
+      member of the subtree and supersedes the placement with one entry — the
+      same archival remove_recursive performs, plus serialization. A lock
+      anywhere below is therefore a lock on something pack would destroy, and
+      an implementation that checks only the root silently consolidates a deep
+      writer's work into a blob.
+    steps:
+      - op: create_container
+        args: {path: /a}
+      - op: create_container
+        args: {path: /a/b}
+      - op: create_entry
+        args: {path: /a/b/deep.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /a/b/deep.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: pack
+        args: {path: /a}
+        via: second
+        raises: lock_held
+      - op: exists
+        args: {path: /a/b/deep.txt}
+        via: first
+        expect: true
+
+  - scenario: a-write-lock-excludes-another-mounts-unpack
+    requirements: [ACC-6, ACC-7, ACC-11, OP-7]
+    harness: two_mounts_one_volume
+    description: >
+      Unpack archives the packed entry's placement, so the entry stops existing
+      at that path — the same change remove makes, and refused for the same
+      reason. Non-transitive, because a packed entry is a single leaf: there is
+      nothing beneath it to check until it has been restored.
+    steps:
+      - op: create_container
+        args: {path: /a}
+      - op: create_entry
+        args: {path: /a/f.txt, data: {utf8: "original"}}
+      - op: pack
+        args: {path: /a}
+        via: first
+        bind: packed
+      - op: lock
+        args: {path: /a, ttl_ms: 60000}
+        via: first
+        bind: held
+      - op: unpack
+        args: {path: /a}
+        via: second
+        raises: lock_held
+      - op: unlock
+        args: {lock: {ref: held.id}}
+        via: first
+      - op: unpack
+        args: {path: /a}
+        via: second
+      - op: read_all
+        args: {path: /a/f.txt}
+        via: second
+        expect: {utf8: "original"}
+
+  - scenario: ownership-and-mode-changes-are-not-excluded-by-a-lock
+    requirements: [ACC-7, ACC-11, NODE-4]
+    harness: two_mounts_one_volume
+    description: >
+      A DELIBERATE BOUNDARY, pinned so a port does not tighten it out of
+      symmetry with set_metadata. ACC-11 covers the NODE-6 metadata map, not
+      POSIX ownership: advisory locks do not block chmod, chown or utimes on
+      any POSIX system, and a kernel binding holds an engine lock for the whole
+      life of an open write handle, so guarding these would make an ordinary
+      `chmod` from a second mount fail against a file someone merely has open.
+      That is stricter than POSIX and buys nothing — the protocol case that
+      wants property exclusion (WebDAV PROPPATCH) stores its dead properties in
+      the metadata map, which IS excluded.
+      Mode is written in decimal (416 = 0o640); see conformance/README.md on
+      why bare octal is not portable across YAML implementations.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: set_owner
+        args: {path: /contended.txt, mode: 416}
+        via: second
+      - op: stat
+        args: {path: /contended.txt}
+        via: second
+        expect: {mode: 416}
+
+  - scenario: xattr-writes-are-not-excluded-by-a-lock
+    requirements: [ACC-7, ACC-11]
+    harness: two_mounts_one_volume
+    description: >
+      The same boundary for extended attributes, and the same reasoning: the
+      `user.*` xattr namespace is a POSIX surface where locks are not a
+      gate, and it is NOT where WebDAV dead properties live. Pinned as
+      permitted so the two families cannot quietly diverge between
+      implementations — a port that refuses here is as wrong as one that
+      permits a rename.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "original"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: set_xattr
+        args: {path: /contended.txt, name: "user.tag", value: {utf8: "set under a lock"}}
+        via: second
+      - op: get_xattr
+        args: {path: /contended.txt, name: "user.tag"}
+        via: second
+        expect: {utf8: "set under a lock"}
+
+  - scenario: copying-a-locked-node-is-permitted
+    requirements: [ACC-7, ACC-11, OP-4, CV-3]
+    harness: two_mounts_one_volume
+    description: >
+      Copy reads the source at its COMMITTED version (CV-3) and writes only
+      new nodes under the destination's parent — it never overwrites an
+      existing node, so there is nothing a lock protects for it to touch. The
+      copy therefore sees the last committed bytes, never a torn state, and
+      permitting it is safe rather than merely tolerated.
+    steps:
+      - op: create_entry
+        args: {path: /contended.txt, data: {utf8: "committed"}}
+      - op: open_write
+        args: {path: /contended.txt, mode: truncate}
+        via: first
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {utf8: "uncommitted"}}
+      - op: copy
+        args: {from: /contended.txt, to: /snapshot.txt}
+        via: second
+      - op: read_all
+        args: {path: /snapshot.txt}
+        via: second
+        expect: {utf8: "committed"}

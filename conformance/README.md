@@ -69,7 +69,8 @@ cipher. `harness` names one; the runner constructs it and exposes one or more
 | harness | provides |
 |---|---|
 | `default` | one plain volume, one mount named `default` |
-| `two_mounts_one_volume` | one plain volume, two connections, mounts `first` and `second` |
+| `two_mounts_one_volume` | one plain volume, two connections, mounts `first` and `second` (both rw; the second passes the D-4 overlap opt-in) |
+| `ro_and_rw_mounts` | one plain volume, mounts `rw` and `ro` (ACC-1b access modes) |
 | `attach_without_key` | an encrypted volume with content, then a connection bound to its mount with no PIN |
 | `keyed_cipher_plain_volume` | a connection holding a volume key, pointed at a mount on a plain volume |
 | `two_entries_same_bytes_convergent` | encrypted volume, two entries with identical bytes |

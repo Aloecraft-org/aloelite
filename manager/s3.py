@@ -64,10 +64,10 @@ from xml.sax.saxutils import escape as xml_escape
 from flask import Blueprint, Response, request
 
 from . import errors as merr
-from .direct import FRONTEND_DIRECT, DirectSessionRegistry
+from .engine.direct import FRONTEND_DIRECT, DirectSessionRegistry
+from .engine.store import VolumeRecord, VolumeStore
 from .sigv4 import Credentials, SigV4Error
 from .sigv4 import verify as sigv4_verify
-from .store import VolumeRecord, VolumeStore
 
 # Names the manager serves itself. A volume with one of these names cannot be
 # reached through this frontend, and saying so beats a silent 404 from a route
@@ -178,11 +178,15 @@ def _etag(info) -> str:
     return '"%s-%s"' % (info.id, info.version)
 
 
-def _iso8601(ms: int) -> str:
+def _iso8601(ns: int) -> str:
+    """Era 2 stores nanoseconds (NODE-4). Dividing by 1000 here — correct
+    against era-1 milliseconds — renders every Last-Modified as the year
+    56,672,999, which is the third time this exact unit slip has shipped
+    against a frontend written before the era change."""
     import datetime as dt
 
     return (
-        dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime(
+        dt.datetime.fromtimestamp(ns / 1_000_000_000, dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%f"
         )[:-3]
         + "Z"

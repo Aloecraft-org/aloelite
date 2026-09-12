@@ -1,0 +1,33 @@
+{
+  "name": "Rust",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "runArgs": [
+        "--network=host"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml",
+        "ms-python.python",
+        "ms-toolsai.jupyter",
+        "ms-python.vscode-pylance",
+        "pbkit.vscode-pbkit",
+        "serayuzgur.crates",
+        "aloecraft.diluvium-lang",
+        "sumneko.lua",
+        "1YiB.rust-bundle",
+        "JScearcy.rust-doc-viewer",
+        "Zerotaskx.rust-extension-pack",
+        "fill-labs.dependi"
+      ],
+      "settings": {
+        "lldb.executable": "/usr/bin/lldb",
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  }
+}

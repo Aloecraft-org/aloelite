@@ -23,9 +23,9 @@ import threading
 import pytest
 
 from manager.api import create_app
-from manager.direct import FRONTEND_DIRECT, DirectSessionRegistry
+from manager.engine.direct import FRONTEND_DIRECT, DirectSessionRegistry
+from manager.engine.store import JsonVolumeStore, VolumeRecord
 from manager.sigv4 import Credentials
-from manager.store import JsonVolumeStore, VolumeRecord
 
 botocore = pytest.importorskip("botocore", reason="botocore drives the S3 tests")
 
@@ -102,6 +102,34 @@ def test_put_then_get_roundtrips(s3):
     s3.put_object(Bucket=BUCKET, Key="generations/abc/snapshot", Body=body)
     got = s3.get_object(Bucket=BUCKET, Key="generations/abc/snapshot")
     assert got["Body"].read() == body
+
+
+def test_last_modified_is_plausible_not_merely_well_formed(s3):
+    """The third outing for one bug, so it gets the guard the others have.
+
+    Era 2 moved timestamps from milliseconds to nanoseconds. Every frontend
+    written before that change renders Last-Modified by dividing to seconds,
+    and every one of them has divided by the wrong constant: operations.py
+    (_now_ms), dav.py (_rfc1123/_iso8601), and now s3.py. The failure is loud
+    here only because datetime overflows at year 56 million — divide too hard
+    instead of too little and the answer is 1970-01-01, which is well-formed,
+    parses cleanly, and passes every assertion that checks shape.
+
+    So assert the VALUE. A unit error is never subtle in magnitude.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    floor = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
+    s3.put_object(Bucket=BUCKET, Key="fresh", Body=b"now")
+    got = s3.get_object(Bucket=BUCKET, Key="fresh")
+
+    stamp = got["ResponseMetadata"]["HTTPHeaders"]["last-modified"]
+    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    ceiling = datetime.now(tz=timezone.utc) + timedelta(minutes=5)
+    assert floor <= parsed <= ceiling, (
+        f"Last-Modified is {parsed.isoformat()}, which is not within minutes "
+        "of now — the engine timestamp was scaled by the wrong unit"
+    )
 
 
 def test_put_creates_implied_parents(s3):

@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 
-from manager.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
+from manager.engine.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
 
 
 def _rec(vid: str, **over) -> VolumeRecord:

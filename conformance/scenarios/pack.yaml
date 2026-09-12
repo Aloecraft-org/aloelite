@@ -1,0 +1,71 @@
+# OP-6/OP-7 fidelity through a pack/unpack round trip, at pack format v2
+# (doc/DECISIONS.md D-8): what a pack carries, and what absence means.
+scenarios:
+  - scenario: pack-round-trip-preserves-ownership-mode-and-xattrs
+    requirements: [OP-6, OP-7]
+    description: >
+      Format v2 carries uid/gid/mode and xattrs, so a subtree folded into one
+      blob and restored later keeps the permissions FUSE stamped on it. The
+      retention policy travels too, but has no getter through the API; the
+      pack vectors pin it. Modes are decimal here: 488 is 0750, 416 is 0640.
+    steps:
+      - op: create_container
+        args: {path: /d}
+      - op: create_entry
+        args: {path: /d/f, data: {utf8: "payload"}}
+      - op: set_owner
+        args: {path: /d/f, uid: 1000, gid: 1001, mode: 416}
+      - op: set_owner
+        args: {path: /d, mode: 488}
+      - op: set_xattr
+        args: {path: /d/f, name: user.a, value: {hex: "00ff"}}
+      - op: set_xattr
+        args: {path: /d/f, name: user.b, value: {utf8: "bee"}}
+      - op: pack
+        args: {path: /d}
+      - op: stat
+        args: {path: /d}
+        expect: {type: entry}
+      - op: unpack
+        args: {path: /d}
+      - op: stat
+        args: {path: /d}
+        expect: {type: container, mode: 488, uid: null, gid: null}
+      - op: stat
+        args: {path: /d/f}
+        expect: {type: entry, size: 7, uid: 1000, gid: 1001, mode: 416}
+      - op: get_xattr
+        args: {path: /d/f, name: user.a}
+        expect: {hex: "00ff"}
+      - op: get_xattr
+        args: {path: /d/f, name: user.b}
+        expect: {utf8: "bee"}
+      - op: list_xattrs
+        args: {path: /d/f}
+        expect: [user.a, user.b]
+      - op: read_all
+        args: {path: /d/f}
+        expect: {utf8: "payload"}
+
+  - scenario: pack-round-trip-leaves-unset-ownership-unset
+    requirements: [OP-6, OP-7]
+    description: >
+      Absent means absent. A node that never had ownership set comes back with
+      null uid/gid/mode, not zeros: v2 omits the keys rather than writing
+      defaults, so a host keeps falling back to its process defaults exactly
+      as it did before the round trip.
+    steps:
+      - op: create_container
+        args: {path: /d}
+      - op: create_entry
+        args: {path: /d/plain, data: {utf8: "x"}}
+      - op: pack
+        args: {path: /d}
+      - op: unpack
+        args: {path: /d}
+      - op: stat
+        args: {path: /d/plain}
+        expect: {type: entry, uid: null, gid: null, mode: null}
+      - op: list_xattrs
+        args: {path: /d/plain}
+        expect: []

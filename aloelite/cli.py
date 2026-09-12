@@ -490,12 +490,12 @@ def _enc_label(fs: Aloelite, vol_id) -> str:
     return "encrypted" if crow and crow["enc_mode"] != "none" else "plain"
 
 
-def _ts(ms) -> str:
+def _ts(ns) -> str:
     import datetime
 
-    if ms is None:
+    if ns is None:
         return "-"
-    return datetime.datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M")
+    return datetime.datetime.fromtimestamp(ns / 1e9).strftime("%Y-%m-%d %H:%M")
 
 
 def _volume_line(fs: Aloelite, v) -> str:

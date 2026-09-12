@@ -1,0 +1,76 @@
+# Ownership columns and extended attributes (era 2, NODE-4). Scenarios
+# assert values and RELATIONSHIPS (a bound modified_at compared before and
+# after), never absolute timestamps.
+scenarios:
+  - scenario: chmod-chown-set-columns-without-touching-mtime
+    requirements: [NODE-4]
+    description: >
+      uid/gid/mode land in real columns; a status change is not a content
+      change, so modified_at is untouched. Null fields in set_owner leave
+      their columns alone (partial chmod does not reset ownership).
+    steps:
+      - op: create_entry
+        args: {path: /f, data: {utf8: "x"}}
+      - op: stat
+        args: {path: /f}
+        bind: before
+      - op: set_owner
+        args: {path: /f, uid: 1000, gid: 1000, mode: 416}
+      - op: stat
+        args: {path: /f}
+        expect:
+          uid: 1000
+          gid: 1000
+          mode: 416
+          modified_at: {ref: before.modified_at}
+      - op: set_owner
+        args: {path: /f, mode: 384}
+      - op: stat
+        args: {path: /f}
+        expect: {uid: 1000, gid: 1000, mode: 384}
+
+  - scenario: ownership-defaults-are-null-not-zero
+    requirements: [NODE-4]
+    description: >
+      A node never chowned/chmodded reports null ownership — hosts fall back
+      to process defaults. Zero would claim root owns everything.
+    steps:
+      - op: create_entry
+        args: {path: /f, data: {utf8: "x"}}
+      - op: stat
+        args: {path: /f}
+        expect: {uid: null, gid: null, mode: null}
+
+  - scenario: xattrs-round-trip-binary-values
+    requirements: [NODE-4]
+    description: >
+      Set, replace, enumerate (sorted by name), remove; a get of an unset
+      attribute is null, and removing an unset attribute reports false.
+      Values are bytes, not strings.
+    steps:
+      - op: create_entry
+        args: {path: /f, data: {utf8: "x"}}
+      - op: set_xattr
+        args: {path: /f, name: user.b, value: {utf8: "2"}}
+      - op: set_xattr
+        args: {path: /f, name: user.a, value: {hex: "00ff10"}}
+      - op: get_xattr
+        args: {path: /f, name: user.a}
+        expect: {hex: "00ff10"}
+      - op: list_xattrs
+        args: {path: /f}
+        expect: [user.a, user.b]
+      - op: set_xattr
+        args: {path: /f, name: user.a, value: {utf8: "replaced"}}
+      - op: get_xattr
+        args: {path: /f, name: user.a}
+        expect: {utf8: "replaced"}
+      - op: remove_xattr
+        args: {path: /f, name: user.a}
+        expect: true
+      - op: remove_xattr
+        args: {path: /f, name: user.a}
+        expect: false
+      - op: get_xattr
+        args: {path: /f, name: user.a}
+        expect: null

@@ -10,8 +10,8 @@ import pytest
 
 from aloelite.aloelite import Aloelite
 from manager import errors as merr
-from manager.direct import DirectSessionRegistry
-from manager.store import VolumeRecord
+from manager.engine.direct import DirectSessionRegistry
+from manager.engine.store import VolumeRecord
 
 
 def _rec(tmp_path, vid="v1", name="vol", **over):

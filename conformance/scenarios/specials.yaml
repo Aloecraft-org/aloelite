@@ -1,0 +1,98 @@
+# Special node types — NODE-2's era-2 vocabulary. symlink/fifo/socket are
+# leaves that place like entries; a symlink's content is its target,
+# fifo/socket carry empty content (the mounting kernel owns their rendezvous
+# semantics — the schema records only that they exist and what they are).
+# Device nodes are refused by decision (doc/DECISIONS.md D-3), which is why
+# no scenario can create one: create_special has no vocabulary for it.
+scenarios:
+  - scenario: a-symlink-is-a-first-class-type-with-its-target-as-content
+    requirements: [NODE-2, IO-1]
+    description: >
+      The type is on the node; the target rides the ordinary content path,
+      so it round-trips through every content-carrying operation for free.
+    steps:
+      - op: create_special
+        args: {path: /ln, type: symlink, data: {utf8: "/target/elsewhere"}}
+      - op: stat
+        args: {path: /ln}
+        expect: {type: symlink, name: ln}
+      - op: read_all
+        args: {path: /ln}
+        expect: {utf8: "/target/elsewhere"}
+
+  - scenario: fifos-and-sockets-exist-with-empty-content
+    requirements: [NODE-2]
+    description: >
+      Rendezvous objects: the filesystem records their existence and type;
+      byte semantics belong to the kernel of whoever mounts them.
+    steps:
+      - op: create_special
+        args: {path: /fifo, type: fifo}
+      - op: create_special
+        args: {path: /sock, type: socket}
+      - op: stat
+        args: {path: /fifo}
+        expect: {type: fifo, size: 0}
+      - op: stat
+        args: {path: /sock}
+        expect: {type: socket, size: 0}
+
+  - scenario: create-special-refuses-the-ordinary-types
+    requirements: [NODE-2]
+    description: >
+      container/entry have their own creation operations; letting them
+      through here would fork the creation semantics (content defaults,
+      guards) across two paths.
+    steps:
+      - op: create_special
+        args: {path: /e, type: entry}
+        raises: unsupported
+
+  - scenario: copy-preserves-special-types
+    requirements: [NODE-2, OP-4r1]
+    description: >
+      A copied subtree keeps each node's type and, for symlinks, the target
+      bytes — a copy that flattened specials to entries would corrupt every
+      archived tree.
+    steps:
+      - op: create_container
+        args: {path: /src}
+      - op: create_special
+        args: {path: /src/ln, type: symlink, data: {utf8: "target"}}
+      - op: copy
+        args: {"from": /src, to: /dst}
+      - op: stat
+        args: {path: /dst/ln}
+        expect: {type: symlink}
+      - op: read_all
+        args: {path: /dst/ln}
+        expect: {utf8: "target"}
+
+  - scenario: pack-round-trips-special-types
+    requirements: [NODE-2, OP-6]
+    description: >
+      Pack/unpack is a cross-implementation contract; specials must survive
+      it with type and target intact.
+    steps:
+      - op: create_container
+        args: {path: /tree}
+      - op: create_special
+        args: {path: /tree/ln, type: symlink, data: {utf8: "over-there"}}
+      - op: create_special
+        args: {path: /tree/fifo, type: fifo}
+      - op: pack
+        args: {path: /tree}
+      - op: stat
+        args: {path: /tree}
+        expect: {type: entry}
+      - op: unpack
+        args: {path: /tree}
+      - op: stat
+        args: {path: /tree/ln}
+        expect: {type: symlink}
+      - op: read_all
+        args: {path: /tree/ln}
+        expect: {utf8: "over-there"}
+      - op: stat
+        args: {path: /tree/fifo}
+        expect: {type: fifo}

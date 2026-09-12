@@ -1,0 +1,29 @@
+[package]
+name = "aloelite-wasm"
+description = "The browser surface: one spec-shaped dispatch over aloelite-core (`Fs.call(op, args)`), a postMessage server over it, and the OPFS pool whose `open` takes the Web Lock that makes a volume single-writer. Meant to run inside a Dedicated Worker."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aloelite-core = { path = "../aloelite-core" }
+aloelite-store = { path = "../aloelite-store" }
+rusqlite = { workspace = true }
+ego_platform = { workspace = true }
+serde = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["MessageEvent"] }
+
+[dev-dependencies]
+serde_norway = { workspace = true }
+wasm-bindgen-test = { workspace = true }
+web-sys = { workspace = true, features = ["MessageEvent", "MessageChannel", "MessagePort"] }

@@ -192,6 +192,51 @@ def test_no_undeclared_public_operations(spec):
     )
 
 
+# ---------------------------------------------------------------------------
+# The `locks` flag — the annotation a port cannot afford to read wrong.
+# ---------------------------------------------------------------------------
+# Markers that mean "this operation touches the advisory lock table". Source
+# inspection rather than behaviour: asserting the flag by *provoking* a
+# conflict would need a live second mount per operation, and the point here is
+# a cheap total check over every declared op, not a semantics test (those live
+# in test_operations.py and conformance/scenarios/locking.yaml).
+_LOCK_MARKERS = ("check_lock_held", "_require_own_lock", "mutation.create_lock")
+
+
+def test_lock_flag_matches_the_implementation(spec):
+    """`locks` was documentation, and it had already drifted.
+
+    The ACC-11 work taught move/remove/remove_recursive/set_metadata to refuse
+    a locked node but left all four declaring `locks: false`, and unlock /
+    renew_lock never declared the flag at all. Nothing noticed, because nothing
+    read it — which is exactly the failure mode this module exists to end: a
+    second implementation reads the flag, not the Python.
+
+    The reverse direction matters just as much. An operation added without
+    considering locking silently declares `locks: false` by omission, and that
+    is a decision, not a default. This test turns it into a visible one.
+    """
+    mismatched = []
+    for _group, op in _declared_operations(spec):
+        fn = getattr(ops, op, None)
+        if fn is None or not inspect.isfunction(fn):
+            continue  # reachability is test_every_declared_operation_is_reachable's job
+        declared = bool((spec_flags(spec, op) or {}).get("locks", False))
+        actual = any(m in inspect.getsource(fn) for m in _LOCK_MARKERS)
+        if declared != actual:
+            mismatched.append(f"{op}: spec says locks={declared}, code says {actual}")
+    assert not mismatched, (
+        "mount-api.yaml disagrees with operations.py:\n  " + "\n  ".join(mismatched)
+    )
+
+
+def spec_flags(spec, op: str) -> dict[str, Any] | None:
+    for entries in spec["operations"].values():
+        if isinstance(entries, dict) and isinstance(entries.get(op), dict):
+            return entries[op].get("flags")
+    return None
+
+
 def test_declared_errors_are_the_only_ones_raised(spec):
     """Every `raises` entry must name a variant of the closed set."""
     closed = set(spec["errors"])

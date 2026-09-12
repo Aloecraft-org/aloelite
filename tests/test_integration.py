@@ -16,9 +16,9 @@ import tempfile
 import time
 
 from manager.api import create_app
-from manager.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
-from manager.supervisor import MountSupervisor
-from manager.test_supervisor import FakeBackend
+from manager.engine.store import FilesystemRecord, JsonVolumeStore, VolumeRecord
+from manager.engine.supervisor import MountSupervisor
+from manager.engine.test_supervisor import FakeBackend
 
 
 def _seed_backing_db(path: str, rows: int = 500) -> None:

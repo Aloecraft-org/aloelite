@@ -5,7 +5,9 @@ API test while being unusable in a real browser (the cookie was not reliably
 stored/sent). This drives the actual admin UI in Chromium and is the only
 check that covers that gap. It also caught two bootstrap modal races that
 the API tests called green. Run it after any change to admin.html or to the
-manager's auth paths.
+manager's auth paths; CI runs it as well, in main.yml's `manager-browser`
+job, which stands a manager up with an encrypted volume and then runs this
+file.
 
     pip install playwright              # browsers: see PLAYWRIGHT_BROWSERS_PATH
     ALOELITE_ROOT=/tmp/checkroot ALOELITE_API_PORT=8437 \

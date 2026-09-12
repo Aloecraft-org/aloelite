@@ -1,7 +1,7 @@
-# ./manager/preflight.py
+# ./manager/engine/preflight.py
 # License: Apache-2.0 (disclaimer at bottom of file)
 """
-manager.preflight — startup environment checks.
+manager.engine.preflight — startup environment checks.
 
 Each check is a pure function returning a CheckResult so it can be unit-tested
 without exiting. `run_preflight` runs them all, logs each, and exits(1) if any

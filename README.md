@@ -10,7 +10,7 @@ A portable encrypted filesystem stored inside one file
 
 **Overview (current)** | [Getting Started](https://github.com/Aloecraft-org/aloelite/blob/main/doc/GETTING_STARTED.md) |  [Frequently Asked Questions](https://github.com/Aloecraft-org/aloelite/blob/main/doc/FAQ.md) 
 
-[Troubleshooting](https://github.com/Aloecraft-org/aloelite/blob/main/doc/TROUBLESHOOTING.md) | [Requirements Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/REQUIREMENTS.md) | [Encryption Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ENCRYPTION.md) | [WebDAV](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WEBDAV.md) | [S3](https://github.com/Aloecraft-org/aloelite/blob/main/doc/S3.md) | [Windows](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WINDOWS.md) | [Backup Target](https://github.com/Aloecraft-org/aloelite/blob/main/doc/BACKUP_TARGET.md) | [Roadmap](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ROADMAP.md) | [Changelog](https://github.com/Aloecraft-org/aloelite/blob/main/CHANGELOG.md)
+[Troubleshooting](https://github.com/Aloecraft-org/aloelite/blob/main/doc/TROUBLESHOOTING.md) | [Requirements Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/REQUIREMENTS.md) | [Encryption Spec](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ENCRYPTION.md) | [WebDAV](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WEBDAV.md) | [S3](https://github.com/Aloecraft-org/aloelite/blob/main/doc/S3.md) | [Windows](https://github.com/Aloecraft-org/aloelite/blob/main/doc/WINDOWS.md) | [Backup Target](https://github.com/Aloecraft-org/aloelite/blob/main/doc/BACKUP_TARGET.md) | [Compatibility](https://github.com/Aloecraft-org/aloelite/blob/main/doc/COMPATIBILITY.md) | [Benchmarks](https://github.com/Aloecraft-org/aloelite/blob/main/doc/BENCHMARKS.md) | [Roadmap](https://github.com/Aloecraft-org/aloelite/blob/main/doc/ROADMAP.md) | [Changelog](https://github.com/Aloecraft-org/aloelite/blob/main/CHANGELOG.md)
 
 [![PyPI Version](https://img.shields.io/pypi/v/aloelite.svg)](https://pypi.org/project/aloelite/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/aloelite.svg)](https://pypi.org/project/aloelite/)
@@ -37,6 +37,7 @@ A portable encrypted filesystem stored inside one file
     + [API](#api)
     + [Backup Sync Pattern](#backup-sync-pattern)
 - [Security Notes](#security-notes)
+- [Performance](#performance)
 - [Design Background](#design-background)
 - [License](#license)
 
@@ -593,6 +594,40 @@ The rename into place is atomic; a failed export leaves the previous replica int
 **Node metadata** (paths, timestamps, node IDs, directory structure) is stored in plaintext in the SQLite schema. An observer with access to the file can read the filesystem tree even without the PIN. For sensitive deployments, place the backing file on an encrypted volume (LUKS, encrypted home directory, etc.) or use the `pack` primitive to seal a subtree before transport.
 
 The volume manager API is intended for trusted networks. PINs are transmitted in request bodies and never logged or persisted; the derived key is held only for the duration of the mount session.
+
+## Performance
+
+Measured by `python -m bench`, which CI runs on every push and publishes to
+the job summary. Every row is reported per frontend — the library API, both
+FUSE daemons, both `aloelite` binaries — and per volume mode. Full method,
+caveats and the rows themselves are in
+[Benchmarks](https://github.com/Aloecraft-org/aloelite/blob/main/doc/BENCHMARKS.md);
+the shape of the answer is:
+
+**Good at** repeated data (a template-cloned tree stores one copy), cheap
+versions (a one-byte edit to a large file costs one chunk, not a file),
+surviving `kill -9` (6,993 confirmed files across 48 crash rounds, none lost
+or corrupt — through the library and through either killed FUSE daemon), and maintenance that does not grow
+with the volume (unlock and `change_pin` are flat).
+
+**Costs** a multiple of raw file I/O on sequential throughput and per-operation
+on small files — the price of a content-addressed pool inside a transactional
+database. Encryption is close to free on top of that.
+
+**Costs** on directory operations are what a path resolved through SQL costs,
+and no longer grow with directory size: at 10,000 entries a `stat` is 12x
+ext4 and a full listing 29x, both flat or linear. Getting there took a
+schema era — era 3 materialises `edge.name` so a child lookup is a covering
+index seek — and a rewrite of the listing view's visibility rule as a window
+function.
+
+**Two implementations, one format.** A volume written by either `aloelite`
+binary reads correctly in the other, plain and encrypted. The Rust CLI starts
+in 1.6 ms against Python's 173 ms, which is most of the difference for
+one-shot commands.
+
+Opening a file written by an older build migrates it to schema era 3 in
+place; a file it has touched is not readable by an era-2 build.
 
 ## Design Background
 

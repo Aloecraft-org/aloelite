@@ -1,0 +1,77 @@
+# ./aloelite/config/cli.yaml
+# The `aloelite` command's surface: what a script may rely on across the
+# Python and Rust implementations. Structural — names, flags, positionals,
+# scopes, exit codes — never prose: each implementation's help text is its
+# own. tests/test_cli_contract.py projects the Python argparse tree onto this
+# file and rust/aloelite-cli/tests/contract.rs projects the Rust verb table,
+# so neither can gain or lose a verb or a flag in silence (D-7).
+meta:
+  interface: cli
+  version: 1
+  program: aloelite
+  notes: |
+    Session per invocation: each command opens the file, mounts (for a
+    mount-scoped verb), operates, unmounts, closes. Volume selection (-v)
+    is name-first, id-fallback; an id may be canonical uuid7 or bare 32-hex.
+    With no -v, a file holding exactly one volume uses it; several is a
+    refusal to guess that lists the candidates.
+
+# Options accepted before the verb. `value` names the argument the flag
+# takes; `optional_value` marks the one flag whose value may be omitted.
+globals:
+  file:     {flags: [-f, --file], value: PATH, env: ALOELITE_FILE}
+  volume:   {flags: [-v, --volume], value: NAME_OR_ID}
+  in:       {flags: [-i, --in], value: PATH}
+  append:   {flags: [-a, --append], value: PATH}
+  pin:      {flags: [--pin], value: SECRET, optional_value: true}
+  pin_file: {flags: [--pin-file], value: PATH}
+  pin_env:  {flags: [--pin-env], value: VAR}
+  version:  {flags: [--version]}
+
+# scope: mount = resolves -v and mounts for the call; file = the file alone.
+# args are positional, in order; flags are booleans.
+verbs:
+  ls:      {scope: mount, args: [{name: path, optional: true}], flags: {long: [-l, --long]}}
+  put:     {scope: mount, args: [{name: src}, {name: dst}], flags: {append: [--append], recursive: [-r, --recursive]}}
+  get:     {scope: mount, args: [{name: src}, {name: dst, optional: true}], flags: {recursive: [-r, --recursive]}}
+  cat:     {scope: mount, args: [{name: path}]}
+  cp:      {scope: mount, args: [{name: src}, {name: dst}]}
+  stat:    {scope: mount, args: [{name: path}]}
+  tree:    {scope: mount, args: [{name: path, optional: true}]}
+  mkdir:   {scope: mount, args: [{name: path}], flags: {parents: [-p, --parents]}}
+  rm:      {scope: mount, args: [{name: path}], flags: {recursive: [-r, --recursive]}}
+  mv:      {scope: mount, args: [{name: src}, {name: dst}]}
+  volumes: {scope: file}
+  volume:  {scope: file, sub: {ls: {}, create: {args: [{name: name}]}}}
+  mounts:  {scope: file, flags: {all: [--all]}}
+  prune:   {scope: file, flags: {vacuum: [--vacuum]}}
+  pin:     {scope: file, sub: {check: {}}}
+
+no_verb:
+  note: |
+    `aloelite -f FILE` alone creates the file with a default volume `main`
+    (encrypted iff a pin flag is given; the PIN is confirmed when prompted)
+    and prints how to proceed; on an existing file it prints the size and
+    the volume list. With --in or --append it writes stdin to PATH instead
+    (a terminal stdin writes nothing: a touch).
+
+exit_codes:
+  0: success
+  1: "refused or failed: one line `aloelite: <reason>` on stderr"
+  2: "usage: unknown verb or flag, or a missing positional"
+
+delegations:
+  note: |
+    `aloelite fuse|web|admin ...` hand off to aloelite-fuse / aloelite-web /
+    aloelite-admin in Python. Rust ships aloelite-fuse as its own binary and
+    has no web or admin; its `aloelite` names the right command and exits 1.
+  names: [fuse, web, admin]
+
+known_differences:
+  note: |
+    Where the two implementations legitimately read differently, recorded so
+    nobody hunts a bug that is a decision.
+  items:
+    - "`volumes` and `mounts` print a minute-resolution timestamp: Python the local minute, Rust the UTC minute (no time-zone database without a dependency)."
+    - "`stat` prints `metadata:` in Python dict syntax in both; keys are sorted in Rust, insertion-ordered in Python."
+    - "A bare `--pin` prompts on /dev/tty in both; the Rust prompt is unavailable on WASI, where it says so and exits 1."

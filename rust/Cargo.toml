@@ -1,0 +1,125 @@
+# aloelite-rs — the Rust implementation of the Aloelite Mount API.
+#
+# One workspace, six crates, three targets. The crates split along the line
+# that keeps WebAssembly first-class rather than aspirational: aloelite-core
+# compiles to every target with zero `cfg`, and anything that cannot is by
+# definition a different crate. CI enforces that from the first commit
+# (.github/workflows/main.yml, job `rust`), which is what stops "we'll do wasm
+# later" from becoming a decision nobody made.
+#
+#   target                   crates
+#   x86_64 / aarch64 native  all six
+#   wasm32-wasip2            core, store, conformance, cli
+#   wasm32-unknown-unknown   core, store, conformance, wasm
+#
+# doc/RUST_PORT.md is the plan; doc/DECISIONS.md D-7 is the storage decision.
+
+[workspace]
+resolver = "3"
+members = [
+    "aloelite-core",
+    "aloelite-store",
+    "aloelite-conformance",
+    "aloelite-fuse",
+    "aloelite-wasm",
+    "aloelite-cli",
+]
+
+[workspace.package]
+version = "0.4.0-rc.2"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/Aloecraft-org/aloelite"
+authors = ["Michael Godfrey <michael@aloecraft.org>"]
+
+# Versions live here, once. Crates say `{ workspace = true }` and add only
+# the features they need. Crypto versions are aligned with aloecrypt_core
+# and ego-platform (chacha20poly1305 0.10, sha2 0.11, rand_core 0.10,
+# getrandom 0.2) so one copy of each lands in the wasm binary — alignment,
+# not dependency: aloecrypt_core's KDFs are not the ENC-2 ladder.
+[workspace.dependencies]
+# --- platform seam (git for now; see doc/RUST_PORT.md) ---
+# Pinned to the tag ego-platform cut before its wasm-bindgen 0.2.114 -> 0.2.127
+# upgrade -- which is the commit this workspace already resolved to, so the
+# pin changes nothing it builds. Unpinned, one `cargo update` would take that
+# upgrade silently, and it is not a local matter: ego-platform requires
+# wasm-bindgen EXACTLY (`=0.2.114`), so its bump moves this whole graph, and
+# .devcontainer/Dockerfile's WASM_BINDGEN_VERSION does not follow Cargo.lock
+# the way CI does -- the devcontainer would fail the bindgen schema check
+# while CI stayed green. Going to 0.2.127 is a deliberate step: move this
+# pin, bump that ARG, re-run the browser suite.
+ego_platform = { git = "https://github.com/Aloecraft-org/ego-platform", tag = "pre-wasm-bindgen-0.2.127" }
+
+# --- the engine ---
+# `bundled` statically links SQLite on native and WASI — the whole
+# sqlite-floor / bundled-sqlite apparatus of the Python side goes away.
+# On wasm32-unknown-unknown rusqlite's default `ffi-sqlite-wasm-rs` takes
+# over and `bundled` is inert. `serialize` is the memory-image path
+# (sqlite3_serialize / deserialize) that the blob-backed store needs.
+rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
+# OPFS (`sahpool`, Dedicated Worker) and IndexedDB (`relaxed-idb`) VFSes for
+# the browser. Only aloelite-store on wasm32-unknown-unknown pulls this in.
+sqlite-wasm-vfs = "0.2"
+# Only for the `WasmOsCallback` type the OPFS pool's install needs; the
+# engine reaches sqlite-wasm-rs through rusqlite's ffi feature, and cargo
+# unifies the two on one version.
+sqlite-wasm-rs = { version = "0.5", default-features = false }
+
+# --- the ENC-2 key ladder, byte-for-byte against conformance/vectors/format-v1.json ---
+# `alloc` only: the engine generates its own nonces and keys from the
+# caller's rng, so the crates' `getrandom`/`rand`/`rand_core` defaults would
+# add nothing but a second copy of rand_core (0.6) to every binary.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# No features at all: argon2's `alloc` enables `password-hash`, whose default
+# is rand_core 0.6. The engine supplies the memory blocks itself through
+# hash_password_into_with_memory instead, and password-hash never loads.
+argon2 = { version = "0.5", default-features = false }
+# 0.13 is the digest-0.11 / hmac-0.13 line — the same one sha2 0.11 and
+# aloecrypt_core are on. 0.12 is digest 0.10 and will not accept sha2 0.11.
+hkdf = "0.13"
+sha2 = "0.11"
+rand_core = "0.10"
+zeroize = "1"
+
+# --- pack format (OP-6/OP-7) ---
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1"
+
+# --- conformance runner ---
+# serde_yaml is archived. serde_norway is the maintained API-compatible fork;
+# it is a test-only dependency and must carry the YAML 1.1/1.2 boolean guard
+# conformance/README.md documents (see aloelite-conformance/README.md).
+serde_norway = "0.9"
+base64 = "0.22"
+hex = "0.4"
+
+# --- native frontends ---
+fuser = "0.18"
+libc = "0.2"
+
+# --- browser ---
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen-test = "0.3"
+js-sys = "0.3"
+web-sys = "0.3"
+# Records cross into JavaScript through serde: objects, BigInt for every
+# integer (timestamps are nanoseconds and overflow a double), Uint8Array for
+# bytes.
+serde-wasm-bindgen = "0.6"
+
+# --- shared ---
+thiserror = "2"
+futures = "0.3"
+log = "0.4"
+
+# Argon2id at the pinned 64 MiB / t=3 is the one hot loop in the test suite;
+# unoptimized it costs seconds per derivation (and tens of seconds under the
+# browser runner). Optimize just that crate in dev builds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
