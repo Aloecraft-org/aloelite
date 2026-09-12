@@ -67,6 +67,9 @@ jobs:
       prerelease: ${{ steps.plan.outputs.prerelease }}
       publish: ${{ steps.plan.outputs.publish }}
       sha: ${{ steps.plan.outputs.sha }}
+      dev: ${{ steps.plan.outputs.dev }}
+      pep440: ${{ steps.plan.outputs.pep440 }}
+      matrix: ${{ steps.matrix.outputs.include }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -90,7 +93,10 @@ jobs:
           REF="${{ inputs.ref || github.ref }}"
           # Only a tag push publishes; a branch push (this file changed) and
           # a dispatch without `publish` are dry runs.
-          PUBLISH="${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'true' || (inputs.publish == true && 'true' || 'false') }}"
+          # `inputs.publish` is a boolean from the UI and a string from the
+          # API -- nightly.yml dispatches this with `gh workflow run`, which
+          # sends "true". Accept both rather than depend on the coercion.
+          PUBLISH="${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'true' || ((inputs.publish == true || inputs.publish == 'true') && 'true' || 'false') }}"
           case "$REF" in
             refs/tags/v*) TAG="${REF#refs/tags/}" ;;
             v*)           TAG="$REF" ;;
@@ -99,20 +105,42 @@ jobs:
           if [[ "$PUBLISH" == "true" && -z "$TAG" ]]; then
             echo "::error::publish needs a v* tag as ref, got '$REF'"; exit 1
           fi
-          if [[ -n "$TAG" ]]; then
+          # A -dev.<n> tag names a commit, not a release, and has no entry
+          # in CHANGELOG.yaml -- by design, and permanently (ALIGNMENT.md
+          # §7). release-check would refuse it and render would find nothing
+          # to render, so it takes its version from the tag it was given, is
+          # always a prerelease, and carries a generated body.
+          DEV=false
+          [[ "$TAG" == *-dev.* ]] && DEV=true
+          # PEP 440 for the wheel and for BUILDINFO. Everywhere else the tree
+          # is the authority (pyproject.toml, held against .technoproj by
+          # `technoproj-changelog consistency`); a dev build is the one case
+          # where it is not, because the tag names a commit the tree has no
+          # way to know about. `0.5.0-dev.1` -> `0.5.0.dev1`, which is what
+          # PEP 440 makes of that tag and what sorts below every other
+          # prerelease of 0.5.0.
+          PEP=$(python -c 'import re; print(re.search(r"^version\s*=\s*\"([^\"]+)\"", open("pyproject.toml").read(), re.M).group(1))')
+          if [[ "$DEV" == "true" ]]; then
+            V="${TAG#v}"
+            PEP="${V/-dev./.dev}"
+            echo "version=$V"       >> "$GITHUB_OUTPUT"
+            echo "prerelease=true"  >> "$GITHUB_OUTPUT"
+          elif [[ -n "$TAG" ]]; then
             # release-check prints prerelease= and version= for the tag, and
             # refuses a tag the changelog does not claim (or, when publishing,
             # a final whose entry is still unreleased).
             ARGS=(); [[ "$PUBLISH" == "true" ]] && ARGS+=(--publish)
             technoproj-changelog release-check --tag "$TAG" "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT"
           else
-            V=$(python -c 'import re; print(re.search(r"^version\s*=\s*\"([^\"]+)\"", open("pyproject.toml").read(), re.M).group(1))')
-            echo "version=$V" >> "$GITHUB_OUTPUT"
+            # An untagged dry run is whatever the tree currently says it is.
+            echo "version=$PEP" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "dev=$DEV" >> "$GITHUB_OUTPUT"
+          echo "pep440=$PEP" >> "$GITHUB_OUTPUT"
           # The commit, not the ref: `github.sha` is the dispatching ref on a
           # workflow_dispatch, which is not necessarily what is being built.
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -137,7 +165,7 @@ jobs:
           {
             echo "tag: ${{ steps.plan.outputs.tag || '(untagged)' }}"
             echo "version: ${{ steps.plan.outputs.version }}"
-            echo "pep440: $(FIELD pyproject.toml '^version\s*=\s*"([^"]+)"')"
+            echo "pep440: ${{ steps.plan.outputs.pep440 }}"
             echo "commit: $SHA"
             echo "branch: ${BRANCH:-(detached)}"
             echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -147,9 +175,69 @@ jobs:
         with:
           name: dist-buildinfo
           path: dist/BUILDINFO.txt
-      - name: Release notes, from the changelog
+      # The platform vocabulary of ALIGNMENT.md §4, as data rather than as a
+      # `strategy.matrix` literal, because a -dev.<n> build takes the first
+      # row and nothing else: one platform, no cross-compilation (§7). Rows
+      # are ordered so that slicing is all it takes. `platform` is carried
+      # rather than derived -- a Rust triple is not a platform name, and
+      # mapping one to the other in bash is how the two drift.
+      - id: matrix
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/platforms.json" <<'JSON'
+          [
+            {"os": "ubuntu-latest",  "target": "x86_64-unknown-linux-gnu",
+             "platform": "linux_x86_64_gnu",
+             "crates": "-p aloelite-cli -p aloelite-fuse",
+             "bins": "aloelite aloelite-fuse"},
+            {"os": "ubuntu-latest",  "target": "aarch64-unknown-linux-gnu",
+             "platform": "linux_arm64_gnu", "cross": true,
+             "crates": "-p aloelite-cli -p aloelite-fuse",
+             "bins": "aloelite aloelite-fuse"},
+            {"os": "ubuntu-latest",  "target": "x86_64-unknown-linux-musl",
+             "platform": "linux_x86_64_musl", "musl": true,
+             "crates": "-p aloelite-cli -p aloelite-fuse",
+             "bins": "aloelite aloelite-fuse"},
+            {"os": "macos-latest",   "target": "aarch64-apple-darwin",
+             "platform": "darwin_arm64",
+             "crates": "-p aloelite-cli", "bins": "aloelite"},
+            {"os": "macos-latest",   "target": "x86_64-apple-darwin",
+             "platform": "darwin_x86_64",
+             "crates": "-p aloelite-cli", "bins": "aloelite"},
+            {"os": "windows-latest", "target": "x86_64-pc-windows-msvc",
+             "platform": "windows_x86_64",
+             "crates": "-p aloelite-cli", "bins": "aloelite.exe"}
+          ]
+          JSON
+          N=$([[ "${{ steps.plan.outputs.dev }}" == "true" ]] && echo 1 || echo 99)
+          python -c 'import json,sys; print("include=" + json.dumps(json.load(open(sys.argv[1]))[:int(sys.argv[2])]))' \
+            "$RUNNER_TEMP/platforms.json" "$N" \
+            | tee -a "$GITHUB_OUTPUT"
+      # A dev build has no changelog entry to render, so its body is what it
+      # does have: BUILDINFO, and what the suffix means for anyone who finds
+      # the release without having asked for it.
+      - name: Release notes
         if: steps.plan.outputs.tag != ''
-        run: technoproj-changelog render md --tag "${{ steps.plan.outputs.tag }}" | tee release-notes.md
+        shell: bash
+        run: |
+          if [[ "${{ steps.plan.outputs.dev }}" == "true" ]]; then
+            {
+              echo "A development build of \`${{ steps.plan.outputs.tag }}\`."
+              echo
+              echo "**This is not a release.** It names one commit, it is not on PyPI,"
+              echo "it is not mirrored, and it is pruned once newer dev builds exist."
+              echo "It is built for one platform only (\`doc/ALIGNMENT.md\` §7), and it"
+              echo "did not wait for the test matrix. For a release, see the tags"
+              echo "without a \`-dev.\` suffix."
+              echo
+              echo '```'
+              cat dist/BUILDINFO.txt
+              echo '```'
+            } > release-notes.md
+          else
+            technoproj-changelog render md --tag "${{ steps.plan.outputs.tag }}" > release-notes.md
+          fi
+          cat release-notes.md
       - uses: actions/upload-artifact@v4
         if: steps.plan.outputs.tag != ''
         with:
@@ -167,6 +255,24 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install build
+      # A dev build's wheel must not be named after a release it is not.
+      # publish.yml keeps it off PyPI; this keeps it from claiming 0.5.0 on
+      # the disk of whoever downloads it. `.devN` is PEP 440's own spelling
+      # for exactly this and installs and compares correctly.
+      - if: needs.plan.outputs.dev == 'true'
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import re
+          p = "pyproject.toml"
+          s = open(p).read()
+          s, n = re.subn(r'^version\s*=\s*"[^"]+"',
+                         'version = "${{ needs.plan.outputs.pep440 }}"',
+                         s, count=1, flags=re.M)
+          assert n == 1, "no version line in pyproject.toml"
+          open(p, "w").write(s)
+          EOF
+          grep -m1 '^version' pyproject.toml
       - run: python -m build
       - uses: actions/upload-artifact@v4
         with:
@@ -177,45 +283,10 @@ jobs:
     needs: plan
     strategy:
       fail-fast: false
+      # One row per platform, sliced by `plan`: everything for a release, the
+      # first row alone for a -dev.<n> build. The list itself lives there.
       matrix:
-        include:
-          # `platform` is the asset-name vocabulary (ALIGNMENT.md §4): os,
-          # arch, and libc where it distinguishes two builds of the same
-          # thing. It is carried rather than derived because a Rust triple is
-          # not a platform name and mapping one to the other in bash is how
-          # the two drift.
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            platform: linux_x86_64_gnu
-            crates: -p aloelite-cli -p aloelite-fuse
-            bins: aloelite aloelite-fuse
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            platform: linux_arm64_gnu
-            crates: -p aloelite-cli -p aloelite-fuse
-            bins: aloelite aloelite-fuse
-            cross: true
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            platform: linux_x86_64_musl
-            crates: -p aloelite-cli -p aloelite-fuse
-            bins: aloelite aloelite-fuse
-            musl: true
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            platform: darwin_arm64
-            crates: -p aloelite-cli
-            bins: aloelite
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            platform: darwin_x86_64
-            crates: -p aloelite-cli
-            bins: aloelite
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: windows_x86_64
-            crates: -p aloelite-cli
-            bins: aloelite.exe
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -277,8 +348,12 @@ jobs:
           name: dist-native-${{ matrix.target }}
           path: dist/*
 
+  # Skipped for a -dev.<n> build: the suffix is what buys skipping wasm and
+  # the cross-compiled half (ALIGNMENT.md §7). Everything downstream of this
+  # job therefore runs under `always()` and judges its needs by result.
   wasm:
     needs: plan
+    if: needs.plan.outputs.dev != 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -355,7 +430,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ needs.plan.outputs.publish == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          platforms: ${{ (needs.plan.outputs.publish == 'true' && needs.plan.outputs.dev != 'true') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ needs.plan.outputs.publish == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
@@ -421,7 +496,9 @@ jobs:
   # Dry run: what a tag would have shipped, in the run's summary.
   manifest:
     needs: [plan, python, native, wasm]
-    if: needs.plan.outputs.publish != 'true'
+    # `always()` because `wasm` is skipped for a dev build, and a skipped
+    # need would otherwise skip this too. Skipped is not failed.
+    if: ${{ always() && needs.plan.outputs.publish != 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -441,7 +518,9 @@ jobs:
 
   release:
     needs: [plan, gate, python, native, wasm, image]
-    if: needs.plan.outputs.publish == 'true'
+    # `always()` for the same reason as `manifest`: a dev build skips `wasm`
+    # and still publishes. Nothing ships if any need actually failed.
+    if: ${{ always() && needs.plan.outputs.publish == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

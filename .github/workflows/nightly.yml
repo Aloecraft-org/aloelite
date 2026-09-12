@@ -1,0 +1,132 @@
+name: Nightly
+
+# A `-dev.<n>` build: one commit in someone's hands without a ten-minute gate
+# and without a hash in the version string. The hash is in BUILDINFO.txt,
+# which is what lets the version stay short. doc/ALIGNMENT.md §7.
+#
+# This workflow allocates the number and cuts the tag; release.yml builds it.
+# What it does NOT do is decide any of the rules -- the number comes from
+# `make dev-tag` (the shared script/version.mk), the reduced matrix and the
+# generated body are release.yml's, and PyPI is excluded in publish.yml. This
+# file is the trigger and the retention, nothing else.
+#
+#   schedule           every 24h, and skips when HEAD has not moved
+#   workflow_dispatch  any branch or commit, with `force` to cut anyway
+#   KEEP               how many dev RELEASES survive; tags are never deleted,
+#                      so a number is never reused
+#
+# Why the tag is pushed and then release.yml is dispatched rather than left
+# to the `v*` push trigger: a ref pushed with GITHUB_TOKEN starts no workflow
+# run. That is GitHub's recursion guard and it cannot be turned off. An
+# explicit dispatch is not subject to it.
+
+on:
+  schedule:
+    # 06:00 UTC. Late enough that a day's pushes are in, early enough that
+    # the build is waiting rather than running when Europe starts.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit to cut from (empty: the default branch)"
+        required: false
+        default: ""
+      force:
+        description: "Cut even if HEAD has not moved since the last dev tag"
+        type: boolean
+        default: false
+
+# Two dev tags allocated at once would collide on the number.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # push the tag, delete superseded dev releases
+  actions: write    # dispatch release.yml for the tag just pushed
+
+env:
+  KEEP: 5
+
+jobs:
+  dev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          # Tags are the counter (§7: not a file in the tree, so a nightly
+          # needs no commit and two branches cannot collide), and version.mk
+          # reads them with `git tag --list`. A shallow clone has none.
+          fetch-depth: 0
+
+      # depth: allocation and the unchanged-HEAD skip
+      - id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse HEAD)
+          # The newest dev tag by NUMBER, which is the same pipeline
+          # version.mk allocates from -- the counter is global across
+          # versions, so `v0.5.0-dev.9` is older than `v0.4.0-dev.10`.
+          LAST=$(git tag --list 'v*-dev.*' \
+            | sed -n 's/^\(.*-dev\.\([0-9][0-9]*\)\)$/\2 \1/p' \
+            | sort -n | tail -1 | cut -d' ' -f2- || true)
+          if [[ -n "$LAST" && "$(git rev-list -n1 "$LAST")" == "$SHA" \
+                && "${{ inputs.force }}" != "true" ]]; then
+            echo "::notice::$LAST already names $SHA -- nothing new to build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TAG=$(make dev-tag)
+          echo "cutting $TAG at $SHA (previous: ${LAST:-none})"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Cut the tag
+        if: steps.plan.outputs.skip != 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          SHA: ${{ steps.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG (dev build of $SHA)"
+          git push origin "$TAG"
+
+      - name: Build it
+        if: steps.plan.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml -f ref="$TAG" -f publish=true
+          echo "dispatched release.yml for $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      # depth: retention. §7 -- prune your own old dev GitHub releases, or
+      # they crowd out the real ones. The TAGS stay: deleting one would let
+      # `make dev-tag` reissue its number, and a number names exactly one
+      # build forever. Runs even when nothing was cut, so a repository that
+      # has gone quiet still tidies up, and it runs last so this nightly's
+      # own release (published asynchronously by release.yml) is not a
+      # candidate until tomorrow.
+      - name: Prune superseded dev releases
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          OLD=$(gh release list --limit 100 --json tagName --jq '.[].tagName' \
+                | grep -- '-dev\.' | tail -n +$((KEEP + 1)) || true)
+          [[ -z "$OLD" ]] && { echo "nothing to prune"; exit 0; }
+          while read -r t; do
+            [[ -z "$t" ]] && continue
+            echo "pruning release $t (its tag stays)"
+            gh release delete "$t" --yes
+          done <<< "$OLD"

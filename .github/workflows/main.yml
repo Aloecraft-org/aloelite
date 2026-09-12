@@ -3,7 +3,11 @@ name: CI/CD
 on:
   push:
     branches: [ main, master ]
-    tags: [ 'v*' ]
+    # A -dev.<n> tag skips the slow suites -- that is what the suffix buys
+    # (doc/ALIGNMENT.md §7), and it is why release.yml's gate exempts one.
+    # The `!` pattern second, in the same list: `tags` plus `tags-ignore` is
+    # rejected at load time and a workflow that does not parse does not run.
+    tags: [ 'v*', '!v*-dev.*' ]
   pull_request:
     branches: [ main, master ]
   # Re-running a green-by-infrastructure-accident commit shouldn't need a

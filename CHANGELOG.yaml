@@ -236,6 +236,46 @@ releases:
         GitHub releases and does not work there, so the exclusion has to land
         before the first dev tag rather than after.
       - |
+        **`nightly.yml`, and something that cuts a dev tag.** Every night at
+        06:00 UTC and on dispatch from any branch, with the build skipped
+        when `HEAD` has not moved since the last dev tag -- otherwise
+        identical builds accumulate. The number is allocated from the tags
+        that exist rather than from a counter in the tree, so a nightly needs
+        no commit and two branches cannot collide on one; `make dev-tag`
+        prints what it would take. Old dev *releases* are pruned and their
+        *tags* are kept, which is what makes a number name exactly one build
+        forever.
+
+        The tag is pushed and then `release.yml` is dispatched for it, rather
+        than left to the `v*` push trigger, because a ref pushed with
+        `GITHUB_TOKEN` starts no workflow run. That is GitHub's recursion
+        guard and it cannot be turned off.
+      - |
+        **A dev tag takes a different route through `release.yml`.** It has
+        no `CHANGELOG.yaml` entry and never will -- it names a commit, not a
+        release -- so `release-check` would refuse it and `render md --tag`
+        would find nothing to render. Both are skipped: the version comes
+        from the tag, `prerelease` is always true, and the body is generated
+        with `BUILDINFO.txt` in it.
+
+        `ALIGNMENT.md` §7's "the suffix decides the rigor" is the rest of it.
+        A dev tag builds one platform and skips cross-compilation and both
+        wasm leaves, the image is amd64 only, and `CI/CD` no longer runs on
+        `v*-dev.*` at all -- which is what `release.yml`'s gate exemption
+        already assumed. The platform matrix moved out of `strategy.matrix`
+        and into the `plan` job as data so that "one platform" is a slice
+        rather than a second list; every row is byte-identical to the one it
+        replaces.
+
+        The one that would have been quietly wrong: a dev build is the single
+        case where the tag is more authoritative than the tree, because the
+        tree cannot know which commit was cut. `plan` derives the PEP 440
+        spelling from the tag (`v0.5.0-dev.1` -> `0.5.0.dev1`) and the
+        `python` job stamps it into `pyproject.toml` before building.
+        Without it the wheel would have been named
+        `aloelite-0.5.0-py3-none-any.whl` and claimed to be the release it
+        is not.
+      - |
         **`BUILDINFO.txt` ships with every release**, and travels inside each
         `complete` archive so someone who unpacked one can still read what
         they have. It carries what `.technoproj` cannot -- committing the

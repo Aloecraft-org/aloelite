@@ -9,14 +9,14 @@ How a version of Aloelite goes out, end to end. Everything downstream of
 > the copy here is byte-identical to it and is not edited, so it can be
 > diffed against upstream.
 >
-> What this document describes conforms to its §1, §2 and §4 — the version
-> scheme, `.technoproj`'s `pre`, and artifact names with no version in them —
-> to §5's `BUILDINFO.txt`, §6's `SHA256SUMS.txt`, §7's PyPI exclusion, and
-> §9's two gates, and to §3 — the release tooling is
+> What this document describes conforms to it throughout: §1, §2 and §4 — the
+> version scheme, `.technoproj`'s `pre`, and artifact names with no version in
+> them — §5's `BUILDINFO.txt`, §6's `SHA256SUMS.txt`, §7's dev builds (which
+> `nightly.yml` cuts and `publish.yml` keeps off PyPI), §8's Python rules and
+> §9's two gates. Its §3 is the reason the release tooling is
 > [technoproj](https://github.com/Aloecraft-org/technoproj), installed in CI
-> and pinned, rather than a copy of it living here — and aloelite is mirrored
-> from its changelog, so `emit_json` is on and `changelog.json` is committed.
-> Still owed: actually cutting a `-dev.<n>` build.
+> and pinned rather than copied into this tree, and aloelite is mirrored from
+> its changelog, so `emit_json` is on and `changelog.json` is committed.
 
 ## The tooling
 
@@ -113,7 +113,8 @@ semver:  0.5.0-rc.1    # what rust/Cargo.toml carries
 
 Three workflows run on `v*`, independently:
 
-- **`main.yml`** — the CI matrix, on the tagged commit.
+- **`main.yml`** — the CI matrix, on the tagged commit. It ignores
+  `v*-dev.*`: skipping the slow suites is what that suffix buys.
 - **`publish.yml`** — PyPI, by trusted publishing. A candidate is a PyPI
   pre-release, which `pip` skips unless asked. It ignores `v*-dev.*` tags:
   `0.5.0-dev.7` is a valid PEP 440 version and would upload without
@@ -121,7 +122,14 @@ Three workflows run on `v*`, independently:
   (`ALIGNMENT.md` §7).
 - **`release.yml`** — the GitHub release and the image. It refuses a tag the
   changelog does not claim, renders the release body from the entry, and
-  derives `prerelease` (a candidate always; a final from `stable`).
+  derives `prerelease` (a candidate always; a final from `stable`). A
+  `v*-dev.*` tag takes a different route through it — see Dev builds.
+
+Both `!v*-dev.*` exclusions are a `!` pattern **second in the same `tags`
+list**, never a `tags-ignore` beside `tags`: Actions rejects both filters on
+one event *at load time*, and a workflow that does not parse does not run at
+all — so the wrong spelling does not narrow the trigger, it silently switches
+the workflow off with no failed run to notice.
 
 ### Nothing ships untested
 
@@ -170,6 +178,57 @@ Docker Hub (`aloecraft/aloelite`) is not part of this; the Makefile's
 `push_container` remains the manual route. A GHCR package created by a
 workflow may need its visibility set to public once, in the package's
 settings, before anonymous pulls work.
+
+## Dev builds
+
+A `-dev.<n>` build gets one commit into someone's hands without a ten-minute
+gate and without a hash in the version string — the hash is in
+`BUILDINFO.txt`, which is what lets the version stay short (`ALIGNMENT.md`
+§7). It is not a
+release: it has no `CHANGELOG.yaml` entry and never will, it never reaches
+PyPI, it is not mirrored, and it is pruned once newer ones exist.
+
+`nightly.yml` cuts them — every night at 06:00 UTC, and on dispatch with a
+`ref` for any branch. It **skips when `HEAD` has not moved** since the last
+dev tag, so identical builds do not accumulate; `force` overrides that.
+
+```
+make dev-tag        # v0.5.0-dev.1 — the number that would be allocated next
+```
+
+**The number is global and never reused.** It is allocated from the tags
+that exist, not from a counter in the tree, so a nightly needs no commit and
+two branches cannot collide. It is monotonic across versions —
+`0.4.0.dev104` then `0.5.0.dev105` — and because `nightly.yml` prunes old dev
+*releases* while leaving their *tags*, a number names exactly one build
+forever.
+
+**What a dev tag does differently**, all of it keyed off the `-dev.` in the
+tag:
+
+| | a release tag | a dev tag |
+|---|---|---|
+| `CHANGELOG.yaml` entry | required; `release-check` refuses a tag without one | none, ever; `plan` skips the check |
+| release body | rendered from the entry | generated, with `BUILDINFO.txt` in it |
+| platforms | all six | `linux_x86_64_gnu` alone, no cross-compilation |
+| wasm | both leaves | skipped |
+| image | amd64 + arm64 | amd64 |
+| `CI/CD` | runs on the tag, and `release.yml` waits for it | does not run, and is not waited for |
+| PyPI | published | excluded by `publish.yml` |
+| `prerelease` | from `stable` | always true |
+| version | the tree's | the tag's: `0.5.0-dev.1`, PEP 440 `0.5.0.dev1` |
+
+That last row is the one with teeth. A dev build is the single case where
+the tag is more authoritative than the tree, because the tree has no way to
+know which commit was cut — so `plan` derives the PEP 440 spelling from the
+tag and the `python` job stamps it into `pyproject.toml` before building.
+Without that the wheel would be named `aloelite-0.5.0-py3-none-any.whl` and
+claim to be the release it is not.
+
+**The tag is pushed by CI, then `release.yml` is dispatched for it.** Not
+because a dispatch is nicer, but because a ref pushed with `GITHUB_TOKEN`
+starts no workflow run — GitHub's recursion guard, which cannot be turned
+off. A dispatch is not subject to it.
 
 ## Proving the matrix before a tag exists
 
