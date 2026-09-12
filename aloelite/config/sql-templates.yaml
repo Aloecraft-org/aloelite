@@ -915,7 +915,10 @@ recursive:
       new-id sequences. The host loops these rows, using the old->new id map so a
       copied child attaches to its copied parent.
 
-      `name` is the EFFECTIVE name at this placement — coalesce(edge.name,
+      `name` is the EFFECTIVE name at this placement. The coalesce here is NOT
+      the era-2 name fallback (era 3 materialises edge.name, and resolution
+      and directory_listing match on it directly): it covers the subtree
+      ROOT, which has no edge in the walk and so no edge name — coalesce(edge.name,
       node.name), the same rule resolution and directory_listing use. It is
       returned here rather than read from get_node because a walk enumerates
       PLACEMENTS, and a hardlinked node appears once per placement, each of

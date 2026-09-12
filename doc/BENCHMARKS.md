@@ -510,13 +510,6 @@ re-listing: the FUSE columns were pulling away from the library column
 faster than the library column grew, which a single size could not have
 shown.
 
-Two candidate fixes, neither of them this change's to make: an index on
-`node (name)`, which lets the planner drive the join from the name side
-instead (additive, no era bump); or denormalising the name onto the edge,
-which 0.4 already plans for another reason (D-5 makes `edge.name` a
-per-placement override) and which would make `edge (from_id, name)` a real
-covering index. Which is right is a schema question, and it belongs with the
-era-2 work rather than with a benchmark.
 
 **Maintenance while tail latency matters.** Export and snapshot are both
 fast — 256 MiB exported in 1.9 s, snapshotted in 0.65 s — and neither moved a

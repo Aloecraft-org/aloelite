@@ -13,7 +13,7 @@ decision rather than a conversation. Uses the vocabulary of
 | D-2 | Node and edge ids are strictly ordered within a mount, and a per-volume high-water mark stops a new session minting below anything the volume has seen. Volume, mount and lock ids are stateless and promise no order. | 2026-08-26 | implemented |
 | D-3 | Node types widen to symlink, fifo and socket; device nodes are refused. | 2026-08-26 | implemented |
 | D-4 | POSIX byte-range locks are per mount through FUSE; engine locks arbitrate across mounts; admission defaults to one rw mount per subtree, overlap is an opt-in. | 2026-08-26, amended 08-28 | implemented |
-| D-5 | Hardlinks: a leaf may be placed many times, a placement may carry its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02 | implemented; the record was written after the fact |
+| D-5 | Hardlinks: a leaf may be placed many times, a placement carries its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02; amended era 3 | implemented; the record was written after the fact, and the name became unconditional in era 3 |
 | D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
 | D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store; wire protocol; fuse), 09-03 (cli contract) | implemented: all six crates; every point left open is settled below |
 | D-8 | The pack blob format moves to v2 once, carrying uid/gid/mode, xattrs and retention; not atime, ctime or hardlink identity. v1 stays readable forever. | 2026-09-02 | implemented (Python and Rust) |
@@ -195,11 +195,16 @@ What was decided:
    unique index could not consult the node's type. The
    `edge_guard_single_parent` trigger pair refuses a second active placement
    of a container and nothing else; the era-2 migration drops the index.
-3. **A placement may carry its own name** (`edge.name`, NULL meaning "the
-   node's own name" — EXT-4). The effective name everywhere a name is read
-   — resolution, listings, the subtree walk, pack — is
-   `coalesce(edge.name, node.name)`. A leaf's `node.name` is therefore only
-   the default for placements without an override.
+3. **A placement carries its own name** (`edge.name` — EXT-4). In era 2 it
+   was an override, NULL meaning "the node's own name", so the effective
+   name everywhere a name is read was `coalesce(edge.name, node.name)`.
+   **Era 3 materialises it**: `create_edge` writes the node's name when the
+   caller gives no override, so the column is never null and the effective
+   name is simply `edge.name`. A leaf's `node.name` is the default a new
+   placement takes, not a fallback consulted at read time. The reason is
+   indexability — a predicate spanning `edge` and `node` cannot be served by
+   any index, which made a child lookup scan the container; see
+   doc/BENCHMARKS.md.
 4. **Rename is a placement operation**, as in POSIX, where it edits a
    directory entry and not the inode: it sets the walked edge's name and
    refreshes `node.name` only while that edge is the node's sole active
