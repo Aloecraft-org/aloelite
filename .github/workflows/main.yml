@@ -230,12 +230,17 @@ jobs:
 
     - uses: dtolnay/rust-toolchain@stable
       with:
-        targets: wasm32-unknown-unknown, wasm32-wasip2
+        targets: wasm32-unknown-unknown, wasm32-wasip1, wasm32-wasip2
         components: rustfmt, clippy
 
     - uses: Swatinem/rust-cache@v2
       with:
-        workspaces: rust
+        # The harness is its own workspace (it brings wasmtime, which the
+        # engine's own `cargo test` must not have to build); cache it too,
+        # or that build is paid on every run.
+        workspaces: |
+          rust
+          rust/aloelite-extism/harness
 
     # libfuse3-dev links fuser; fuse3 provides fusermount3, so aloelite-fuse's
     # live-mount tests (tests/mount.rs) can mount as the unprivileged CI user.
@@ -245,16 +250,20 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3 pkg-config
 
     # rusqlite `bundled` compiles sqlite3.c with cc-rs, which needs a
-    # WASI-capable clang and sysroot for wasm32-wasip2. Host clang falls back
-    # to glibc headers and fails. Keep the version in step with
+    # WASI-capable clang and sysroot for both WASI targets -- preview 2 for
+    # the CLI component, preview 1 for the Extism plug-in. Host clang falls
+    # back to glibc headers and fails. cc-rs keys these by triple, so each
+    # target needs its own three. Keep the version in step with
     # rust/.devcontainer/Dockerfile (WASI_SDK_MAJOR).
-    - name: wasi-sdk for the wasip2 target
+    - name: wasi-sdk for the WASI targets
       run: |
         curl -sSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz | sudo tar xz -C /opt
         SDK=/opt/wasi-sdk-27.0-x86_64-linux
-        echo "CC_wasm32_wasip2=$SDK/bin/clang"                          >> "$GITHUB_ENV"
-        echo "AR_wasm32_wasip2=$SDK/bin/llvm-ar"                        >> "$GITHUB_ENV"
-        echo "CFLAGS_wasm32_wasip2=--sysroot=$SDK/share/wasi-sysroot"   >> "$GITHUB_ENV"
+        for t in wasip1 wasip2; do
+          echo "CC_wasm32_$t=$SDK/bin/clang"                            >> "$GITHUB_ENV"
+          echo "AR_wasm32_$t=$SDK/bin/llvm-ar"                          >> "$GITHUB_ENV"
+          echo "CFLAGS_wasm32_$t=--sysroot=$SDK/share/wasi-sysroot"     >> "$GITHUB_ENV"
+        done
 
     - name: Format
       run: cargo fmt --all -- --check
@@ -270,6 +279,9 @@ jobs:
 
     - name: "The rule: WASI crates build for wasm32-wasip2"
       run: cargo check -p aloelite-core -p aloelite-api -p aloelite-store -p aloelite-conformance -p aloelite-cli --target wasm32-wasip2
+
+    - name: "The rule: the plug-in builds for wasm32-wasip1"
+      run: cargo check -p aloelite-core -p aloelite-api -p aloelite-extism --target wasm32-wasip1
 
     # The runner must match the wasm-bindgen crate version in Cargo.lock
     # EXACTLY — the bindgen schema is unstable and it refuses a mismatch.
@@ -353,3 +365,16 @@ jobs:
         $A -f /work/t.fs get -r /docs /work/out        # /work/out does not exist: it becomes the tree root (cp -r)
         test "$(cat "$W/out/in.txt")" = "hello from wasi"
         $A -f /work/t.fs volumes | grep -q "main"
+
+    # The plug-in under a real Extism host. `cargo test -p aloelite-extism`
+    # covers everything on the plug-in's own side of the ABI; nothing but a
+    # host covers the ABI itself, and that is not theoretical -- an export
+    # named `close` silently replaced wasi-libc's, and SQLite's first
+    # directory sync trapped four frames deep with nothing pointing at the
+    # cause. The harness is a separate workspace because the host SDK brings
+    # wasmtime.
+    - name: The plug-in runs under Extism
+      run: |
+        cargo build -p aloelite-extism --target wasm32-wasip1 --release
+        cargo run --release --manifest-path aloelite-extism/harness/Cargo.toml -- \
+          target/wasm32-wasip1/release/aloelite_extism.wasm "$(mktemp -d)"

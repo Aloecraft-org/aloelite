@@ -1,6 +1,6 @@
 # aloelite-rs — the Rust implementation of the Aloelite Mount API.
 #
-# One workspace, seven crates, three targets. The crates split along the line
+# One workspace, eight crates, four targets. The crates split along the line
 # that keeps WebAssembly first-class rather than aspirational: aloelite-core
 # compiles to every target with zero `cfg`, and anything that cannot is by
 # definition a different crate. CI enforces that from the first commit
@@ -8,7 +8,8 @@
 # later" from becoming a decision nobody made.
 #
 #   target                   crates
-#   x86_64 / aarch64 native  all seven
+#   x86_64 / aarch64 native  all eight
+#   wasm32-wasip1            core, api, extism        (the Extism plug-in)
 #   wasm32-wasip2            core, api, store, conformance, cli
 #   wasm32-unknown-unknown   core, api, store, conformance, wasm
 #
@@ -23,8 +24,14 @@ members = [
     "aloelite-conformance",
     "aloelite-fuse",
     "aloelite-wasm",
+    "aloelite-extism",
     "aloelite-cli",
 ]
+# The Extism host harness: a separate crate on purpose, because the host SDK
+# brings wasmtime and `cargo test` on the engine should not build a
+# WebAssembly runtime. aloelite-extism/harness/README-less: its Cargo.toml
+# says why, and CI runs it after building the plug-in.
+exclude = ["aloelite-extism/harness"]
 
 [workspace.package]
 version = "0.5.0"
@@ -100,6 +107,26 @@ hex = "0.4"
 # --- native frontends ---
 fuser = "0.18"
 libc = "0.2"
+
+# --- the Extism plug-in ---
+# The PDK is the plug-in half of Extism's ABI: input/output through the
+# host's allocator rather than argument lists. It builds for native too, so
+# aloelite-extism is an ordinary workspace member and `cargo test` covers its
+# codec without a wasm runtime in the loop.
+extism-pdk = "1.4"
+# MessagePack's dynamic value, for reading arguments whose shape is not known
+# until the operation is named. Output does not go through it: records are
+# written straight to bytes by rmp-serde, the same writer the pack format
+# uses. aloelite-extism/src/value.rs says why the wire is MessagePack at all.
+rmpv = "1"
+# The MessagePack primitives under rmp-serde: a map header, a string, a bin.
+# What the reply envelope is built from, so a result already encoded is
+# concatenated rather than decoded and re-encoded.
+rmp = "0.8"
+# WASI's random_get (and the OS CSPRNG natively), wrapped in rand_core 0.10
+# by aloelite-extism/src/platform.rs. Aligned with the version ego-platform
+# resolves, so one copy lands in the binary.
+getrandom = "0.2"
 
 # --- browser ---
 wasm-bindgen = "0.2"

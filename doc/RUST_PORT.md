@@ -23,6 +23,12 @@ Three targets, as peers:
 | native (x86_64, aarch64; glibc and musl) | servers, laptops, containers | FUSE, CLI, and the manager's engine seat |
 | `wasm32-wasip2` | wasmtime and other WASI hosts | CLI; a component with the volume on the host filesystem |
 | `wasm32-unknown-unknown` | a browser, inside a Dedicated Worker | a page, over `postMessage`; the volume in OPFS |
+| `wasm32-wasip1` | an Extism host, in any language | the plug-in; MessagePack in, MessagePack out, the volume on a granted host path |
+
+The fourth arrived with the Extism frontend (2026-09-12) and is not a
+second WASI story: Extism instantiates core modules over wasmtime's
+preview-1 layer and cannot load a component, which the CLI is. One wasi-sdk
+serves both.
 
 "As peers" is load-bearing. The failure mode this plan is shaped against is
 not disagreement about whether WebAssembly matters; it is drift — a native
@@ -60,6 +66,8 @@ rust/
                           wasm-bindgen-test in a real browser
   aloelite-fuse/          the Linux FUSE daemon over fuser. native only, by nature
   aloelite-wasm/          the browser surface: wasm-bindgen, Dedicated Worker, OPFS
+  aloelite-extism/        the Extism plug-in: the Mount API over MessagePack, in
+                          a sandbox, from any language. wasm32-wasip1
   aloelite-cli/           the aloelite command. native + wasm32-wasip2
 ```
 
@@ -327,7 +335,7 @@ ported case for case through the built binary. It builds for
 `wasm32-wasip2` and runs as a component under wasmtime with the volume on a
 preopened host directory; CI builds and drives it there.
 
-**The seven crates are done.** What the port leaves as recorded follow-ups,
+**The eight crates are done.** What the port leaves as recorded follow-ups,
 not as missing pieces: the cross-mount POSIX lock upgrade (D-4), the pack
 concealment gap (D-8's finding), the era-1 migration policy (above), and the
 Postgres and MariaDB dialects, which were never in this sequence.

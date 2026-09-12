@@ -75,8 +75,50 @@ releases:
       surface with nothing holding them together is the one thing this tree
       has consistently refused. The table, the argument coercions and the
       dispatch now live in `aloelite-api`, generic over the value type a
-      frontend speaks. The browser is its first implementation, and nothing
-      a page can see has changed.
+      frontend speaks. The browser is its first implementation, and the
+      second is an Extism plug-in: the engine in a WebAssembly sandbox,
+      callable from any language with an Extism SDK, with the volume on a
+      host path the manifest grants.
+    added:
+      - |
+        **New crate: `aloelite-extism`, Aloelite as an Extism plug-in.**
+        Five exports -- `fs_open`, `fs_open_memory`, `fs_call`, `fs_close`,
+        `fs_operations` -- over MessagePack, dispatching the same
+        `aloelite-api` table the browser does. A host in Go, Python, Ruby,
+        PHP, Java, C# or anything else with an Extism SDK gets the Mount API
+        without a binding written for its language, and gets it inside a
+        sandbox that reaches exactly the paths the manifest names.
+
+        The target is `wasm32-wasip1`, the fourth this workspace builds for,
+        and it is Extism's constraint rather than a preference: its runtime
+        instantiates core modules over wasmtime's preview-1 layer and cannot
+        load a component, which is what `wasm32-wasip2` produces. Preview 1
+        also supplies the clock and the CSPRNG the engine asks for, so
+        nothing is threaded in as a host function. CI builds the plug-in and
+        runs it under a real Extism host.
+      - |
+        **The wire is MessagePack, for the reason the browser's integers are
+        `BigInt`.** JSON has no integer type distinct from a double and no
+        binary type: bytes would travel base64'd, and a nanosecond timestamp
+        -- around 2^60, where a double's spacing is 256 ns -- would come back
+        rounded by any host that parses into a double. MessagePack has
+        `int64` and `bin`, and the writer is `rmp-serde`'s `to_vec_named`,
+        byte-identical to Python's `msgpack.packb(use_bin_type=True)`.
+
+        Errors travel in the payload as `{error: {code, message}}` rather
+        than through Extism's error channel, which carries only a string:
+        the spec's error is a code, and a code glued to a message is not one.
+        Every export succeeds at the Extism level, including the ones that
+        failed, which a host has to be told.
+      - |
+        **Two things a host must get right, both learned the hard way.**
+        Plug-in memory must be at least 96 MiB: Argon2id at the format's
+        pinned 64 MiB runs inside the sandbox once per `create_volume` and
+        once per `mount`, and a 64 MiB cap fails as `oom`, which reads like a
+        bug in the plug-in and is not one. And a mount row is durable, so an
+        rw mount left behind by a closed instance meets the next one as
+        `mount_conflict`. `rust/aloelite-extism/README.md` is the host
+        author's page.
     changed:
       - |
         **New crate: `aloelite-api`, the Mount API dispatched by name.** It
@@ -108,6 +150,22 @@ releases:
         the strings that named JavaScript's own vocabulary ("a safe Number
         or a BigInt") are associated constants on the trait, so they follow
         the frontend rather than the dispatch.
+      - |
+        **Exports are prefixed `fs_`, because a wasm export is a symbol.** An
+        export named `open` collides with wasi-libc's and the linker refuses
+        the module, which is the harmless case. An export named `close` wins
+        instead: the linker never pulls libc's, SQLite reaches the platform
+        through a table of function pointers, and the first directory sync
+        calls `osClose(fd)` through a function that takes no arguments. What
+        that produces is `wasm trap: indirect call type mismatch`, four
+        frames inside SQLite, nowhere near the export that caused it.
+
+        Nothing on the plug-in's own side of the ABI could have found this,
+        which is why `aloelite-extism/harness/` exists and why CI runs it: a
+        small Extism host that loads the built `.wasm` and drives a real
+        workload through it. It is a separate workspace, since the host SDK
+        brings wasmtime and `cargo test` on the engine should not have to
+        build a WebAssembly runtime.
       - |
         **The projection test moved with the table it guards.** It holds
         `OPS` against `mount-api.yaml` in both directions -- every declared

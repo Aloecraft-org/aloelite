@@ -15,3 +15,5 @@ build
 
 # Rust (rust/ workspace)
 rust/target/
+# ...and the Extism harness, which is its own workspace and so its own target
+rust/aloelite-extism/harness/target/

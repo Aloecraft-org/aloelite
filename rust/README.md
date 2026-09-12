@@ -1,7 +1,7 @@
 # aloelite-rs
 
-The Rust implementation of the Aloelite Mount API. One workspace, seven
-crates, three targets. `doc/RUST_PORT.md` is the plan; `doc/DECISIONS.md` D-7 is the
+The Rust implementation of the Aloelite Mount API. One workspace, eight
+crates, four targets. `doc/RUST_PORT.md` is the plan; `doc/DECISIONS.md` D-7 is the
 storage decision this layout follows from.
 
 ```
@@ -13,14 +13,21 @@ aloelite-conformance/   conformance/ scenarios + vectors, under cargo test and
                         wasm-bindgen-test alike
 aloelite-fuse/          Linux FUSE daemon (fuser). native only
 aloelite-wasm/          browser surface. Dedicated Worker, volume in OPFS
+aloelite-extism/        the Extism plug-in: the Mount API over MessagePack,
+                        in a sandbox, from any language. wasm32-wasip1
 aloelite-cli/           the aloelite command. native + wasm32-wasip2
 ```
 
 | target | crates |
 |---|---|
-| native | all seven |
+| native | all eight |
+| `wasm32-wasip1` | core, api, extism |
 | `wasm32-wasip2` | core, api, store, conformance, cli |
 | `wasm32-unknown-unknown` | core, api, store, conformance, wasm |
+
+The two WASI targets are not a choice anyone deferred: Extism instantiates
+core modules over wasmtime's preview-1 layer and cannot load a component,
+and the CLI is a component. One wasi-sdk serves both.
 
 ## The one rule
 
@@ -50,7 +57,14 @@ wasm-bindgen --target web --typescript --out-dir pkg \
 cargo build -p aloelite-cli --target wasm32-wasip2 --release
 wasmtime run --dir=.::/work \
   target/wasm32-wasip2/release/aloelite.wasm -f /work/notebook.fs ls /   # the CLI as a WASI component
+cargo build -p aloelite-extism --target wasm32-wasip1 --release          # the Extism plug-in
+cargo run --release --manifest-path aloelite-extism/harness/Cargo.toml -- \
+  target/wasm32-wasip1/release/aloelite_extism.wasm "$(mktemp -d)"       # ...driven by a real host
 ```
+
+Both WASI targets need wasi-sdk's clang, through the three `CC_`/`AR_`/
+`CFLAGS_` variables `.cargo/config.toml` names — once per target triple,
+since cc-rs keys them that way.
 
 The wasm test run needs `wasm-bindgen-test-runner` at **exactly** the
 `wasm-bindgen` version in `Cargo.lock` — the bindgen schema is unstable and

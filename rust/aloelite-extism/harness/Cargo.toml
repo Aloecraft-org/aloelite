@@ -1,0 +1,19 @@
+# Deliberately NOT a workspace member (the parent excludes this directory).
+# It depends on the Extism host SDK, which brings wasmtime, and nobody
+# running `cargo test` on the engine should pay for a WebAssembly runtime
+# they are not using. CI builds the plug-in and then runs this.
+[package]
+name = "aloelite-extism-harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[dependencies]
+extism = "1.12"
+rmpv = "1"
+
+[workspace]

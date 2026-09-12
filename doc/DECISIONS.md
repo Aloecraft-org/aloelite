@@ -15,7 +15,7 @@ decision rather than a conversation. Uses the vocabulary of
 | D-4 | POSIX byte-range locks are per mount through FUSE; engine locks arbitrate across mounts; admission defaults to one rw mount per subtree, overlap is an opt-in. | 2026-08-26, amended 08-28 | implemented |
 | D-5 | Hardlinks: a leaf may be placed many times, a placement carries its own name, rename edits the placement; containers stay single-parent. | era-2 work; recorded 2026-09-02; amended era 3 | implemented; the record was written after the fact, and the name became unconditional in era 3 |
 | D-6 | Exactly which operations an advisory lock excludes, and which it deliberately does not. | 2026-08-31 | implemented, pinned in conformance |
-| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store; wire protocol; fuse), 09-03 (cli contract), 09-12 (dispatch crate) | implemented: all seven crates; every point left open is settled below |
+| D-7 | The Rust engine is one crate with zero `cfg` on native, WASI and the browser; how a connection is opened is a separate crate; the browser runs it in a Dedicated Worker over OPFS. | 2026-09-02, amended 09-02 (store; wire protocol; fuse), 09-03 (cli contract), 09-12 (dispatch crate; Extism frontend) | implemented: all eight crates, on four targets; every point left open is settled below |
 | D-8 | The pack blob format moves to v2 once, carrying uid/gid/mode, xattrs and retention; not atime, ctime or hardlink identity. v1 stays readable forever. | 2026-09-02 | implemented (Python and Rust) |
 
 How to read a record: what was decided, why, what it obliges, and what it
@@ -566,6 +566,48 @@ concealment gap noted under D-8, and the era-1 migration policy in
   builds it for all three targets alongside `aloelite-core`. Which is the
   test of whether the split was drawn in the right place: if the shared
   dispatch had needed a `cfg`, the line was wrong.
+
+### Settled since (2026-09-12, when `aloelite-extism` was written)
+
+- **The plug-in target is `wasm32-wasip1`, and that is Extism's constraint,
+  not a preference.** Extism's runtime instantiates core modules over
+  `wasi_common` — wasmtime's preview-1 layer — and cannot load a component,
+  which is what `wasm32-wasip2` produces. Preview 1 also hands the engine
+  both things it takes from the world, `clock_time_get` and `random_get`, so
+  nothing has to be threaded in as a host function. The alternative,
+  `wasm32-unknown-unknown`, is not available at all: there rusqlite swaps in
+  `sqlite-wasm-rs`, whose libc shim reaches JavaScript for entropy and
+  `localtime`, and an Extism host has no JavaScript to reach.
+- **The wire is MessagePack.** The same question the browser answered with
+  `BigInt`, asked again: JSON has no integer type distinct from a double and
+  no binary type, so bytes would travel base64'd and a nanosecond timestamp
+  would come back rounded in any host that parses into a double. MessagePack
+  has `int64` and `bin`. The writer is `rmp-serde`'s `to_vec_named`, the
+  same codec the pack format uses. Implication: a host converts to JSON on
+  its own side if it wants to, where it can see what it is giving up.
+- **Errors travel in the payload, not Extism's error channel.** The same
+  shape and the same reason as the browser's `postMessage` protocol: the
+  spec's error is a code, and a channel that carries only a string would
+  deliver it glued to the message. Every export answers `{ok}` or
+  `{error: {code, message}}` and none of them fails at the Extism level,
+  which a host has to be told.
+- **Exports are prefixed `fs_`, because a wasm export is a symbol.** An
+  export named `open` collides with wasi-libc's and the linker refuses the
+  module; an export named `close` wins instead, SQLite reaches the platform
+  through function pointers, and the first directory sync traps four frames
+  in with `indirect call type mismatch`. The prefix is the fix and
+  `harness/` is the guard: a small Extism host, kept out of the workspace
+  because the host SDK brings wasmtime, that CI runs against the built
+  `.wasm`. Nothing on the plug-in's own side of the ABI could have caught
+  this.
+- **Left open.** The volume is a file on a granted host path. The other
+  shape `aloelite-store` already has — the whole volume in memory,
+  checkpointed to a `BlobStore` through host functions, which would let the
+  host keep the bytes anywhere — is not implemented, and wants
+  `ego_platform` to compile for preview 1 first: its `detect()` gates the
+  WASI arm on `target_env = "p2"`, so this crate carries its own clock and
+  entropy in the meantime (`src/platform.rs`, thirty lines, deleted when
+  that lands).
 
 ## D-8: The pack format moves to v2 once, carrying what v1 drops, before any further port writes a pack
 
