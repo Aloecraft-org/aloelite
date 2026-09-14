@@ -174,6 +174,35 @@ host path the manifest grants.
   and so far only entry marked, and `latest_requires` now names
   `mirror` alongside `stable`, so the newest release cannot claim
   `latest` without the question having been answered.
+- **The wheel that ships is now the wheel that was tested.**
+  `ALIGNMENT.md` §9 grew a third gate, and it is the one no other gate
+  in this repository could have covered: CI installs this package with
+  `pip install -e .`, which resolves it out of the source tree, so a
+  packaging mistake is invisible to a green suite. The `python` job
+  now installs the wheel it just built into a clean virtualenv and
+  imports `aloelite.cli`, `manager.engine` and `manager.ui` through it,
+  then runs the console entry point.
+
+  The subpackages are the whole of it. aloeschema published five wheels
+  with `aloeschema.data` simply absent -- `packages.find`'s `include`
+  named the parent and setuptools does not imply children -- while its
+  suite passed throughout. This tree is not carrying that bug: its
+  globs are `["aloelite*", "manager*"]`, confirmed against the
+  published 0.4.0 wheel pulled from PyPI rather than a local build. The
+  gate is what keeps it true unattended, and it was run in both
+  directions before being trusted -- the real wheel passes, one built
+  with the globs removed is rejected with `ModuleNotFoundError: No
+  module named 'manager.engine'`. A gate only ever seen to pass is not
+  yet a gate.
+- **`publish.yml` must never be renamed, and now says so.** PyPI's
+  trusted publisher is a tuple of owner, repository, workflow FILENAME
+  and environment, so a rename revokes the grant -- and because a tag's
+  OIDC claim resolves from the commit the tag points at, renaming the
+  file back cannot rescue a tag that already exists. aloeschema lost
+  `0.3.0` to exactly this and cut `0.3.1` only to carry the rename.
+  Nothing in a tree otherwise says that filename is load-bearing, which
+  is why the warning belongs at the top of the file rather than in a
+  document.
 - **The one invariant that does not generalise moved to
   `script/checks.py`.** The engine calls it if it exists. For aloelite
   it is `SCHEMA_ERA` in `aloelite/db.py` against the era the newest
@@ -239,7 +268,12 @@ host path the manifest grants.
   compatibility is verified by named field and never by reading digits
   out of a version. The `branch` line is derived from which remote
   branch contains the commit, since a tag push carries no branch at
-  all.
+  all -- and it takes the DEFAULT branch among the candidates rather
+  than the first one listed, which is `ALIGNMENT.md` revision 5's
+  first finding and is a real difference here: a released commit sits
+  on `main` and on the branch it was developed on, `git branch -r`
+  lists them alphabetically, and `3b8c9e5` in this repository resolves
+  to a `claude/...` branch under a bare `head -1`.
 - **Releasing gates on the tests.** `release.yml`'s builds ran in
   parallel with `main.yml`'s matrix on the same commit -- two
   independent workflow runs with nothing connecting them -- so pushing

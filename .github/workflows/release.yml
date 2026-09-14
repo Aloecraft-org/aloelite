@@ -155,10 +155,21 @@ jobs:
           SHA="${{ steps.plan.outputs.sha }}"
           # A tag push carries no branch: github.ref IS the tag. Find one that
           # contains the commit and record what was found, not a guess.
+          #
+          # PREFER THE DEFAULT BRANCH, never the first one listed. A released
+          # commit is normally on `main` AND on the branch it was developed
+          # on, and `git branch -r` lists them alphabetically -- so a bare
+          # `head -1` picks whichever sorts first, which is usually not
+          # `main`. ALIGNMENT.md §5; aloeschema shipped a feature branch in
+          # its v0.3.0 BUILDINFO.txt this way, and `3b8c9e5` in this
+          # repository resolves to a `claude/...` branch under `head -1`.
           BRANCH="${{ inputs.ref }}"
           if [[ -z "$BRANCH" || "$BRANCH" == v* ]]; then
-            BRANCH=$(git branch -r --contains "$SHA" --format='%(refname:lstrip=3)' \
-                     | grep -vx HEAD | head -1)
+            CANDIDATES=$(git branch -r --contains "$SHA" --format='%(refname:lstrip=3)' \
+                         | grep -vx HEAD)
+            DEFAULT="${{ github.event.repository.default_branch }}"
+            BRANCH=$(printf '%s\n' "$CANDIDATES" | grep -xF "$DEFAULT" \
+                     || printf '%s\n' "$CANDIDATES" | head -1)
           fi
           FIELD() { python -c "import re,sys; m=re.search(sys.argv[2], open(sys.argv[1]).read(), re.M); print(m.group(1) if m else '')" "$1" "$2"; }
           mkdir -p dist
@@ -274,6 +285,29 @@ jobs:
           EOF
           grep -m1 '^version' pyproject.toml
       - run: python -m build
+      # ALIGNMENT.md §9's third gate: install WHAT IS ABOUT TO BE PUBLISHED
+      # into a clean environment and exercise the entry point through it. An
+      # editable install is not that and neither is a green suite -- CI
+      # resolves the package straight from the source tree, so a packaging
+      # mistake is invisible to every other gate. aloeschema published five
+      # unusable wheels that way, its `aloeschema.data` subpackage absent
+      # from every one, while its tests passed.
+      #
+      # The subpackages are the point: `manager.engine` and `manager.ui` are
+      # exactly what `packages.find`'s include globs have to have matched.
+      - name: The built wheel actually works
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/python - <<'SMOKE'
+          import aloelite.cli, manager.engine, manager.ui
+          from aloelite.db import SCHEMA_ERA
+          assert SCHEMA_ERA, "no schema era"
+          print("packages present, schema era", SCHEMA_ERA)
+          SMOKE
+          /tmp/smoke/bin/aloelite --version
       - uses: actions/upload-artifact@v4
         with:
           name: dist-python

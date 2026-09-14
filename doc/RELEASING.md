@@ -13,7 +13,7 @@ How a version of Aloelite goes out, end to end. Everything downstream of
 > version scheme, `.technoproj`'s `pre`, and artifact names with no version in
 > them — §5's `BUILDINFO.txt`, §6's `SHA256SUMS.txt`, §7's dev builds (which
 > `nightly.yml` cuts and `publish.yml` keeps off PyPI), §8's Python rules and
-> §9's two gates. Its §3 is the reason the release tooling is
+> §9's three gates. Its §3 is the reason the release tooling is
 > [technoproj](https://github.com/Aloecraft-org/technoproj), installed in CI
 > and pinned rather than copied into this tree, and aloelite is mirrored from
 > its changelog, so `emit_json` is on and `changelog.json` is committed.
@@ -115,7 +115,12 @@ Three workflows run on `v*`, independently:
 
 - **`main.yml`** — the CI matrix, on the tagged commit. It ignores
   `v*-dev.*`: skipping the slow suites is what that suffix buys.
-- **`publish.yml`** — PyPI, by trusted publishing. A candidate is a PyPI
+- **`publish.yml`** — PyPI, by trusted publishing. **Its filename is part of
+  the grant** — owner, repository, workflow filename, environment — so
+  renaming it revokes the publisher, and a tag's OIDC claim resolves from the
+  commit the tag points at, which means the rename cannot be repaired for a
+  tag that already exists (`ALIGNMENT.md` §8; aloeschema spent a version
+  finding this out). The file says so at the top. A candidate is a PyPI
   pre-release, which `pip` skips unless asked. It ignores `v*-dev.*` tags:
   `0.5.0-dev.7` is a valid PEP 440 version and would upload without
   complaint, and a PyPI upload can be yanked but never replaced or reused
@@ -152,6 +157,35 @@ Two exemptions, both deliberate: a dry run publishes nothing so the gate
 no-ops, and a `-dev.<n>` build skips it, which is what that suffix is for
 (`ALIGNMENT.md` §7). A re-run dispatch with `publish` on is *not* exempt — it
 finds the original tag push's run and passes on it.
+
+### And the wheel that ships is the wheel that was tested
+
+A green suite is not the same claim as a working artifact, and `ALIGNMENT.md`
+§9's third gate is the difference. CI installs this package with `pip install
+-e .`, which resolves it straight out of the source tree — so a packaging
+mistake is invisible to every other gate in this document. The `python` job
+therefore installs **the wheel it just built** into a clean virtualenv and
+imports through it:
+
+```
+aloelite.cli, manager.engine, manager.ui   the subpackages
+aloelite --version                         the console entry point
+```
+
+The subpackages are the whole point. `aloeschema` published five wheels whose
+`aloeschema.data` was simply absent — `packages.find`'s `include` named the
+parent and setuptools does not imply children — while its tests passed
+against the source tree throughout.
+
+This repository is not carrying that bug: its `include` is
+`["aloelite*", "manager*"]`, and the globs match `manager.engine` and
+`manager.ui`. That was confirmed against the **published** 0.4.0 wheel from
+PyPI, not just against a local build. The gate exists so that it stays true
+without anyone checking again, and it was run in both directions before being
+trusted — against the real wheel, which passes, and against one built with
+the `include` globs removed, which it rejects with `ModuleNotFoundError: No
+module named 'manager.engine'`. §9's own rule: a gate that has only ever been
+seen to pass is not yet a gate.
 
 `release.yml` publishes, for a version `V`:
 

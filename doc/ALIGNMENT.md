@@ -1,8 +1,8 @@
 # Versioning, artifacts and release alignment
 
-**Revision 4.** Status: proposal. The shared tooling exists at
-[Aloecraft-org/technoproj](https://github.com/Aloecraft-org/technoproj); no
-project repository has been changed yet.
+**Revision 5.** Status: in force. The shared tooling exists at
+[Aloecraft-org/technoproj](https://github.com/Aloecraft-org/technoproj), and
+aloeschema is the first repository migrated to it.
 **Applies to:** diluvium, diluvium-drt, diluvium-lab, dollup, aloelite,
 xtrshow, aloeschema.
 
@@ -14,6 +14,33 @@ at the end saying what each one has to change.
 Rules marked **Verified** were checked against a real toolchain, not assumed.
 Each carries a worked counter-example showing what breaks. They should not be
 "simplified" away.
+
+### What changed in revision 5
+
+The first repository actually migrated (aloeschema, now on 0.3.3). Four
+things came back, and none of them could have been found by reading:
+
+- **§5's branch derivation named the wrong branch.** Revision 4 fixed the
+  empty case with `fetch-depth: 0`, but a released commit is on the default
+  branch *and* on the branch it was developed on, and `head -1` takes them
+  alphabetically. aloeschema's `v0.3.0` recorded a feature branch in
+  `BUILDINFO.txt` despite being released from `main`. So revision 4's claim
+  that *every code block below has been executed* held only for the case each
+  block was executed in — a snippet can be run and still be wrong.
+- **§7 credited `actionlint` with more than it does.** It catches `tags` plus
+  `tags-ignore`; it does not catch a negation with no positive pattern, which
+  lints clean and matches nothing.
+- **§8 gains the hazard that cost a release.** PyPI's trusted publisher
+  includes the workflow **filename**, so renaming the publish workflow
+  revokes it — and because a tag's claim resolves from the commit it points
+  at, the rename cannot be undone for a tag that already exists.
+- **§9 gains a third gate.** Both existing gates passed on every aloeschema
+  release while the published wheel was missing its ontology, because CI
+  installs editable and no gate ever looked at the artifact.
+
+The through-line is the one revision 4 started: a rule is only verified in
+the case it was tried in. Three of these four were found by a repository
+doing the thing, not by review.
 
 ### What changed in revision 4
 
@@ -488,8 +515,11 @@ and record what you actually found rather than guessing:
 ```
 
 ```sh
-BRANCH=$(git branch -r --contains "$SHA" --format='%(refname:lstrip=3)' \
-         | grep -vx HEAD | head -1)
+CANDIDATES=$(git branch -r --contains "$SHA" --format='%(refname:lstrip=3)' \
+             | grep -vx HEAD)
+DEFAULT="${{ github.event.repository.default_branch }}"
+BRANCH=$(printf '%s\n' "$CANDIDATES" | grep -xF "$DEFAULT" \
+         || printf '%s\n' "$CANDIDATES" | head -1)
 echo "branch: ${BRANCH:-(detached)}"
 ```
 
@@ -502,6 +532,21 @@ no remote branches at all for `--contains` to search:
 default checkout (depth 1, tag ref only):   BRANCH = []
 fetch-depth: 0 (full history, all refs):    BRANCH = [main]
 ```
+
+**Take the default branch, not the first one listed.** A released commit is
+normally on the default branch *and* on the branch it was developed on, and
+`git branch -r` lists them alphabetically — so a bare `head -1` prefers
+whichever sorts first, which is usually not `main`:
+
+```
+branches containing the commit:  claude/charming-mayer-foqboi, main
+head -1                       →  claude/charming-mayer-foqboi
+prefer the default branch     →  main
+```
+
+aloeschema's `v0.3.0` shipped that first answer, in a `BUILDINFO.txt` whose
+`commit:` was on `main`. The merge had already happened; the snippet recorded
+the feature branch regardless, and nothing about the release looked wrong.
 
 For a manual dispatch the input ref is authoritative and should be used
 directly — no fetch depth needed. A nightly or branch dev build **must**
@@ -591,8 +636,10 @@ on:
     tags: ['v*', '!v*-dev.*']
 ```
 
-Three things about that one line, all of which GitHub enforces, and all of
-which `actionlint` will tell you about:
+Three things about that one line, all of which GitHub enforces. Only the
+first is caught by `actionlint`; the other two lint clean and fail at
+runtime, which is the wrong way round for the two that are easier to get
+wrong:
 
 - **One `tags` list with a `!` negation — never `tags` plus `tags-ignore`.**
   Actions rejects both filters on one event: *"both `tags` and `tags-ignore`
@@ -606,6 +653,8 @@ which `actionlint` will tell you about:
 - **Order is load-bearing.** A matching negative pattern *after* a positive
   match excludes the ref. Put the `!` second or it does nothing.
 - **At least one non-`!` pattern is required.** Only negations match nothing.
+  `actionlint` does not flag this — `tags: ['!v*-dev.*']` on its own lints
+  clean and silently matches no tag, so the workflow simply never fires.
 
 §7 says prune old dev releases. That works on GitHub. It does not work on
 PyPI, which is why the exclusion is not optional.
@@ -628,16 +677,37 @@ PyPI, which is why the exclusion is not optional.
 ## 8. Python projects
 
 Three repositories publish to PyPI: xtrshow, aloelite, aloeschema. The rules
-above apply with three adjustments, all of them already stated but collected
-here because they were each discovered separately:
+above apply with four adjustments, collected here because they were each
+discovered separately:
 
 1. **`pyproject.toml` holds the PEP 440 spelling**, derived from the tag body
    (§1). It is the one file that does not hold the canonical form.
 2. **Wheels and sdists keep their versioned filenames** (§4).
 3. **The publish trigger must exclude `-dev.` tags** (§7), and PyPI is
    immutable, so this is a before-not-after change.
+4. **The publish workflow's FILENAME is part of PyPI's trusted publisher.**
+   The grant is a tuple — owner, repository, workflow filename, environment —
+   so renaming the workflow revokes it exactly as changing the repository
+   would. This is §4's rename hazard one layer up, and it is worse in two
+   ways. Nothing in the repository says the name is load-bearing, so the
+   rename looks free. And a tag's OIDC claim resolves from **the commit the
+   tag points at**, so it cannot be repaired afterwards: renaming the file
+   back on the default branch does nothing for a tag that already exists,
+   and only a new tag whose commit carries the right filename can publish.
 
-A fourth, for anyone adopting `stamps`: `version.mk`'s old `_sync_version`
+   aloeschema renamed `publish.yml` to `release.yml` as a tidy-up. The
+   upload for `v0.3.0` was refused with every other claim matching:
+
+   ```
+   invalid-publisher: valid token, but no corresponding publisher
+   workflow_ref: .../release.yml@refs/tags/v0.3.0
+   ```
+
+   It failed closed, so no version was spent — but `0.3.0` could not be
+   rescued and `0.3.1` exists only to carry the rename. Say so at the top of
+   the workflow, or change the publisher on PyPI in the same commit.
+
+A fifth, for anyone adopting `stamps`: `version.mk`'s old `_sync_version`
 target writes `.package.version`, which is a **Cargo** path. `pyproject.toml`
 has no `[package]` table — only `[build-system]`, `[project]`, `[tool]`. The
 target has therefore never worked in any Python repository; it adds a bogus
@@ -649,7 +719,7 @@ a `stamps` entry that actually fails when the two disagree.
 
 ## 9. Release-workflow requirements
 
-Two gates that several repositories lack. Both are cheap and both have
+Three gates that several repositories lack. All are cheap and all have
 already bitten someone here.
 
 ### Publishing gates on tests
@@ -677,6 +747,42 @@ the same class of drift already visible — `Cargo.toml` at `0.0.2`, the only
 tag `v0.0.1`.
 
 `technoproj-changelog release-check --tag "$TAG"` is this gate. Run it in preflight.
+
+### The built artifact must work
+
+The last thing before publishing should install **what is about to be
+published**, into a clean environment, and exercise the project's entry point
+through it. An editable install is not that, and neither is a green test
+suite.
+
+Every gate above passed on every aloeschema release while the published wheel
+was unusable. `aloeschema.data` was absent from every wheel and sdist ever
+published — `[tool.setuptools].packages` named only the parent package, and
+setuptools does not imply subpackages — so `load_schema_org()` raised
+`ModuleNotFoundError` on any `pip install`, and the first example in the
+README had been broken since 0.2.0.
+
+It survived because CI installs with `pip install -e .`, which resolves the
+package straight from `src/`. The suite passed against the source tree while
+the artifact it produced did not work, and nothing ever looked at the
+artifact. A second bug was hiding behind it — a guard that rejected every
+datatype range — unreachable because the README example that exercises it
+could not run at all.
+
+```yaml
+- name: The built wheel actually works
+  run: |
+    python -m venv /tmp/smoke
+    /tmp/smoke/bin/pip install --quiet release_dist/*.whl
+    /tmp/smoke/bin/python - <<'SMOKE'
+    from aloeschema import load_schema_org
+    assert load_schema_org()["types"], "empty ontology"
+    SMOKE
+```
+
+Test it in both directions before trusting it. This one passes the fixed
+wheel and rejects the published `0.3.1` wheel with `ModuleNotFoundError`. A
+gate that has only ever been seen to pass is not yet a gate.
 
 ---
 

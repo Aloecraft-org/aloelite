@@ -1,5 +1,23 @@
 name: Publish to PyPI
 
+# DO NOT RENAME THIS FILE.
+#
+# PyPI's trusted publisher is a tuple -- owner, repository, WORKFLOW
+# FILENAME, environment -- so renaming this workflow revokes the grant
+# exactly as moving the repository would, and nothing in the tree says the
+# name is load-bearing. Worse, a tag's OIDC claim resolves from the commit
+# the tag points at, so the rename cannot be undone after the fact: renaming
+# the file back on the default branch does nothing for a tag that already
+# exists, and only a new tag whose commit carries the right filename can
+# publish.
+#
+# aloeschema renamed its `publish.yml` as a tidy-up and lost a version to it
+# -- `v0.3.0` was refused with every other claim matching, and `0.3.1` exists
+# only to carry the rename. It fails closed, so nothing is published wrongly;
+# the version is simply spent. doc/ALIGNMENT.md §8.
+#
+# If it must be renamed, change the publisher on PyPI in the same commit.
+
 on:
   push:
     # A -dev.<n> tag must never reach PyPI. `0.4.0-dev.7` normalises to the
