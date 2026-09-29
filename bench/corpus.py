@@ -363,17 +363,17 @@ class ExtismBackend(Backend):
         self.call("append", mount=self.m, path=path, data=data)
 
     def mkdir(self, path: str) -> None:
-        """`create_container` is one level and refuses an existing name; the
-        `parents=True, exist_ok=True` the other backends get from their own
-        facade is spelled out here."""
+        """`create_container` is one level and does NOT refuse an existing
+        name: it places a new same-name sibling, and the newest sibling is
+        the visible one (NODE-5), so the old container and everything under
+        it stop resolving. The `parents=True, exist_ok=True` the other
+        backends get from their own facade is spelled out here the way those
+        facades spell it -- `exists` first, create only what is missing."""
         walked = ""
         for segment in path.strip("/").split("/"):
             walked += "/" + segment
-            try:
+            if not self.call("exists", mount=self.m, path=walked):
                 self.call("create_container", mount=self.m, path=walked)
-            except ExtismCallError as e:
-                if e.code not in ("already_exists", "name_taken"):
-                    raise
 
     def listdir(self, path: str) -> list[str]:
         return [e["name"] for e in self.call("list", mount=self.m, path=path)]
