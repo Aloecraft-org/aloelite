@@ -1,0 +1,5 @@
+# Changes here need the owner's review.
+/doc/lockstep/      @aloecraft
+/.claude/CLAUDE.md  @aloecraft
+/.claude/rules/     @aloecraft
+/.github/CODEOWNERS @aloecraft

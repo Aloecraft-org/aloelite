@@ -1,0 +1,54 @@
+version: 1
+owner: null   # technoproj: fill in
+
+tiers:
+  autonomous:
+    - edit files in this repo on a run branch (operating.md step 5)
+    - open pull requests in this repo
+    - commit to main without a pull request when every change is inside self_merge
+    - read repos and URLs listed in sources.yaml
+    - spawn subagents within limits
+    - in a batch, branch a step from an earlier unmerged step of the
+      same batch (operating.md, Batches)
+  approve_first:
+    - merge to main, except inside self_merge
+    - any change to .claude/CLAUDE.md, .claude/rules/, authority.yaml or goal.md
+    - any write outside this repo
+    - any message to a person other than the owner
+    - any public post
+    - any spend
+    - production changes
+    - new credentials or wider scope
+    - reading untrusted input
+  never:
+    - manufactured reviews, mentions, testimonials or accounts
+    - presenting as a human
+    - deleting or exporting customer data
+    - touching credentials outside granted scope
+
+# Changes the operator may commit to main without review: its own
+# notes and log. Everything else, and anything the owner reads as a
+# rule or as agreed truth, goes through a pull request.
+self_merge:
+  paths:
+    - .claude/**
+    - doc/lockstep/queue.md   # new items only, see conditions
+  except:
+    - .claude/CLAUDE.md
+    - .claude/rules/**
+  conditions:
+    - adds or edits only; deleting a file goes through a pull request
+    - .claude/log.md is append only; past entries are never rewritten
+    - doc/lockstep/queue.md takes only a new item appended at the end,
+      in state open; editing, applying or deleting an item goes through
+      a pull request
+    - commit message starts with "self-merge:"
+    - the run's log entry names each self-merge commit
+
+# Write lanes granted so far. Added by the owner only, one at a time.
+lanes: []
+
+limits:
+  subagents_per_run: 4
+  spend_usd: 0
+  run_minutes: 60
