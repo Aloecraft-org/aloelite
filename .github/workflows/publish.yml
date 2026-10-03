@@ -18,44 +18,62 @@ name: Publish to PyPI
 #
 # If it must be renamed, change the publisher on PyPI in the same commit.
 
+# How a release reaches this file: release.yml's publish leg, the shared
+# release-publish.yml, dispatches it with the tag once the GitHub release
+# exists. A tag that leg creates is made by GITHUB_TOKEN and so starts no
+# `on: push: tags:` run -- GitHub's recursion guard, which cannot be turned
+# off -- and the dispatch is the documented exception. technoproj
+# doc/STANDARD.md Part 2.
+#
+# There is deliberately NO tag-push trigger any more. A hand-pushed tag runs
+# release.yml, which dispatches this; a push trigger as well would upload
+# the same version twice and fail the second run. Retrying a run that died
+# of infrastructure is the same dispatch, by hand, with the tag.
+
 on:
-  push:
-    # A -dev.<n> tag must never reach PyPI. `0.4.0-dev.7` normalises to the
-    # perfectly valid PEP 440 version `0.4.0.dev7` and uploads without
-    # complaint -- and a PyPI upload is IMMUTABLE: yankable, never replaced
-    # and never reused. Pruning works on GitHub releases and does not work
-    # here, which is why this exclusion goes in before the first dev tag is
-    # cut rather than after. doc/ALIGNMENT.md §7, non-negotiable 7.
-    #
-    # The exclusion is a `!` pattern inside `tags`, NOT a `tags-ignore` block:
-    # Actions refuses a workflow that carries both filters for one event, and
-    # refuses it at load time -- the run appears named after the file, with
-    # zero jobs, which is not obviously a syntax error from the outside.
-    # Later patterns win, so the negative has to come second.
-    tags:
-      - "v*"
-      - "!v*-dev.*"
-  # A tag pushes once. When the tag-triggered run dies for reasons that have
-  # nothing to do with the code -- the 2026-08-06 Actions outage failed every
-  # job at "Getting action download info" -- there is otherwise no way to
-  # retry short of deleting and re-pushing the tag. Dispatch the tag instead.
   workflow_dispatch:
     inputs:
-      ref:
-        description: "Tag to build and publish (e.g. v0.3.3)"
+      tag:
+        description: "Tag to build and publish (e.g. v0.5.0). Never a -dev.<n> tag."
+        type: string
         required: true
 
 jobs:
+  # A -dev.<n> tag must never reach PyPI. `0.4.0-dev.7` normalises to the
+  # perfectly valid PEP 440 version `0.4.0.dev7` -- and worse, the tree a dev
+  # tag names still says `0.5.0` in pyproject.toml, so building it here would
+  # upload a FINAL 0.5.0. A PyPI upload is IMMUTABLE: yankable, never
+  # replaced and never reused. The shared publish leg hands every tag it
+  # releases to this file, dev builds included, so the refusal lives here.
+  # A dev tag skips the jobs below rather than failing, so a nightly does
+  # not leave a red run behind. doc/ALIGNMENT.md §7, non-negotiable 7.
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.tag.outputs.publish }}
+    steps:
+      - id: tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in
+            v*-dev.*) echo "::notice::$TAG is a dev build -- not for PyPI"; echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            v*)       echo "publishing $TAG";                              echo "publish=true"  >> "$GITHUB_OUTPUT" ;;
+            *)        echo "::error::'$TAG' is not a v* tag"; exit 1 ;;
+          esac
+
   build:
+    needs: guard
+    if: needs.guard.outputs.publish == 'true'
     runs-on: ubuntu-latest
 
     steps:
-      # On a tag push `inputs.ref` is empty and this is the tag, as before.
-      # On a manual dispatch it is the tag typed into the input, so the build
-      # is of that release -- not of whatever branch the dispatch came from.
+      # The tag typed into (or handed to) the input, so the build is of that
+      # release -- not of the default branch this was dispatched on.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: refs/tags/${{ inputs.tag }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -82,6 +100,7 @@ jobs:
       url: https://pypi.org/project/aloelite/
 
     permissions:
+      contents: read     # naming id-token alone would drop this to none
       id-token: write
 
     steps:

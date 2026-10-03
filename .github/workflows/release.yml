@@ -1,16 +1,23 @@
 name: Release
 
 # A `v*` tag builds every format and publishes the GitHub release, with the
-# container image on GHCR. Two other paths build the identical matrix and
-# publish nothing -- the dry run that proves the pipeline before a tag
-# exists, artifacts left on the run with a manifest in the job summary:
-# a push that changes this file (so an edit to the release pipeline tests
-# itself; `paths` filters are not applied to tag pushes, so tags still always
-# run), and a manual dispatch from any ref with `publish` off. Re-running a
-# tag's release is the dispatch with the tag as `ref` and `publish` on; the
-# release is updated in place and its assets replaced, so a run that died of
-# infrastructure needs no new tag. (A dispatch by file name works once the
-# workflow exists on the default branch, which is how GitHub registers it.)
+# container image on GHCR and the wheel handed to publish.yml for PyPI.
+# Two other paths build the identical matrix and publish nothing -- the
+# rehearsal that proves the pipeline before a tag exists, artifacts left on
+# the run with a manifest in the job summary: a push that changes this file
+# (so an edit to the release pipeline tests itself; `paths` filters are not
+# applied to tag pushes, so tags still always run), and a manual dispatch
+# from any ref with `publish` off. `technoproj release cut --tag vX.Y.Z` is
+# the dispatch that publishes; the workflow creates the tag itself. An
+# existing tag is a re-run: the release is updated in place and its assets
+# replaced, so a run that died of infrastructure needs no new tag.
+#
+# The two halves that are the same in every Aloecraft repository are
+# technoproj's shared workflows (doc/ALIGNMENT.md §3, technoproj
+# doc/STANDARD.md Part 2): `preflight` settles which tag, which commit,
+# whether this run publishes and what the changelog says; `publish` writes
+# BUILDINFO.txt and SHA256SUMS.txt, creates the tag and the release, and
+# hands the tag to publish.yml. Everything between them is this project's.
 #
 # What a tag produces, and from where:
 #   Python wheel + sdist          `python -m build`
@@ -19,7 +26,7 @@ name: Release
 #   aloelite_complete_<platform>  every binary for that platform, + BUILDINFO
 #   aloelite_wasi.wasm            the CLI as a WASI component
 #   aloelite_web.tar.gz           the browser package (ES module, .wasm, .d.ts)
-#   BUILDINFO.txt                 tag, version, commit, branch, schema era
+#   BUILDINFO.txt                 tag, version, commit, branch, built, api_version
 #   SHA256SUMS.txt                over all of the above
 #
 # Asset names follow doc/ALIGNMENT.md §4: a fixed platform vocabulary rather
@@ -29,8 +36,8 @@ name: Release
 #   ghcr.io/<owner>/aloelite:<v>  the manager image, amd64 + arm64
 #                                 (`:latest` too when the release is stable)
 # The release body is CHANGELOG.yaml's entry for the tag, rendered by
-# technoproj-changelog, which also decides `prerelease`. PyPI is publish.yml,
-# unchanged, on the same tag. doc/RELEASING.md walks the whole procedure.
+# technoproj-changelog, which also decides `prerelease`. doc/RELEASING.md
+# walks the whole procedure.
 
 on:
   push:
@@ -40,151 +47,94 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Tag or branch to build (empty: the ref this was dispatched from)"
+        description: "Commit, branch or tag to build (blank = the ref this was dispatched from)"
+        type: string
+        required: false
+        default: ""
+      tag:
+        description: "Tag name, e.g. v0.5.0. Required when publishing; created if it does not exist."
+        type: string
         required: false
         default: ""
       publish:
-        description: "Publish the GitHub release and push the image (ref must be a v* tag)"
+        description: "Publish. Leave off for a rehearsal."
         type: boolean
+        required: false
         default: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  # What is being built, and whether it is being published. One place, so
-  # every job below agrees on the version string in asset names.
+  # Which tag, which commit, whether this publishes, and the changelog gate.
+  # Every job below builds from `needs.preflight.outputs.sha`, never from
+  # github.sha, so the assets and the notes come from one tree.
+  #
+  # `inputs.publish` is a boolean from the UI and a string from the API --
+  # nightly.yml dispatches this with `gh workflow run`, which sends "true".
+  # The shared workflow takes a boolean, so it is coerced here.
+  preflight:
+    uses: Aloecraft-org/technoproj/.github/workflows/release-preflight.yml@v0.3.1
+    with:
+      ref: ${{ inputs.ref }}
+      tag: ${{ inputs.tag }}
+      publish: ${{ inputs.publish == true || inputs.publish == 'true' }}
+
+  # What this project builds around the shared halves: the platform matrix,
+  # sliced for a dev build, the PEP 440 spelling a dev wheel is stamped with,
+  # and a BUILDINFO.txt for the `complete` archives to carry. The release's
+  # own BUILDINFO.txt is written by the publish leg from the same inputs, so
+  # the two differ only in `built:`.
   plan:
+    needs: preflight
     runs-on: ubuntu-latest
     outputs:
-      ref: ${{ steps.plan.outputs.ref }}
-      tag: ${{ steps.plan.outputs.tag }}
-      version: ${{ steps.plan.outputs.version }}
-      prerelease: ${{ steps.plan.outputs.prerelease }}
-      publish: ${{ steps.plan.outputs.publish }}
-      sha: ${{ steps.plan.outputs.sha }}
-      dev: ${{ steps.plan.outputs.dev }}
-      pep440: ${{ steps.plan.outputs.pep440 }}
+      pep440: ${{ steps.pep440.outputs.pep440 }}
       matrix: ${{ steps.matrix.outputs.include }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          # `git branch -r --contains` needs the remote branches, and the
-          # default shallow clone has none. BUILDINFO's `branch` line is the
-          # only thing that distinguishes two dev builds cut from different
-          # branches (ALIGNMENT.md §5), so it is worth a full fetch here.
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      # The shared release engine (doc/ALIGNMENT.md §3), which brings PyYAML.
-      # Pinned to a release tag: a release pipeline that tracks a moving
-      # branch changes when nobody touched it.
-      - run: pip install "git+https://github.com/Aloecraft-org/technoproj@v0.3.0"
-      - id: plan
+      # `0.5.0-dev.1` -> `0.5.0.dev1`, which is what PEP 440 makes of that
+      # tag and what sorts below every other prerelease of 0.5.0. Only a dev
+      # build is stamped with it; every other version is already the tree's,
+      # held to pyproject.toml by `consistency` in preflight.
+      - id: pep440
         shell: bash
-        run: |
-          REF="${{ inputs.ref || github.ref }}"
-          # Only a tag push publishes; a branch push (this file changed) and
-          # a dispatch without `publish` are dry runs.
-          # `inputs.publish` is a boolean from the UI and a string from the
-          # API -- nightly.yml dispatches this with `gh workflow run`, which
-          # sends "true". Accept both rather than depend on the coercion.
-          PUBLISH="${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'true' || ((inputs.publish == true || inputs.publish == 'true') && 'true' || 'false') }}"
-          case "$REF" in
-            refs/tags/v*) TAG="${REF#refs/tags/}" ;;
-            v*)           TAG="$REF" ;;
-            *)            TAG="" ;;
-          esac
-          if [[ "$PUBLISH" == "true" && -z "$TAG" ]]; then
-            echo "::error::publish needs a v* tag as ref, got '$REF'"; exit 1
-          fi
-          # A -dev.<n> tag names a commit, not a release, and has no entry
-          # in CHANGELOG.yaml -- by design, and permanently (ALIGNMENT.md
-          # §7). release-check would refuse it and render would find nothing
-          # to render, so it takes its version from the tag it was given, is
-          # always a prerelease, and carries a generated body.
-          DEV=false
-          [[ "$TAG" == *-dev.* ]] && DEV=true
-          # PEP 440 for the wheel and for BUILDINFO. Everywhere else the tree
-          # is the authority (pyproject.toml, held against .technoproj by
-          # `technoproj-changelog consistency`); a dev build is the one case
-          # where it is not, because the tag names a commit the tree has no
-          # way to know about. `0.5.0-dev.1` -> `0.5.0.dev1`, which is what
-          # PEP 440 makes of that tag and what sorts below every other
-          # prerelease of 0.5.0.
-          PEP=$(python -c 'import re; print(re.search(r"^version\s*=\s*\"([^\"]+)\"", open("pyproject.toml").read(), re.M).group(1))')
-          if [[ "$DEV" == "true" ]]; then
-            V="${TAG#v}"
-            PEP="${V/-dev./.dev}"
-            echo "version=$V"       >> "$GITHUB_OUTPUT"
-            echo "prerelease=true"  >> "$GITHUB_OUTPUT"
-          elif [[ -n "$TAG" ]]; then
-            # release-check prints prerelease= and version= for the tag, and
-            # refuses a tag the changelog does not claim (or, when publishing,
-            # a final whose entry is still unreleased).
-            ARGS=(); [[ "$PUBLISH" == "true" ]] && ARGS+=(--publish)
-            technoproj-changelog release-check --tag "$TAG" "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT"
-          else
-            # An untagged dry run is whatever the tree currently says it is.
-            echo "version=$PEP" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          fi
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
-          echo "dev=$DEV" >> "$GITHUB_OUTPUT"
-          echo "pep440=$PEP" >> "$GITHUB_OUTPUT"
-          # The commit, not the ref: `github.sha` is the dispatching ref on a
-          # workflow_dispatch, which is not necessarily what is being built.
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      # What `.technoproj` cannot hold -- committing the file changes the
-      # commit it would claim -- and what the filename must not carry.
-      # ALIGNMENT.md §5. `schema_era` is this project's compatibility fact,
-      # and it is the one a consumer must actually check: it decides whether
-      # an existing volume file still opens.
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: echo "pep440=${VERSION/-dev./.dev}" | tee -a "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-meta
+          path: release_meta
       - name: BUILDINFO.txt
         shell: bash
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SHA: ${{ needs.preflight.outputs.sha }}
+          BRANCH: ${{ needs.preflight.outputs.branch }}
         run: |
-          SHA="${{ steps.plan.outputs.sha }}"
-          # A tag push carries no branch: github.ref IS the tag. Find one that
-          # contains the commit and record what was found, not a guess.
-          #
-          # PREFER THE DEFAULT BRANCH, never the first one listed. A released
-          # commit is normally on `main` AND on the branch it was developed
-          # on, and `git branch -r` lists them alphabetically -- so a bare
-          # `head -1` picks whichever sorts first, which is usually not
-          # `main`. ALIGNMENT.md §5; aloeschema shipped a feature branch in
-          # its v0.3.0 BUILDINFO.txt this way, and `3b8c9e5` in this
-          # repository resolves to a `claude/...` branch under `head -1`.
-          BRANCH="${{ inputs.ref }}"
-          if [[ -z "$BRANCH" || "$BRANCH" == v* ]]; then
-            CANDIDATES=$(git branch -r --contains "$SHA" --format='%(refname:lstrip=3)' \
-                         | grep -vx HEAD)
-            DEFAULT="${{ github.event.repository.default_branch }}"
-            BRANCH=$(printf '%s\n' "$CANDIDATES" | grep -xF "$DEFAULT" \
-                     || printf '%s\n' "$CANDIDATES" | head -1)
-          fi
-          FIELD() { python -c "import re,sys; m=re.search(sys.argv[2], open(sys.argv[1]).read(), re.M); print(m.group(1) if m else '')" "$1" "$2"; }
-          mkdir -p dist
+          mkdir -p buildinfo
           {
-            echo "tag: ${{ steps.plan.outputs.tag || '(untagged)' }}"
-            echo "version: ${{ steps.plan.outputs.version }}"
-            echo "pep440: ${{ steps.plan.outputs.pep440 }}"
+            echo "tag: ${TAG:-(untagged)}"
+            echo "version: $VERSION"
             echo "commit: $SHA"
-            echo "branch: ${BRANCH:-(detached)}"
+            echo "branch: $BRANCH"
             echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "schema_era: $(FIELD aloelite/db.py '^SCHEMA_ERA\s*=\s*(\d+)')"
-          } | tee dist/BUILDINFO.txt
+            cat release_meta/facts.txt
+          } | tee buildinfo/BUILDINFO.txt
+      # Not `dist-*`: the publish leg writes the release's own BUILDINFO.txt.
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-buildinfo
-          path: dist/BUILDINFO.txt
+          name: buildinfo
+          path: buildinfo/BUILDINFO.txt
       # The platform vocabulary of ALIGNMENT.md §4, as data rather than as a
       # `strategy.matrix` literal, because a -dev.<n> build takes the first
       # row and nothing else: one platform, no cross-compilation (§7). Rows
@@ -219,48 +169,18 @@ jobs:
              "crates": "-p aloelite-cli", "bins": "aloelite.exe"}
           ]
           JSON
-          N=$([[ "${{ steps.plan.outputs.dev }}" == "true" ]] && echo 1 || echo 99)
+          N=$([[ "${{ needs.preflight.outputs.dev }}" == "true" ]] && echo 1 || echo 99)
           python -c 'import json,sys; print("include=" + json.dumps(json.load(open(sys.argv[1]))[:int(sys.argv[2])]))' \
             "$RUNNER_TEMP/platforms.json" "$N" \
             | tee -a "$GITHUB_OUTPUT"
-      # A dev build has no changelog entry to render, so its body is what it
-      # does have: BUILDINFO, and what the suffix means for anyone who finds
-      # the release without having asked for it.
-      - name: Release notes
-        if: steps.plan.outputs.tag != ''
-        shell: bash
-        run: |
-          if [[ "${{ steps.plan.outputs.dev }}" == "true" ]]; then
-            {
-              echo "A development build of \`${{ steps.plan.outputs.tag }}\`."
-              echo
-              echo "**This is not a release.** It names one commit, it is not on PyPI,"
-              echo "it is not mirrored, and it is pruned once newer dev builds exist."
-              echo "It is built for one platform only (\`doc/ALIGNMENT.md\` §7), and it"
-              echo "did not wait for the test matrix. For a release, see the tags"
-              echo "without a \`-dev.\` suffix."
-              echo
-              echo '```'
-              cat dist/BUILDINFO.txt
-              echo '```'
-            } > release-notes.md
-          else
-            technoproj-changelog render md --tag "${{ steps.plan.outputs.tag }}" > release-notes.md
-          fi
-          cat release-notes.md
-      - uses: actions/upload-artifact@v4
-        if: steps.plan.outputs.tag != ''
-        with:
-          name: release-notes
-          path: release-notes.md
 
   python:
-    needs: plan
+    needs: [preflight, plan]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.plan.outputs.ref }}
+          ref: ${{ needs.preflight.outputs.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -269,7 +189,7 @@ jobs:
       # publish.yml keeps it off PyPI; this keeps it from claiming 0.5.0 on
       # the disk of whoever downloads it. `.devN` is PEP 440's own spelling
       # for exactly this and installs and compares correctly.
-      - if: needs.plan.outputs.dev == 'true'
+      - if: needs.preflight.outputs.dev == 'true'
         shell: bash
         run: |
           python - <<'EOF'
@@ -313,7 +233,7 @@ jobs:
           path: dist/*
 
   native:
-    needs: plan
+    needs: [preflight, plan]
     strategy:
       fail-fast: false
       # One row per platform, sliced by `plan`: everything for a release, the
@@ -328,7 +248,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.plan.outputs.ref }}
+          ref: ${{ needs.preflight.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -350,7 +270,7 @@ jobs:
       # unpacked one can still read what they have.
       - uses: actions/download-artifact@v4
         with:
-          name: dist-buildinfo
+          name: buildinfo
           path: buildinfo
       # Two shapes per platform, because they answer different questions.
       # A bare binary is what `curl -O && chmod +x` wants and what a stable
@@ -385,8 +305,8 @@ jobs:
   # the cross-compiled half (ALIGNMENT.md §7). Everything downstream of this
   # job therefore runs under `always()` and judges its needs by result.
   wasm:
-    needs: plan
-    if: needs.plan.outputs.dev != 'true'
+    needs: preflight
+    if: needs.preflight.outputs.dev != 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -394,7 +314,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.plan.outputs.ref }}
+          ref: ${{ needs.preflight.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown, wasm32-wasip2
@@ -436,7 +356,7 @@ jobs:
   # publishing. GHCR is the GitHub side of images; Docker Hub stays the
   # Makefile's manual push.
   image:
-    needs: [plan, gate]
+    needs: [preflight, gate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -444,10 +364,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.plan.outputs.ref }}
+          ref: ${{ needs.preflight.outputs.sha }}
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - if: needs.plan.outputs.publish == 'true'
+      - if: needs.preflight.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -457,14 +377,14 @@ jobs:
         shell: bash
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
-          TAGS="$IMAGE:${{ needs.plan.outputs.version }}"
-          if [[ "${{ needs.plan.outputs.prerelease }}" != "true" ]]; then TAGS="$TAGS,$IMAGE:latest"; fi
+          TAGS="$IMAGE:${{ needs.preflight.outputs.version }}"
+          if [[ "${{ needs.preflight.outputs.prerelease }}" != "true" ]]; then TAGS="$TAGS,$IMAGE:latest"; fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ (needs.plan.outputs.publish == 'true' && needs.plan.outputs.dev != 'true') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-          push: ${{ needs.plan.outputs.publish == 'true' }}
+          platforms: ${{ (needs.preflight.outputs.publish == 'true' && needs.preflight.outputs.dev != 'true') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ needs.preflight.outputs.publish == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -482,7 +402,7 @@ jobs:
   # there is nothing to wait for. It blocks only when a tag lands on a commit
   # whose tests are still running -- which is exactly when you want it to.
   gate:
-    needs: plan
+    needs: preflight
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -491,10 +411,10 @@ jobs:
       # design: skipping the full gate is what that suffix is for
       # (doc/ALIGNMENT.md §7).
       - name: The test matrix passed on this commit
-        if: ${{ needs.plan.outputs.publish == 'true' && !contains(needs.plan.outputs.tag, '-dev.') }}
+        if: ${{ needs.preflight.outputs.publish == 'true' && !contains(needs.preflight.outputs.tag, '-dev.') }}
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ needs.plan.outputs.sha }}
+          SHA: ${{ needs.preflight.outputs.sha }}
         shell: bash
         run: |
           set -uo pipefail
@@ -528,10 +448,10 @@ jobs:
 
   # Dry run: what a tag would have shipped, in the run's summary.
   manifest:
-    needs: [plan, python, native, wasm]
+    needs: [preflight, python, native, wasm]
     # `always()` because `wasm` is skipped for a dev build, and a skipped
     # need would otherwise skip this too. Skipped is not failed.
-    if: ${{ always() && needs.plan.outputs.publish != 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    if: ${{ always() && needs.preflight.outputs.publish != 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -543,38 +463,32 @@ jobs:
         run: |
           cd dist && sha256sum * | tee SHA256SUMS.txt
           {
-            echo "### Release dry run: ${{ needs.plan.outputs.version }} from \`${{ needs.plan.outputs.ref }}\`"
+            echo "### Release dry run: ${{ needs.preflight.outputs.version }} from \`${{ needs.preflight.outputs.sha }}\`"
             echo
             echo '| asset | size |'; echo '|---|---|'
             for f in *; do printf '| `%s` | %s |\n' "$f" "$(du -h "$f" | cut -f1)"; done
           } >> "$GITHUB_STEP_SUMMARY"
 
-  release:
-    needs: [plan, gate, python, native, wasm, image]
+  # BUILDINFO.txt, SHA256SUMS.txt, the tag, the release, the dev-release
+  # pruning, and the hand-off of the tag to publish.yml -- which a tag created
+  # by GITHUB_TOKEN would otherwise never trigger. publish.yml refuses a
+  # -dev.<n> tag itself, so a dev build cannot reach PyPI through this.
+  publish:
+    needs: [preflight, gate, python, native, wasm, image]
     # `always()` for the same reason as `manifest`: a dev build skips `wasm`
     # and still publishes. Nothing ships if any need actually failed.
-    if: ${{ always() && needs.plan.outputs.publish == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
-    runs-on: ubuntu-latest
+    if: ${{ always() && needs.preflight.outputs.publish == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: dist-*
-          path: dist
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-notes
-          path: notes
-      - shell: bash
-        run: cd dist && sha256sum * | tee SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.plan.outputs.tag }}
-          name: ${{ needs.plan.outputs.tag }}
-          body_path: notes/release-notes.md
-          prerelease: ${{ needs.plan.outputs.prerelease == 'true' }}
-          make_latest: ${{ needs.plan.outputs.prerelease != 'true' }}
-          files: dist/*
-          fail_on_unmatched_files: true
+      contents: write   # the tag and the release; a called workflow cannot grant itself this
+      actions: write    # dispatch publish.yml with the tag
+    uses: Aloecraft-org/technoproj/.github/workflows/release-publish.yml@v0.3.1
+    with:
+      tag:        ${{ needs.preflight.outputs.tag }}
+      sha:        ${{ needs.preflight.outputs.sha }}
+      branch:     ${{ needs.preflight.outputs.branch }}
+      version:    ${{ needs.preflight.outputs.version }}
+      prerelease: ${{ needs.preflight.outputs.prerelease }}
+      name:       ${{ needs.preflight.outputs.tag }}
+      artifacts:  dist-*
+      keep-dev:   5
+      registry-workflow: publish.yml

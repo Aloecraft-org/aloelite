@@ -1,7 +1,8 @@
 # Releasing
 
 How a version of Aloelite goes out, end to end. Everything downstream of
-`CHANGELOG.yaml` is derived; the tag is the only manual push.
+`CHANGELOG.yaml` is derived. Nobody pushes a tag: `technoproj release cut`
+dispatches `release.yml`, and the workflow creates the tag itself.
 
 > [`ALIGNMENT.md`](/doc/ALIGNMENT.md) is the org-wide standard every
 > Aloecraft project is moving to. The canonical copy lives in
@@ -89,8 +90,12 @@ semver:  0.5.0-rc.1    # what rust/Cargo.toml carries
    `release-check --tag vX.Y.Z-rc.N --publish`; commit `CHANGELOG.md` and
    `changelog.json` with it. A candidate is not mirrored, so it takes no
    `mirror` flag.
-4. Tag and push: `git tag -a vX.Y.Z-rc.N -m "vX.Y.Z-rc.N" && git push origin vX.Y.Z-rc.N`.
-   The tag is `make version`'s `tag:` line. Candidates tagged the old way
+4. Cut it: `technoproj release cut --tag vX.Y.Z-rc.N`, once the commit is
+   on `main`. It dispatches `release.yml` with `publish` on, and the
+   workflow creates the tag. The tag is `make version`'s `tag:` line.
+   Pushing the tag by hand still releases, but whether a push to
+   `refs/tags/*` is allowed depends on who is pushing, and a dispatch does
+   not. Candidates tagged the old way
    (`vX.Y.ZrcN`) still resolve, so an old release can be re-run; new ones use
    the spelling above (`ALIGNMENT.md` §1 — the dot before the number is what
    makes candidate 10 sort after candidate 2).
@@ -107,34 +112,55 @@ semver:  0.5.0-rc.1    # what rust/Cargo.toml carries
 3. `technoproj-changelog generate`, `consistency`,
    `release-check --tag vX.Y.Z --publish`; commit `CHANGELOG.md` and
    `changelog.json` with it.
-4. Tag and push `vX.Y.Z` as above.
+4. `technoproj release cut --tag vX.Y.Z`, as above.
 
-## What a tag triggers
+## What a release runs
 
-Three workflows run on `v*`, independently:
+`release.yml` is the release. Its first and last jobs are technoproj's shared
+workflows, pinned at a tag (technoproj `doc/STANDARD.md` Part 2), and
+everything between them is this project's:
 
-- **`main.yml`** — the CI matrix, on the tagged commit. It ignores
-  `v*-dev.*`: skipping the slow suites is what that suffix buys.
-- **`publish.yml`** — PyPI, by trusted publishing. **Its filename is part of
-  the grant** — owner, repository, workflow filename, environment — so
-  renaming it revokes the publisher, and a tag's OIDC claim resolves from the
-  commit the tag points at, which means the rename cannot be repaired for a
-  tag that already exists (`ALIGNMENT.md` §8; aloeschema spent a version
-  finding this out). The file says so at the top. A candidate is a PyPI
-  pre-release, which `pip` skips unless asked. It ignores `v*-dev.*` tags:
-  `0.5.0-dev.7` is a valid PEP 440 version and would upload without
-  complaint, and a PyPI upload can be yanked but never replaced or reused
-  (`ALIGNMENT.md` §7).
-- **`release.yml`** — the GitHub release and the image. It refuses a tag the
-  changelog does not claim, renders the release body from the entry, and
-  derives `prerelease` (a candidate always; a final from `stable`). A
-  `v*-dev.*` tag takes a different route through it — see Dev builds.
+- **`preflight`** (shared) settles which tag, which commit, and whether this
+  run publishes, and runs every gate CI runs: `technoproj check`,
+  `release check-workflow`, and the changelog's `validate`, `check`,
+  `consistency` and `release-check`. It refuses a tag the changelog does not
+  claim, renders the release body from the entry, and derives `prerelease`
+  (a candidate always; a final from `stable`). Every build job checks out the
+  commit it resolved, not `github.sha`.
+- **The builds**, `gate` and `image` — this project's. See below.
+- **`publish`** (shared) writes `BUILDINFO.txt` and `SHA256SUMS.txt`,
+  creates the tag if it does not exist, publishes the release, prunes old dev
+  releases, and **hands the tag to `publish.yml`**.
 
-Both `!v*-dev.*` exclusions are a `!` pattern **second in the same `tags`
-list**, never a `tags-ignore` beside `tags`: Actions rejects both filters on
-one event *at load time*, and a workflow that does not parse does not run at
-all — so the wrong spelling does not narrow the trigger, it silently switches
-the workflow off with no failed run to notice.
+That hand-off is not optional. A tag created by `GITHUB_TOKEN` starts no
+workflow run — GitHub's recursion guard, which cannot be turned off — so a
+`publish.yml` triggered by a tag push would never fire for a release cut
+this way, and nothing would announce it: the release would appear and PyPI
+would keep serving the previous version. The publish leg dispatches
+`publish.yml` with the tag instead, which needs `actions: write` on that job
+and the `registry` block in `.technoproj`'s `TECHNO_RELEASE`;
+`technoproj release check-workflow` runs in CI and fails if either goes.
+
+**`publish.yml`** is PyPI, by trusted publishing, and runs only on that
+dispatch (or a manual one with the tag). It has no tag-push trigger, so a
+hand-pushed tag uploads once, through `release.yml`, rather than twice.
+**Its filename is part of the grant** — owner, repository, workflow
+filename, environment — so renaming it revokes the publisher (`ALIGNMENT.md`
+§8; aloeschema spent a version finding this out). The file says so at the
+top. A candidate is a PyPI pre-release, which `pip` skips unless asked. **It
+refuses `v*-dev.*` tags itself**, because the shared publish leg hands it
+every tag it releases, dev builds included: `0.5.0-dev.7` is a valid PEP 440
+version, the tree it names still says `0.5.0`, and a PyPI upload can be
+yanked but never replaced or reused (`ALIGNMENT.md` §7). A dev tag skips its
+jobs rather than failing them.
+
+**`main.yml`** runs the CI matrix on the commit. It ignores `v*-dev.*`:
+skipping the slow suites is what that suffix buys. Its exclusion is a `!`
+pattern **second in the same `tags` list**, never a `tags-ignore` beside
+`tags`: Actions rejects both filters on one event *at load time*, and a
+workflow that does not parse does not run at all — so the wrong spelling
+does not narrow the trigger, it silently switches the workflow off with no
+failed run to notice.
 
 ### Nothing ships untested
 
@@ -142,7 +168,7 @@ the workflow off with no failed run to notice.
 independent workflow runs with nothing connecting them. Its `gate` job is
 that connection: it waits for a **successful `main.yml` run on the same
 commit**, and the two jobs that publish anything — `image`, which pushes to
-GHCR itself, and `release` — wait for it. The build matrix does not, so the
+GHCR itself, and `publish` — wait for it. The build matrix does not, so the
 gate costs nothing on the slow half.
 
 Usually it costs nothing at all. A commit is pushed to `main` and tested
@@ -202,7 +228,7 @@ is `<os>_<arch>[_<libc>]`, not Rust triples, and a profile token comes last.
 | `aloelite_darwin_arm64`, `aloelite_darwin_x86_64` | the CLI on macOS |
 | `aloelite_windows_x86_64.exe` | the CLI on Windows |
 | `aloelite_complete_<platform>.tar.gz` (`.zip` on Windows) | every binary built for that platform, plus `BUILDINFO.txt` |
-| `BUILDINFO.txt` | tag, version, PEP 440 spelling, commit, branch, build time, and the schema era this build writes |
+| `BUILDINFO.txt` | tag, version, commit, branch, build time, and `api_version`: the schema era this build writes |
 | `aloelite_wasi.wasm` | the CLI as a WASI component (`wasmtime run --dir=.::/work aloelite_wasi.wasm -f /work/x.fs ls /`) |
 | `aloelite_web.tar.gz` | the browser package: ES module, `.wasm`, `.d.ts`, README |
 | `SHA256SUMS.txt` | over all of the above |
@@ -233,22 +259,22 @@ make dev-tag        # v0.5.0-dev.1 — the number that would be allocated next
 **The number is global and never reused.** It is allocated from the tags
 that exist, not from a counter in the tree, so a nightly needs no commit and
 two branches cannot collide. It is monotonic across versions —
-`0.4.0.dev104` then `0.5.0.dev105` — and because `nightly.yml` prunes old dev
-*releases* while leaving their *tags*, a number names exactly one build
-forever.
+`0.4.0.dev104` then `0.5.0.dev105` — and because old dev *releases* are
+pruned (by `nightly.yml` and by the publish leg, keeping five) while their
+*tags* stay, a number names exactly one build forever.
 
 **What a dev tag does differently**, all of it keyed off the `-dev.` in the
 tag:
 
 | | a release tag | a dev tag |
 |---|---|---|
-| `CHANGELOG.yaml` entry | required; `release-check` refuses a tag without one | none, ever; `plan` skips the check |
-| release body | rendered from the entry | generated, with `BUILDINFO.txt` in it |
+| `CHANGELOG.yaml` entry | required; `release-check` refuses a tag without one | none, ever; checked against the newest entry, and refused if its `X.Y.Z` differs |
+| release body | rendered from the entry | a generated note that it is not a release |
 | platforms | all six | `linux_x86_64_gnu` alone, no cross-compilation |
 | wasm | both leaves | skipped |
 | image | amd64 + arm64 | amd64 |
 | `CI/CD` | runs on the tag, and `release.yml` waits for it | does not run, and is not waited for |
-| PyPI | published | excluded by `publish.yml` |
+| PyPI | published | refused by `publish.yml` |
 | `prerelease` | from `stable` | always true |
 | version | the tree's | the tag's: `0.5.0-dev.1`, PEP 440 `0.5.0.dev1` |
 
@@ -283,11 +309,13 @@ the run summary; nothing is published:
 
 ## Re-running a release
 
-A tag pushes once; when its run dies of infrastructure, dispatch
-`release.yml` (by id while it is not yet on the default branch) with the tag
-as `ref` and `publish` on. The release is updated in place and its assets
-replaced, so no new tag is needed. `publish.yml` has the same escape hatch
-for PyPI.
+When a release run dies of infrastructure, run `technoproj release cut
+--tag vX.Y.Z` again, or dispatch `release.yml` (by id while it is not yet on
+the default branch) with the tag as both `ref` and `tag` and `publish` on.
+An existing tag is a re-run: the release is updated in place and its assets
+replaced, so no new tag is needed. The one refusal is a tag that points at a
+different commit than the one being built. `publish.yml` takes the same
+`tag` input by hand when only the PyPI leg needs retrying.
 
 **A tag push runs the workflow file as it exists at that tag**, not the one
 on `main`. A dispatch is the other way round — the workflow comes from the

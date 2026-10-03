@@ -105,7 +105,7 @@ jobs:
           TAG: ${{ steps.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          gh workflow run release.yml -f ref="$TAG" -f publish=true
+          gh workflow run release.yml -f ref="$TAG" -f tag="$TAG" -f publish=true
           echo "dispatched release.yml for $TAG" >> "$GITHUB_STEP_SUMMARY"
 
       # depth: retention. §7 -- prune your own old dev GitHub releases, or
