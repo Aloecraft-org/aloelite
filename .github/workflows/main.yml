@@ -56,6 +56,11 @@ jobs:
     - name: Changelog is generated from its source
       run: technoproj-changelog check
 
+    # release.yml still calls the shared preflight and publish halves, hands
+    # the registry leg its tag, and grants the permissions they need.
+    - name: The release workflow conforms
+      run: technoproj release check-workflow
+
     # `consistency` catches the version drifting between pyproject.toml,
     # .technoproj and rust/Cargo.toml, and calls script/checks.py for the one
     # invariant that is aloelite's alone: db.py's SCHEMA_ERA against the
