@@ -8,7 +8,7 @@ what is next.
 Plan: fill what the owner's answers already settle (owner, sources) as a
 PROPOSAL; leave goal.md and the I1 iteration for the owner.
 
-Done: owner `aloecraft` in authority.yaml; sources.yaml points at this
+Done: owner `Michael Godfrey` in authority.yaml; sources.yaml points at this
 repo's CHANGELOG.yaml as the facts source, README.md and doc/ as docs.
 
 Next: the owner writes goal.md and I1 in roadmap.md; then `technoproj
