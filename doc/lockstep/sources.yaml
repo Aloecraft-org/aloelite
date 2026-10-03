@@ -1,0 +1,8 @@
+# Where product truth lives. The operator reads only what is listed here.
+product: null     # technoproj: fill in
+
+facts:            # single source of truth for product claims
+  repo: null
+  path: null
+
+docs: []
