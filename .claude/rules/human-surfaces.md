@@ -1,21 +1,29 @@
 # Human surfaces
 
-Code in this repo has two readers: the agent maintaining it, and a human
-reading a small number of declared surfaces. Write for the maintainer by
+This repo has two readers: the agent maintaining it, and a human reading
+a small number of declared surfaces. Write for the maintainer by
 default. Write for the human only where this file says a human reads.
+
+A human reads three kinds of surface: documentation, examples, and the
+surface block at the top of code.
 
 ## Declared human surfaces
 
-<!-- Per repo. Keep this list short. If a path stays on it that nobody
-     reads, remove it. Paths, not descriptions. -->
+<!-- Per repo: rendered by technoproj from TECHNO_LOCKSTEP.surfaces in
+     .technoproj. Change it there, then run `technoproj lockstep sync`.
+     Keep this list short. If a path stays on it that nobody reads,
+     remove it. Paths, not descriptions. -->
 
-- `examples/`
 - `README.md`
+- `examples/`
 
-Files not listed here are maintainer-grade: correctness and completeness
-win over brevity. Do not apply the surface-only rules below to them.
+Documentation is any prose file outside `.claude/`, declared or not.
+Examples are the files under `examples/` and the code blocks inside
+documentation. Everything else is maintainer-grade: correctness and
+completeness win over brevity. Do not apply the documentation or example
+rules below to it.
 
-## Rules for everything (cheap, no correctness cost)
+## Code (everything, cheap, no correctness cost)
 
 Any file with dense logic opens with a surface block. The surface block
 contains, in order, and nothing else:
@@ -40,7 +48,18 @@ skip them. A one-line comment such as `# depth: retry and backoff` is
 enough. Comments in the surface explain why. Comments in depth may
 explain what.
 
-## Rules for declared surfaces only (costly, opt-in)
+## Documentation
+
+- States what is true now or what has been agreed. No drafts, plans in
+  progress, speculation, session notes or alternatives considered.
+- One fact, one place. Point to it; do not restate it.
+- One screen per file. If it does not fit, split it or cut it.
+- No history. Git has the history. Replace, do not append.
+- No instructions to the agent. Those belong in `.claude/rules/`.
+- Do not create a documentation file outside `.claude/` unless the human
+  asked for it. Propose it instead.
+
+## Examples (costly, opt-in)
 
 - Fits on one screen. If it does not, split it or cut it.
 - Every line is something the reader would plausibly type themselves.
@@ -57,13 +76,14 @@ explain what.
 
 `# example: omits ...` (or the language's comment equivalent) is the only
 sanctioned way to leave something out. It is only permitted inside
-declared surfaces. If it appears anywhere else, that is a bug, not a
-style choice: fix the code, do not remove the marker.
+examples. If it appears anywhere else, that is a bug, not a style
+choice: fix the code, do not remove the marker.
 
 ## Do not
 
-- Apply surface-only rules to undeclared paths, even if they look like
-  they would benefit. Propose adding the path to the list instead.
+- Apply documentation or example rules to undeclared code, even if it
+  looks like it would benefit. Propose adding the path to the list
+  instead.
 - Make code "readable" by shortening names, removing branches, or
   dropping cases. Readability is a property of shape, not of size.
 - Interleave declarations that belong in the surface block.
