@@ -83,10 +83,9 @@ jobs:
         with:
           python-version: "3.12"
       # The shared release engine (doc/ALIGNMENT.md §3), which brings PyYAML.
-      # Pinned to a commit rather than a tag only because technoproj has cut
-      # none yet -- a commit is the stricter pin of the two, and a release
-      # pipeline that tracks a moving branch changes when nobody touched it.
-      - run: pip install "git+https://github.com/Aloecraft-org/technoproj@d0f5382fbcb081898bec304949937e0b3f339bc8"
+      # Pinned to a release tag: a release pipeline that tracks a moving
+      # branch changes when nobody touched it.
+      - run: pip install "git+https://github.com/Aloecraft-org/technoproj@v0.3.0"
       - id: plan
         shell: bash
         run: |

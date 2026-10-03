@@ -39,13 +39,12 @@ jobs:
     # is generated from it and committed, and `check` is what stops that copy
     # going stale.
     #
-    # The shared release engine (doc/ALIGNMENT.md §3). Pinned to a commit
-    # rather than a tag only because technoproj has cut none yet -- a commit
-    # is the stricter pin of the two. A release pipeline that tracks a moving
-    # branch is one that changes when nobody touched it. It brings PyYAML,
-    # which is why there is no separate install for it.
+    # The shared release engine (doc/ALIGNMENT.md §3), pinned to a release
+    # tag. A release pipeline that tracks a moving branch is one that changes
+    # when nobody touched it. It brings PyYAML, which is why there is no
+    # separate install for it.
     - name: The shared release engine
-      run: pip install "git+https://github.com/Aloecraft-org/technoproj@d0f5382fbcb081898bec304949937e0b3f339bc8"
+      run: pip install "git+https://github.com/Aloecraft-org/technoproj@v0.3.0"
 
     # script/version.mk is a COPY of the engine's, placed by `technoproj
     # sync`. This is what makes it a copy that is checked rather than one
