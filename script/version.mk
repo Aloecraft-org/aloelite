@@ -67,8 +67,6 @@ version:
 dev-tag:
 	@echo "v${__VERSION}-dev.${__NEXT_DEV}"
 
-__EDIT = tmp=$$(mktemp) && ${__JQ} --argjson v "$$1" "$$2" ${__TECHNO_PROJECT_FILE}
-
 inc_maj:
 	@tmp=$$(mktemp) && jq '.TECHNO_VERSION.major += 1 | .TECHNO_VERSION.minor = 0 | .TECHNO_VERSION.patch = 0 | .TECHNO_VERSION.pre = null' ${__TECHNO_PROJECT_FILE} > "$$tmp" && mv "$$tmp" ${__TECHNO_PROJECT_FILE}
 
