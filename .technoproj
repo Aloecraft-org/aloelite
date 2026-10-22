@@ -49,5 +49,12 @@
       "README.md",
       "examples/"
     ]
+  },
+  "TECHNO_RELEASE": {
+    "name": "{tag}",
+    "registry": {
+      "kind": "pypi",
+      "workflow": "publish.yml"
+    }
   }
 }

@@ -234,16 +234,17 @@ host path the manifest grants.
 - **A dev tag takes a different route through `release.yml`.** It has
   no `CHANGELOG.yaml` entry and never will -- it names a commit, not a
   release -- so `release-check` would refuse it and `render md --tag`
-  would find nothing to render. Both are skipped: the version comes
-  from the tag, `prerelease` is always true, and the body is generated
-  with `BUILDINFO.txt` in it.
+  would find nothing to render. Instead the version comes from the
+  tag, it is checked against the newest entry's `X.Y.Z`, `prerelease`
+  is always true, and the body is a generated note that it is not a
+  release.
 
   `ALIGNMENT.md` §7's "the suffix decides the rigor" is the rest of it.
   A dev tag builds one platform and skips cross-compilation and both
   wasm leaves, the image is amd64 only, and `CI/CD` no longer runs on
   `v*-dev.*` at all -- which is what `release.yml`'s gate exemption
   already assumed. The platform matrix moved out of `strategy.matrix`
-  and into the `plan` job as data so that "one platform" is a slice
+  and into a `plan` job as data so that "one platform" is a slice
   rather than a second list; every row is byte-identical to the one it
   replaces.
 
@@ -259,8 +260,8 @@ host path the manifest grants.
   `complete` archive so someone who unpacked one can still read what
   they have. It carries what `.technoproj` cannot -- committing the
   file would change the commit it claims -- and what a filename must
-  not: tag, version, the PEP 440 spelling, commit, branch, build time,
-  and `schema_era`.
+  not: tag, version, commit, branch, build time, and `api_version`,
+  the schema era this build writes.
 
   That last one is the point of the file rather than a detail. It is
   the fact a consumer has to check, because it decides whether an
@@ -274,6 +275,37 @@ host path the manifest grants.
   on `main` and on the branch it was developed on, `git branch -r`
   lists them alphabetically, and `3b8c9e5` in this repository resolves
   to a `claude/...` branch under a bare `head -1`.
+- **`release.yml` is technoproj's shared pipeline, not a copy of it.**
+  Its first and last jobs now call technoproj's
+  `release-preflight.yml` and `release-publish.yml`, pinned at
+  `v0.3.1`, and everything between them -- the platform matrix, the
+  wasm leaves, the image, the test gate -- is unchanged. Which tag,
+  which commit, whether a run publishes, the changelog gate, the
+  notes, `BUILDINFO.txt`, `SHA256SUMS.txt` and the release itself are
+  what every Aloecraft repository was writing separately in shell, and
+  now is not.
+
+  Two behaviours change. **A release is cut, not pushed:**
+  `technoproj release cut --tag vX.Y.Z` dispatches the workflow, which
+  creates the tag itself, and the dispatch takes a `tag` input beside
+  `ref` and `publish`. An existing tag is a re-run, updated in place,
+  unless it names a different commit. And **PyPI is handed the tag**:
+  a tag made by `GITHUB_TOKEN` starts no workflow run, so `publish.yml`
+  now runs only on the dispatch the publish leg sends it, and no longer
+  on a tag push, which would otherwise upload a hand-pushed tag twice.
+
+  The shared leg hands `publish.yml` every tag it releases, dev builds
+  included, so `publish.yml` refuses `v*-dev.*` itself now that a
+  trigger filter no longer can -- a dev tag names a tree that still
+  says `0.5.0`, and building it there would upload a final. It skips
+  rather than fails. technoproj 0.3.1 also stops handing dev tags over,
+  so this is the second lock, not the only one.
+
+  Moving here found three bugs in technoproj's shared workflows, fixed
+  in its 0.3.1 and the reason for that pin: a rehearsal with no tag
+  failed in preflight, dev tags were handed to the registry workflow,
+  and `BUILDINFO.txt`'s `branch` line had gone back to the first branch
+  listed rather than the default one.
 - **Releasing gates on the tests.** `release.yml`'s builds ran in
   parallel with `main.yml`'s matrix on the same commit -- two
   independent workflow runs with nothing connecting them -- so pushing
@@ -281,7 +313,7 @@ host path the manifest grants.
   afterwards. A `gate` job is now that connection: it waits for a
   successful `main.yml` run on the same SHA, and the two jobs that
   publish anything (`image`, which pushes to GHCR itself, and
-  `release`) wait for it.
+  `publish`) wait for it.
 
   The build matrix does not, so the gate costs no wall clock on the
   slow half -- and usually none at all, since a commit is pushed to
