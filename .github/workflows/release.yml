@@ -82,11 +82,15 @@ jobs:
   # nightly.yml dispatches this with `gh workflow run`, which sends "true".
   # The shared workflow takes a boolean, so it is coerced here.
   preflight:
-    uses: Aloecraft-org/technoproj/.github/workflows/release-preflight.yml@v0.3.1
+    uses: Aloecraft-org/technoproj/.github/workflows/release-preflight.yml@v0.4.1
     with:
       ref: ${{ inputs.ref }}
       tag: ${{ inputs.tag }}
       publish: ${{ inputs.publish == true || inputs.publish == 'true' }}
+      # Must equal the `uses:` pin above. Called from another repository,
+      # the shared workflow cannot tell which commit it was read from, so it
+      # is told; `technoproj release check-workflow` fails a mismatch.
+      technoproj: v0.4.1
 
   # What this project builds around the shared halves: the platform matrix,
   # sliced for a dev build, the PEP 440 spelling a dev wheel is stamped with,
@@ -481,7 +485,7 @@ jobs:
     permissions:
       contents: write   # the tag and the release; a called workflow cannot grant itself this
       actions: write    # dispatch publish.yml with the tag
-    uses: Aloecraft-org/technoproj/.github/workflows/release-publish.yml@v0.3.1
+    uses: Aloecraft-org/technoproj/.github/workflows/release-publish.yml@v0.4.1
     with:
       tag:        ${{ needs.preflight.outputs.tag }}
       sha:        ${{ needs.preflight.outputs.sha }}

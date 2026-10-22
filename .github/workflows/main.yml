@@ -44,7 +44,7 @@ jobs:
     # when nobody touched it. It brings PyYAML, which is why there is no
     # separate install for it.
     - name: The shared release engine
-      run: pip install "git+https://github.com/Aloecraft-org/technoproj@v0.3.0"
+      run: pip install "git+https://github.com/Aloecraft-org/technoproj@v0.4.1"
 
     # script/version.mk is a COPY of the engine's, placed by `technoproj
     # sync`. This is what makes it a copy that is checked rather than one
