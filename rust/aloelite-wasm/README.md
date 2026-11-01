@@ -74,6 +74,29 @@ const info = await call("stat", { mount, path: "/hello.txt" });      // info.siz
 await call("unmount", { mount });
 ```
 
+## The file explorer
+
+`explorer/aloelite-explorer.js` is a browsable file tree for a page, as
+one ES module with no dependencies. It takes the `call` function above,
+or an `Fs` directly:
+
+```js
+import { renderExplorer } from "./explorer/aloelite-explorer.js";
+
+const explorer = await renderExplorer("files", call, { volume: "docs", editable: true });
+explorer.navigate("/notes");
+await explorer.destroy(); // unmounts the explorer's own mount
+```
+
+`volume` is a name or an id; leave it out for a picker, or pass `mount`
+to reuse a mount the page already holds. Without `editable` the explorer
+mounts `ro` and only browses, previews and downloads. `workerCall(worker)`
+in the same module is the page side of the protocol. The other options
+are `DEFAULTS` at the top of the module. `explorer/demo.html` runs it on
+an in-memory volume, or with `?opfs` on a persistent one from a Worker;
+serve `rust/` after building `pkg/` and open
+`/aloelite-wasm/explorer/demo.html`.
+
 ## The protocol
 
 A request is `{id, op, args}`. `id` is anything and comes back untouched.

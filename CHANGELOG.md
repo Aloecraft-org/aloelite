@@ -95,6 +95,16 @@ host path the manifest grants.
   rw mount left behind by a closed instance meets the next one as
   `mount_conflict`. `rust/aloelite-extism/README.md` is the host
   author's page.
+- **A file explorer a web page embeds with one import.**
+  `rust/aloelite-wasm/explorer/aloelite-explorer.js` is a dependency-free
+  ES module: `renderExplorer(elementId, handle, opts)` draws a
+  browsable tree over an `Fs` or a Worker running `serve`, with
+  breadcrumbs, text, image and hex previews, and download. With
+  `editable: true` it adds upload, new folder and file, rename, delete
+  and in-place text editing. It speaks only Mount API operations, so
+  it needs nothing from the engine that a page does not already have;
+  `workerCall(worker)` is the page side of `serve`'s protocol, and
+  `demo.html` beside it runs both an in-memory and an OPFS volume.
 
 ### Changed
 
