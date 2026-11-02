@@ -52,6 +52,12 @@ export const DEFAULTS = Object.freeze({
   // Called on any failed operation: (error) => void. Default shows it in the
   // explorer's status line.
   onError: null,
+  // Asks yes or no before replacing or deleting: (message) => boolean, or a
+  // Promise of one. Replace the browser's dialog with an inline one here.
+  confirm: (message) => globalThis.confirm(message),
+  // Asks for a name: (message, defaultValue) => string | null, or a Promise
+  // of one. Null or empty cancels.
+  prompt: (message, value) => globalThis.prompt(message, value),
 });
 
 /** Largest file the preview reads whole. Bigger files offer download only. */
@@ -327,7 +333,7 @@ class Explorer {
           const path = join(this._path, file.name);
           const data = new Uint8Array(await file.arrayBuffer());
           if (await this._op("exists", { path })) {
-            if (!confirm(`Replace ${file.name}?`)) continue;
+            if (!(await this._opts.confirm(`Replace ${file.name}?`))) continue;
             await this._op("write_all", { path, data });
           } else {
             await this._op("create_entry", { path, data });
@@ -342,27 +348,28 @@ class Explorer {
   }
 
   async _newFolder() {
-    const name = askName("New folder name");
+    const name = await this._askName("New folder name");
     if (!name) return;
     const path = join(this._path, name);
     await this._try(() => this._op("create_container", { path }), "create_container", path);
   }
 
   async _newFile() {
-    const name = askName("New file name");
+    const name = await this._askName("New file name");
     if (!name) return;
     const path = join(this._path, name);
     await this._try(() => this._op("create_entry", { path }), "create_entry", path);
   }
 
   async _rename(path) {
-    const name = askName("Rename to", basename(path));
+    const name = await this._askName("Rename to", basename(path));
     if (!name || name === basename(path)) return;
     await this._try(() => this._op("rename", { path, name }), "rename", path);
   }
 
   async _delete(path, type) {
-    if (!confirm(`Delete ${basename(path)}${type === "container" ? " and everything in it" : ""}?`)) return;
+    const message = `Delete ${basename(path)}${type === "container" ? " and everything in it" : ""}?`;
+    if (!(await this._opts.confirm(message))) return;
     const op = type === "container" ? "remove_recursive" : "remove";
     await this._try(() => this._op(op, { path }), op, path);
   }
@@ -370,6 +377,16 @@ class Explorer {
   async _save(path, text) {
     await this._try(() => this._op("write_all", { path, data: text }), "write_all", path);
     await this.open(path);
+  }
+
+  async _askName(message, value = "") {
+    const name = (await this._opts.prompt(message, value))?.trim();
+    if (!name) return null;
+    if (name.includes("/")) {
+      this._setStatus("A name cannot contain '/'.", true);
+      return null;
+    }
+    return name;
   }
 
   async _download(path) {
@@ -614,16 +631,6 @@ function button(label, onClick, className = "") {
   return el("button", { type: "button", textContent: label, className, onclick: onClick });
 }
 
-function askName(message, value = "") {
-  const name = prompt(message, value)?.trim();
-  if (!name) return null;
-  if (name.includes("/")) {
-    alert("A name cannot contain '/'.");
-    return null;
-  }
-  return name;
-}
-
 function normalize(path) {
   const parts = [];
   for (const part of String(path ?? "/").split("/")) {
@@ -708,8 +715,9 @@ const STYLES = `
 .alx {
   --alx-bg: #ffffff; --alx-fg: #1d2125; --alx-muted: #626f7a; --alx-line: #dde1e5;
   --alx-hover: #f1f4f7; --alx-accent: #2563c9; --alx-error: #b42318;
+  --alx-min-height: 240px;
   --alx-font: system-ui, sans-serif; --alx-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  display: flex; flex-direction: column; min-height: 240px; height: 100%;
+  display: flex; flex-direction: column; min-height: var(--alx-min-height); height: 100%;
   border: 1px solid var(--alx-line); border-radius: 8px; overflow: hidden;
   background: var(--alx-bg); color: var(--alx-fg); font: 14px/1.4 var(--alx-font);
 }
