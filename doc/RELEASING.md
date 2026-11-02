@@ -249,13 +249,14 @@ gate and without a hash in the version string — the hash is in
 release: it has no `CHANGELOG.yaml` entry and never will, it never reaches
 PyPI, it is not mirrored, and it is pruned once newer ones exist.
 
-**Every merge to `main` cuts one** (`"dev_builds": true` in `.technoproj`).
-`release.yml`'s preflight allocates the number and the publish leg creates
-the tag only after every build job has passed, so a failed build leaves no
-tag: re-run it, or the next merge takes the same number. A merge whose
-commit already carries a dev tag cuts nothing. To build another branch,
-dispatch Release with its `ref`, a `tag` from `make dev-tag` and `publish`
-on.
+**Every merge to `main` cuts one** (`"dev_builds": true` in `.technoproj`),
+and `nightly.yml` cuts one for `main`'s HEAD every night at 06:00 UTC. The
+nightly skips when the newest dev tag already names HEAD or a Release run
+for `main` is still going. Neither pushes a tag first: the publish leg
+creates it only after every build job has passed, so a failed build leaves
+no tag, and a re-run, the next merge or the next nightly takes the same
+number. Dispatch Nightly with a `ref` to build another branch, and with
+`force` to build a HEAD that already has one.
 
 ```
 make dev-tag        # v0.5.0-dev.1 — the number that would be allocated next

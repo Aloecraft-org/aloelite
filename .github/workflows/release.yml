@@ -3,7 +3,7 @@ name: Release
 # A `v*` tag builds every format and publishes the GitHub release, with the
 # container image on GHCR and the wheel handed to publish.yml for PyPI.
 # A merge to main publishes a `-dev.<n>` build (`dev_builds` in .technoproj,
-# doc/ALIGNMENT.md §7): preflight allocates the number, and the publish leg
+# doc/ALIGNMENT.md §7), and nightly.yml dispatches one for main's HEAD daily: preflight allocates the number, and the publish leg
 # creates the tag only once every build job has passed, so a failed build
 # leaves no tag and the next merge, or a re-run of this one, takes the same
 # number. Two other paths build the identical matrix and publish nothing --
@@ -71,8 +71,11 @@ on:
 permissions:
   contents: read
 
+# Every dev build -- a merge to main or a nightly dispatch -- shares one
+# group, so two never allocate the next number at once. A real release
+# keeps a group per tag.
 concurrency:
-  group: release-${{ inputs.tag || github.ref }}
+  group: release-${{ (github.ref == 'refs/heads/main' || contains(inputs.tag, '-dev.')) && 'dev' || (inputs.tag || github.ref) }}
   cancel-in-progress: false
 
 env:

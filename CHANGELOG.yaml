@@ -340,6 +340,14 @@ releases:
         `release.yml` rehearses on a pull request that changes it rather
         than on a branch push.
       - |
+        **`nightly.yml` releases `main`'s HEAD as a dev build every night**
+        at 06:00 UTC, and on dispatch from any branch. It dispatches
+        `release.yml` with the next number and pushes no tag, so it takes
+        the same tag-after-build path as a merge. It skips when the newest
+        dev tag already names HEAD, or while a Release run for `main` is
+        still going; every dev build shares one concurrency group, so two
+        never allocate the same number.
+      - |
         **A dev tag takes a different route through `release.yml`.** It has
         no `CHANGELOG.yaml` entry and never will -- it names a commit, not a
         release -- so `release-check` would refuse it and `render md --tag`

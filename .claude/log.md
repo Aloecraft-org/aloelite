@@ -106,8 +106,12 @@ because HEAD still matched the dev.5 tag. Dispatched the nightly by hand on
 2026-11-02 for v0.5.0-dev.6 (0a23703, published). Then turned on
 technoproj v0.4.1's `dev_builds`: release.yml runs on push to main, the
 shared preflight allocates the number, and the publish leg creates the
-tag after the build passes. nightly.yml deleted; release.yml rehearses
-on pull_request instead of on a branch push. technoproj needs no change.
+tag after the build passes. release.yml rehearses on pull_request
+instead of on a branch push. nightly.yml kept at the owner's word ("merge
+to main produces a dev release; nightly is released nightly") but now
+dispatches release.yml with the next number and pushes no tag, skipping
+when HEAD already has one or a main release run is going. technoproj
+needs no change.
 
 Learned: the session clone's origin/main was stale (b4ea3be); fetch main
 before branching.
