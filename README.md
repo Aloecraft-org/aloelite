@@ -55,6 +55,21 @@ sudo apt install fuse3 libfuse3-dev
 pip install aloelite[fuse]
 ```
 
+The Rust CLI, a single binary with no Python, installs with one line
+(Linux and macOS, then Windows). On Linux the FUSE daemon, `aloelite-fuse`,
+comes with it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Aloecraft-org/aloelite/main/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/Aloecraft-org/aloelite/main/install.ps1 | iex
+```
+
+`sh -s -- --help` after the pipe lists the rest: pinning a release,
+switching between installed ones, removing them.
+
 For Docker:
 
 ```bash

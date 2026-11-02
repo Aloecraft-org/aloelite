@@ -105,6 +105,25 @@ host path the manifest grants.
   it needs nothing from the engine that a page does not already have;
   `workerCall(worker)` is the page side of `serve`'s protocol, and
   `demo.html` beside it runs both an in-memory and an OPFS volume.
+- **Install scripts for the native binaries: `install.sh` and
+  `install.ps1`.** One line installs the Rust CLI, and on Linux the
+  FUSE daemon beside it: `curl -fsSL .../start.sh | sh`, or
+  `irm .../start.ps1 | iex` on Windows. They are ports of
+  diluvium-drt's, so the commands are the same across Aloecraft
+  tools -- `install`, `get`, `list`, `list-all`, `check`, `use`,
+  `remove` -- and releases are kept side by side under
+  `share/aloelite/versions/`, with `bin/aloelite` pointing at the one
+  in use. Every download is checked against the release's
+  `SHA256SUMS.txt`, from the mirror first and GitHub Releases second;
+  a mismatch refuses and changes nothing.
+
+  Every release, dev builds included, ships each script eight times
+  -- `start`, `install`, `get` and `help`, each also as
+  `*-aloelite` -- stamped with the release and the mode, because a
+  script piped to a shell cannot see the URL it came from. `start`
+  installs the latest stable release, the others the release they
+  shipped with. Releases before 0.5.0 install too, from their
+  per-triple tarballs, so `latest` works while 0.4.0 is latest.
 
 ### Changed
 
