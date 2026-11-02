@@ -1,6 +1,6 @@
 # Must match the wasm-bindgen version in Cargo.lock. The bindgen schema is
 # unstable and wasm-bindgen-test-runner refuses to run on a mismatch.
-ARG WASM_BINDGEN_VERSION=0.2.114
+ARG WASM_BINDGEN_VERSION=0.2.127
 
 # --- Stage 1: Protobuf Builder ---
 # =================================

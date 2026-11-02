@@ -385,6 +385,11 @@ host path the manifest grants.
   all. `new` and `active` both count as valid, so nothing that checks
   validity changes; a host that filtered `list_mounts` on `new` should
   look at `active`. (#8)
+- **wasm-bindgen 0.2.127.** ego-platform's move to it is now the
+  commit this workspace pins, and `.devcontainer/Dockerfile`'s
+  `WASM_BINDGEN_VERSION` follows. 0.2.127 is what drt-web requires, so
+  aloelite can be linked into it as a library rather than loaded as a
+  separate module. The browser suite passes unchanged on it. (#8)
 
 ### Fixed
 
