@@ -95,6 +95,16 @@ host path the manifest grants.
   rw mount left behind by a closed instance meets the next one as
   `mount_conflict`. `rust/aloelite-extism/README.md` is the host
   author's page.
+- **`Fs.openMemory(bytes)` and `fs.export()` in `aloelite-wasm`.** A
+  page can now save a memory volume store and load one back:
+  `openMemory` takes an optional `Uint8Array` holding a whole SQLite
+  volume file, and `export` returns the file as it stands, from a
+  memory or pool handle alike. The bytes are the same file
+  `pool.export` and a native `aloelite` produce, so a volume moves
+  between a page, OPFS and a native host unchanged. The image code
+  the browser, the Extism plug-in and `aloelite_store::image` each
+  carried is now `Db::open_image` and `Db::snapshot` in
+  `aloelite-core`, once. (#8)
 
 ### Changed
 
@@ -367,6 +377,29 @@ host path the manifest grants.
   runs in headless Firefox as well as natively; the browser surface
   keeps its own test for the three error codes (`busy`, `opfs`, `io`)
   that are its alone.
+- **A mount is `active` once `mount` returns.** The row was left in
+  `new`, the spec's "under construction" state, for its whole life:
+  nothing ever moved it on, in either engine. `mount` now sets
+  `active` in the same transaction that creates the row, so `new` is
+  never visible to another reader and a failed mount leaves no row at
+  all. `new` and `active` both count as valid, so nothing that checks
+  validity changes; a host that filtered `list_mounts` on `new` should
+  look at `active`. (#8)
+
+### Fixed
+
+- **A volume file written in WAL mode opens as a memory image.** A
+  native writer leaves header bytes 18-19 at 2 (WAL), and SQLite will
+  not read such an image in memory, where there is no `-wal` to
+  consult. `Db::open_image` rewrites them to rollback-journal mode
+  first, which is exact for an exported or checkpointed file. This
+  reaches the browser's `Fs.openMemory(bytes)`, the plug-in's
+  `fs_open_image` and `aloelite_store::image::Image`. (#8)
+- **A file SQLite cannot read is no longer reported as "host sqlite
+  too old".** The open-time capability probe turned every failure
+  into that message, the WAL image above included. Only a missing
+  function or a NULL answer means too old now; anything else comes
+  back as the `sqlite` error it is.
 
 
 ## [0.4.0] - 2026-09-12

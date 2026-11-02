@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use rusqlite::types::{FromSql, ToSql};
-use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
+use rusqlite::{Connection, MAIN_DB, OptionalExtension, Row, named_params, params};
 use zeroize::Zeroizing;
 
 use crate::content::{chunk_hash, split_chunks};
@@ -124,6 +124,38 @@ impl Db {
             clock: Box::new(clock),
             rng: Box::new(rng),
         })
+    }
+
+    /// A volume store in memory, loaded from `image`: a whole SQLite file,
+    /// as [`Db::snapshot`] or any other writer produced it. An empty image is
+    /// a fresh, empty volume store.
+    ///
+    /// SQLite copies the image into memory it owns and grows it in place
+    /// from there; nothing keeps `image` alive after this. A file a native
+    /// writer left in WAL mode (header bytes 18-19 = 2) is opened as a
+    /// rollback-journal file: an in-memory database has no `-wal` to read,
+    /// and an exported or checkpointed file has nothing in one.
+    pub fn open_image(
+        image: &[u8],
+        clock: impl Clock + 'static,
+        rng: impl CryptoRngCore + Send + 'static,
+    ) -> Result<Db> {
+        let mut conn = Connection::open_in_memory()?;
+        if !image.is_empty() {
+            let image = without_wal_header(image);
+            conn.deserialize_read_exact(MAIN_DB, &image[..], image.len(), false)?;
+        }
+        Db::open(conn, clock, rng)
+    }
+
+    /// The whole database as it stands, serialized: what an image host
+    /// keeps and [`Db::open_image`] takes back. Refused inside a
+    /// transaction, where the image would be torn.
+    pub fn snapshot(&self) -> Result<Vec<u8>> {
+        if !self.conn.is_autocommit() {
+            return Err(FsError::usage("snapshot inside a transaction"));
+        }
+        Ok(self.conn.serialize(MAIN_DB)?.to_vec())
     }
 
     /// Flush any advance the mint made outside a transaction, then close.
@@ -435,25 +467,47 @@ impl StoredChunk {
 
 /// Refuse a too-old SQLite AT OPEN with an actionable message, instead of
 /// letting it surface later as a NOT NULL violation or a wrong-answer NULL
-/// timestamp.
+/// timestamp. Only a missing function or a NULL answer means "too old";
+/// any other failure (the file cannot be read at all, say) is passed on as
+/// itself rather than blamed on the SQLite version.
 fn check_sqlite_capabilities(conn: &Connection) -> Result<()> {
-    let ok = conn
-        .query_row("SELECT jsonb(1)", [], |_| Ok(()))
-        .and_then(|()| {
-            conn.query_row("SELECT unixepoch('subsec') IS NOT NULL", [], |r| {
-                r.get::<_, i64>(0)
-            })
-        })
-        .map(|subsec_ok| subsec_ok != 0)
-        .unwrap_or(false);
-    if ok {
-        return Ok(());
+    let probe = conn.query_row(
+        "SELECT jsonb(1) IS NOT NULL AND unixepoch('subsec') IS NOT NULL",
+        [],
+        |r| r.get::<_, bool>(0),
+    );
+    match probe {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(sqlite_too_old()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such function") => {
+            Err(sqlite_too_old())
+        }
+        Err(e) => Err(e.into()),
     }
+}
+
+fn sqlite_too_old() -> FsError {
     let (major, minor) = MIN_SQLITE;
-    Err(FsError::unsupported(format!(
+    FsError::unsupported(format!(
         "host sqlite {} is too old for aloelite (needs jsonb + unixepoch subsec, sqlite >= {major}.{minor})",
         rusqlite::version()
-    )))
+    ))
+}
+
+/// `image` with a WAL-mode header (file format write/read versions 18-19
+/// both 2) rewritten to rollback-journal mode (both 1), copying only when
+/// there is something to rewrite.
+fn without_wal_header(image: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    const WAL: u8 = 2;
+    const LEGACY: u8 = 1;
+    if image.len() > 19 && image[18] == WAL && image[19] == WAL {
+        let mut owned = image.to_vec();
+        owned[18] = LEGACY;
+        owned[19] = LEGACY;
+        std::borrow::Cow::Owned(owned)
+    } else {
+        std::borrow::Cow::Borrowed(image)
+    }
 }
 
 fn configure_connection(conn: &Connection) -> Result<()> {

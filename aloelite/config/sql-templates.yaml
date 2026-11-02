@@ -734,7 +734,8 @@ mutation:
       silent dependency on the host sqlite version (unixepoch('subsec')
       returns NULL below 3.42), and the templates are the cross-language
       conformance surface, so every implementation must supply it. Direct
-      base-table insert (era 2); state defaults to 'new'.
+      base-table insert (era 2); state defaults to 'new', and mount sets it
+      'active' (set_mount_state) in the same transaction before it returns.
 
   set_mount_state:
     sql: |

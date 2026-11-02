@@ -46,7 +46,7 @@ async fn ask(port: &MessagePort, message: JsValue) -> JsValue {
 #[wasm_bindgen_test]
 async fn requests_are_answered_under_their_id() {
     let channel = MessageChannel::new().unwrap();
-    let mut server = serve(Fs::open_memory().unwrap(), channel.port1().into()).unwrap();
+    let mut server = serve(Fs::open_memory(None).unwrap(), channel.port1().into()).unwrap();
     let client = channel.port2();
 
     let reply = ask(
@@ -97,7 +97,7 @@ async fn requests_are_answered_under_their_id() {
 #[wasm_bindgen_test]
 async fn a_failure_is_a_plain_error_object_with_the_code() {
     let channel = MessageChannel::new().unwrap();
-    let mut server = serve(Fs::open_memory().unwrap(), channel.port1().into()).unwrap();
+    let mut server = serve(Fs::open_memory(None).unwrap(), channel.port1().into()).unwrap();
     let client = channel.port2();
 
     // an engine error keeps its spec code across the channel
@@ -133,6 +133,6 @@ async fn a_failure_is_a_plain_error_object_with_the_code() {
 
 #[wasm_bindgen_test]
 fn an_endpoint_without_post_message_is_refused() {
-    let err = serve(Fs::open_memory().unwrap(), Object::new().into()).unwrap_err();
+    let err = serve(Fs::open_memory(None).unwrap(), Object::new().into()).unwrap_err();
     assert_eq!(get(&err, "code").as_string().unwrap(), "usage");
 }

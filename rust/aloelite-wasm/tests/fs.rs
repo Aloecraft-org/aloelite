@@ -38,7 +38,7 @@ fn big(v: &JsValue) -> String {
 
 /// A fresh in-memory store with one volume mounted.
 fn mounted() -> (Fs, String) {
-    let mut fs = Fs::open_memory().unwrap();
+    let mut fs = Fs::open_memory(None).unwrap();
     let vol = fs.call("create_volume", obj(&[("name", s("v"))])).unwrap();
     let vid = get(&vol, "id").as_string().unwrap();
     let mount = fs
@@ -354,7 +354,7 @@ async fn streaming_goes_through_descriptors_held_by_the_handle() {
 
 #[wasm_bindgen_test]
 fn resolve_volume_name_applies_the_reference_rule() {
-    let mut fs = Fs::open_memory().unwrap();
+    let mut fs = Fs::open_memory(None).unwrap();
     assert!(
         fs.call("resolve_volume_name", obj(&[("name", s("dup"))]))
             .unwrap()
@@ -391,4 +391,60 @@ fn resolve_volume_name_applies_the_reference_rule() {
     assert_eq!(got, expected);
     assert!(Fs::operations().contains(&"resolve_volume_name".to_owned()));
     assert!(Fs::operations().contains(&"stat".to_owned()));
+}
+
+#[wasm_bindgen_test]
+fn a_memory_store_exports_and_a_new_one_opens_from_the_bytes() {
+    let (mut fs, m) = mounted();
+    fs.call(
+        "create_entry",
+        obj(&[
+            ("mount", s(&m)),
+            ("path", s("/kept.txt")),
+            ("data", s("kept")),
+        ]),
+    )
+    .unwrap();
+    let mounts: Array = fs
+        .call("list_mounts", JsValue::UNDEFINED)
+        .unwrap()
+        .dyn_into()
+        .unwrap();
+    assert_eq!(
+        get(&mounts.get(0), "state").as_string().as_deref(),
+        Some("active"),
+        "a mount in use is active (ACC-4), not new"
+    );
+    fs.call("unmount", obj(&[("mount", s(&m))])).unwrap();
+    let bytes = fs.export().unwrap();
+    assert!(bytes.starts_with(b"SQLite format 3\0"));
+
+    let mut back = Fs::open_memory(Some(bytes)).unwrap();
+    let vid = get(
+        &back
+            .call("list_volumes", JsValue::UNDEFINED)
+            .unwrap()
+            .unchecked_into::<Array>()
+            .get(0),
+        "id",
+    )
+    .as_string()
+    .unwrap();
+    let m2 = back
+        .call("mount", obj(&[("volume", s(&vid))]))
+        .expect("the exported unmount carried over: no mount_conflict")
+        .as_string()
+        .unwrap();
+    let data: Uint8Array = back
+        .call(
+            "read_all",
+            obj(&[("mount", s(&m2)), ("path", s("/kept.txt"))]),
+        )
+        .unwrap()
+        .dyn_into()
+        .unwrap();
+    assert_eq!(data.to_vec(), b"kept");
+
+    let err = Fs::open_memory(Some(vec![0x5a; 4096])).unwrap_err();
+    assert_eq!(code_of(&err), "sqlite");
 }

@@ -15,11 +15,10 @@
 
 use std::sync::Arc;
 
+use aloelite_core::Db;
 use aloelite_core::platform::{Clock, CryptoRngCore};
-use aloelite_core::{Db, FsError};
 use ego_platform::blobs::BlobStore;
 use ego_platform::entropy::SystemEntropy;
-use rusqlite::{Connection, MAIN_DB};
 
 use crate::clock::system_clock;
 use crate::error::Result;
@@ -49,14 +48,8 @@ impl Image {
         clock: impl Clock + 'static,
         rng: impl CryptoRngCore + Send + 'static,
     ) -> Result<Image> {
-        let bytes = store.get(key).await?;
-        let mut conn = Connection::open_in_memory()?;
-        if let Some(bytes) = bytes.filter(|b| !b.is_empty()) {
-            // SQLite copies the image into memory it owns and grows it in
-            // place from there; nothing keeps `bytes` alive after this.
-            conn.deserialize_read_exact(MAIN_DB, bytes.as_slice(), bytes.len(), false)?;
-        }
-        let db = Db::open(conn, clock, rng)?;
+        let bytes = store.get(key).await?.unwrap_or_default();
+        let db = Db::open_image(&bytes, clock, rng)?;
         Ok(Image {
             db,
             store,
@@ -77,11 +70,7 @@ impl Image {
     /// The database as it stands, serialized: what a checkpoint writes.
     /// Refused inside a transaction, where the image would be torn.
     pub fn snapshot(&self) -> Result<Vec<u8>> {
-        let conn = self.db.connection();
-        if !conn.is_autocommit() {
-            return Err(FsError::usage("snapshot inside a transaction").into());
-        }
-        Ok(conn.serialize(MAIN_DB)?.to_vec())
+        Ok(self.db.snapshot()?)
     }
 
     /// Persist the image: one atomic put of the whole database.
