@@ -44,11 +44,13 @@ the page may post while `init` and `open` are still awaiting; the queue
 replays those into `serve`.
 
 `Pool.install` takes `{directory, vfsName, initialCapacity}`, all optional.
-A database and its rollback journal take two of the pool's files;
-`pool.addCapacity(n)` grows it. `pool.export(name)` returns the whole SQLite
-file as a `Uint8Array`, `pool.import(name, bytes)` installs one,
-`pool.delete(name)`, `pool.exists(name)`, `pool.list()` and `pool.capacity`
-do what they say.
+A database and its rollback journal take two of the pool's files, and
+`pool.list()` lists both: `main.db` and `main.db-journal` (the journal file
+stays once made). Count both when checking room, and call
+`pool.addCapacity(n)` before an open would need a file the pool does not
+have. `pool.export(name)` returns the whole SQLite file as a `Uint8Array`,
+`pool.import(name, bytes)` installs one, `pool.delete(name)`,
+`pool.exists(name)` and `pool.capacity` do what they say.
 
 ## The page
 
@@ -173,6 +175,20 @@ Worker can serve several pages. Without messages at all,
 `Fs.openMemory()` gives an in-memory volume store — nothing persists past
 the handle — for demos, tests, and a page that keeps its own bytes; the
 conformance engine underneath is the same.
+
+```js
+const fs = Fs.openMemory(saved);  // saved: a Uint8Array, or nothing for an empty store
+// ... fs.call(...) ...
+saved = fs.export();               // the whole SQLite file, as a Uint8Array
+```
+
+`Fs.openMemory(bytes)` takes any SQLite volume file: one `fs.export()` or
+`pool.export` returned, or one a native `aloelite` wrote, WAL mode
+included. `fs.export()` works on every handle; on a memory store,
+whatever was not exported is gone when the handle closes. Mount rows are
+part of the file, so export after `unmount`, or the reopened store still
+holds that rw mount and a new one on the same subtree gets
+`mount_conflict`.
 
 ## Single-writer
 

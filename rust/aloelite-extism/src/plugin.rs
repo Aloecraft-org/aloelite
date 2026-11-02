@@ -48,7 +48,7 @@ use std::cell::RefCell;
 
 use aloelite_api::Handle;
 use aloelite_core::{Db, FsError};
-use rusqlite::{Connection, MAIN_DB};
+use rusqlite::Connection;
 
 use crate::args::Msg;
 use crate::platform::{HostClock, HostEntropy};
@@ -79,13 +79,7 @@ pub fn open_in_memory() -> Result<(), FsError> {
 /// [`snapshot`] produced. An empty image is a fresh, empty volume store,
 /// which is what a host with nothing stored yet should send.
 pub fn open_image(image: &[u8]) -> Result<(), FsError> {
-    let mut conn = Connection::open_in_memory()?;
-    if !image.is_empty() {
-        // SQLite copies the image into memory it owns and grows it in place
-        // from there; nothing keeps `image` alive after this.
-        conn.deserialize_read_exact(MAIN_DB, image, image.len(), false)?;
-    }
-    install(Db::open(conn, HostClock, HostEntropy)?)
+    install(Db::open_image(image, HostClock, HostEntropy)?)
 }
 
 /// The whole database as it stands, for the host to keep.
@@ -100,11 +94,7 @@ pub fn snapshot() -> Result<Vec<u8>, FsError> {
         let handle = slot
             .as_mut()
             .ok_or_else(|| FsError::usage("snapshot: no volume is open"))?;
-        let conn = handle.db()?.connection();
-        if !conn.is_autocommit() {
-            return Err(FsError::usage("snapshot inside a transaction"));
-        }
-        Ok(conn.serialize(MAIN_DB)?.to_vec())
+        handle.db()?.snapshot()
     })
 }
 

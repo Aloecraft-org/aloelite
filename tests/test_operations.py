@@ -84,7 +84,7 @@ def test_list_volumes(db):
 
 def test_mount_info_state_and_path(db, mount):
     info = ops.mount_info(db, mount)
-    assert info.state.value == "new"  # default lifecycle state
+    assert info.state.value == "active"  # ACC-4: in use once mount returns
     assert info.mount_path == "/"  # anchored at volume root
 
 

@@ -29,7 +29,6 @@ use std::pin::Pin;
 use aloelite_api::Handle;
 use aloelite_core::{Db, FsError};
 use ego_platform::entropy::SystemEntropy;
-use rusqlite::Connection;
 use wasm_bindgen::prelude::*;
 
 use crate::args::JsArg;
@@ -57,13 +56,25 @@ pub struct Fs {
 #[wasm_bindgen]
 impl Fs {
     /// A volume store in memory: nothing outlives the handle. For demos,
-    /// tests, and a page that keeps its own bytes.
+    /// tests, and a page that keeps its own bytes. `bytes`, if given, is a
+    /// whole SQLite file to start from — what [`Fs::export`] or
+    /// `pool.export` returned, or a volume file a native writer made (one
+    /// left in WAL mode included). Absent or empty is a fresh, empty store.
     #[wasm_bindgen(js_name = openMemory)]
-    pub fn open_memory() -> Result<Fs, JsValue> {
-        let conn = Connection::open_in_memory().map_err(|e| value::throw(&FsError::from(e)))?;
-        let db = Db::open(conn, aloelite_store::clock::system_clock(), SystemEntropy)
+    pub fn open_memory(bytes: Option<Vec<u8>>) -> Result<Fs, JsValue> {
+        let bytes = bytes.unwrap_or_default();
+        let db = Db::open_image(&bytes, aloelite_store::clock::system_clock(), SystemEntropy)
             .map_err(|e| value::throw(&e))?;
         Ok(Fs::from_db(db))
+    }
+
+    /// The whole database as it stands, as a `Uint8Array`: a SQLite file
+    /// that `Fs.openMemory(bytes)`, `pool.import` or a native `aloelite`
+    /// opens. Works on any handle, memory or pool. Nothing decides when to
+    /// call it: in a memory store, whatever was not exported is lost when
+    /// the handle closes.
+    pub fn export(&mut self) -> Result<Vec<u8>, JsValue> {
+        self.snapshot().map_err(|e| value::throw(&e))
     }
 
     /// Run one operation: `op` is a name from [`OPS`] (or [`EXTRA_OPS`]),
@@ -131,6 +142,11 @@ impl Fs {
         let result = self.handle.shut();
         let after = self.on_close.take().map(|f| f());
         (result, after)
+    }
+
+    /// [`Fs::export`] without the JS error conversion.
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, FsError> {
+        self.handle.db()?.snapshot()
     }
 
     /// [`Fs::call`] without the JS error conversion: what the server uses.

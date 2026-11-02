@@ -244,6 +244,13 @@ pub fn mount(db: &mut Db, volume: &VolumeId, opts: &MountOptions<'_>) -> Result<
                 });
             }
         }
+        // ACC-4: the row was `new` while the mount was being built (anchor,
+        // admission, unlock); it is `active` once mount returns. Same
+        // transaction, so a failed mount leaves no row in either state.
+        db.run(
+            SET_MOUNT_STATE,
+            named_params! { ":mount": mid, ":state": MountState::Active },
+        )?;
         Ok(mid)
     })
 }

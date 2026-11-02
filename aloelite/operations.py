@@ -397,6 +397,10 @@ def mount(
                 "enc_mode": enc_mode,
                 "volume": str(volume),
             }
+        # ACC-4: the row was 'new' while the mount was being built (anchor,
+        # admission, unlock); it is 'active' once mount returns. Same
+        # transaction, so a failed mount leaves no row in either state.
+        db.rowcount("mutation.set_mount_state", {"mount": mid, "state": "active"})
     return MountId(mid)
 
 
