@@ -29,11 +29,19 @@ type.
 // worker.js — module worker
 import init, { Pool, serve } from "./pkg/aloelite_wasm.js";
 
+const early = [];                       // requests sent before serve() would be dropped
+self.onmessage = (event) => early.push(event);
+
 await init();
 const pool = await Pool.install();      // OPFS directory ".aloelite", VFS "aloelite-opfs", 6 files
 const fs = await pool.open("main.db");  // throws {code: "busy"} if another Worker has it open
-serve(fs, self);                        // from here on, messages are the only way in
+self.server = serve(fs, self);          // from here on, messages are the only way in
+early.forEach((event) => self.onmessage(event));
 ```
+
+A module Worker drops a message that arrives before anything listens, and
+the page may post while `init` and `open` are still awaiting; the queue
+replays those into `serve`.
 
 `Pool.install` takes `{directory, vfsName, initialCapacity}`, all optional.
 A database and its rollback journal take two of the pool's files;
@@ -67,12 +75,43 @@ const call = (op, args) =>
 const volume =
   (await call("resolve_volume_name", { name: "docs" })) ??
   (await call("create_volume", { name: "docs" })).id;
-const mount = await call("mount", { volume });
+const mount = await call("mount", { volume, ttl_ms: 60_000 });
 await call("create_entry", { mount, path: "/hello.txt", data: "hello" });
 const bytes = await call("read_all", { mount, path: "/hello.txt" }); // Uint8Array
 const info = await call("stat", { mount, path: "/hello.txt" });      // info.size === 5n
 await call("unmount", { mount });
 ```
+
+A mount row is durable: a page that closes without `unmount` leaves its
+rw mount valid, and the next page's rw mount on that volume fails with
+`mount_conflict`. Give an rw mount a `ttl_ms` and renew it with
+`renew_mount` while the page lives, so an abandoned one expires.
+
+## The file explorer
+
+`explorer/aloelite-explorer.js` is a browsable file tree for a page, as
+one ES module with no dependencies. It takes the `call` function above,
+or an `Fs` directly:
+
+```js
+import { renderExplorer } from "./explorer/aloelite-explorer.js";
+
+const explorer = await renderExplorer("files", call, { volume: "docs", editable: true });
+explorer.navigate("/notes");
+await explorer.destroy(); // unmounts the explorer's own mount
+```
+
+`volume` is a name or an id; leave it out for a picker, or pass `mount`
+to reuse a mount the page already holds. Without `editable` the explorer
+mounts `ro` and only browses, previews and downloads. Its own mount is
+renewed while it lives, so call `destroy()` before removing it from the
+page, or it keeps a mount nothing can see until the page closes.
+`confirm` and `prompt` replace the browser's dialogs; the other options
+are `DEFAULTS` at the top of the module, and `--alx-*` CSS properties
+theme it. `workerCall(worker)` in the same module is the page side of
+the protocol. `explorer/demo.html` runs it on an in-memory volume, or
+with `?opfs` on a persistent one from a Worker; serve `rust/` after
+building `pkg/` and open `/aloelite-wasm/explorer/demo.html`.
 
 ## The protocol
 
