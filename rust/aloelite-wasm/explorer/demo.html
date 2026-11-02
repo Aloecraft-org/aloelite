@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aloelite explorer demo</title>
+<style>
+  body { margin: 0; padding: 16px; font: 14px/1.4 system-ui, sans-serif; background: Canvas; color: CanvasText; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p { margin: 0 0 12px; color: GrayText; }
+  #files { height: calc(100vh - 110px); }
+</style>
+</head>
+<body>
+<h1>Aloelite explorer</h1>
+<p id="mode"></p>
+<div id="files"></div>
+
+<script type="module">
+// Two ways in, picked by the query string:
+//   demo.html        an in-memory volume store, driven directly on this page
+//   demo.html?opfs   a persistent OPFS volume, driven through demo-worker.js
+// Build ../../pkg first (aloelite-wasm/README.md, "Build the package") and
+// serve rust/ over HTTP; ?opfs needs a secure context (localhost counts).
+import init, { Fs } from "../../pkg/aloelite_wasm.js";
+import { renderExplorer, workerCall } from "./aloelite-explorer.js";
+
+const opfs = new URLSearchParams(location.search).has("opfs");
+const call = opfs ? workerCall(new Worker("./demo-worker.js", { type: "module" })) : await openMemory();
+
+document.getElementById("mode").textContent = opfs
+  ? "Persistent: OPFS volume file, served from a Worker. Reload and your changes are still here."
+  : "In memory: nothing survives a reload. Add ?opfs to the URL for a persistent volume.";
+
+const volume = (await call("resolve_volume_name", { name: "demo" })) ?? (await seed(call));
+// A reload starts a new explorer before the old one's rw mount has expired
+// (DEFAULTS.ttlMs), so the demo stacks rw mounts on purpose; entry write
+// locks still keep two writers off one file.
+window.explorer = await renderExplorer("files", call, {
+  volume,
+  editable: true,
+  mountArgs: { allow_overlap: true },
+});
+addEventListener("pagehide", () => window.explorer.destroy());
+
+async function openMemory() {
+  await init();
+  const fs = Fs.openMemory();
+  return (op, args) => fs.call(op, args);
+}
+
+async function seed(call) {
+  const volume = (await call("create_volume", { name: "demo" })).id;
+  const mount = await call("mount", { volume });
+  const files = {
+    "/README.txt": "This volume lives in a single SQLite file.\nClick a folder to open it, a file to preview it.\n",
+    "/notes/todo.md": "# Todo\n\n- try uploading a file\n- edit this one\n",
+    "/notes/ideas.md": "Ideas go here.\n",
+    "/data/numbers.json": JSON.stringify({ primes: [2, 3, 5, 7, 11, 13] }, null, 2),
+    "/data/blob.bin": new Uint8Array(Array.from({ length: 300 }, (_, i) => i % 256)),
+    "/images/dot.svg":
+      '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><circle cx="60" cy="60" r="50" fill="#2563c9"/></svg>',
+  };
+  for (const dir of ["/notes", "/data", "/images", "/empty"]) {
+    await call("create_container", { mount, path: dir });
+  }
+  for (const [path, data] of Object.entries(files)) {
+    await call("create_entry", { mount, path, data });
+  }
+  await call("unmount", { mount });
+  return volume;
+}
+</script>
+</body>
+</html>
