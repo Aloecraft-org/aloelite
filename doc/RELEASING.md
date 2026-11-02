@@ -231,6 +231,7 @@ is `<os>_<arch>[_<libc>]`, not Rust triples, and a profile token comes last.
 | `BUILDINFO.txt` | tag, version, commit, branch, build time, and `api_version`: the schema era this build writes |
 | `aloelite_wasi.wasm` | the CLI as a WASI component (`wasmtime run --dir=.::/work aloelite_wasi.wasm -f /work/x.fs ls /`) |
 | `aloelite_web.tar.gz` | the browser package: ES module, `.wasm`, `.d.ts`, README |
+| `start.sh`, `install.sh`, `get.sh`, `help.sh`, each also as `*-aloelite.sh` and as `.ps1` | the installers, stamped with `V` and their mode: `start` installs the latest stable release, the rest act on `V` |
 | `SHA256SUMS.txt` | over all of the above |
 | `ghcr.io/aloecraft-org/aloelite:V` | the manager image, amd64 and arm64; `:latest` too for a stable release |
 

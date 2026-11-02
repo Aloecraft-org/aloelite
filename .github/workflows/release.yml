@@ -26,6 +26,8 @@ name: Release
 #   aloelite_complete_<platform>  every binary for that platform, + BUILDINFO
 #   aloelite_wasi.wasm            the CLI as a WASI component
 #   aloelite_web.tar.gz           the browser package (ES module, .wasm, .d.ts)
+#   start.sh, install.sh, get.sh, help.sh, and each as *-aloelite.sh and
+#   as .ps1                       the installers, stamped (`installers`)
 #   BUILDINFO.txt                 tag, version, commit, branch, built, api_version
 #   SHA256SUMS.txt                over all of the above
 #
@@ -355,6 +357,51 @@ jobs:
           name: dist-wasm
           path: dist/*
 
+  # install.sh and install.ps1, eight copies each, for every build a dev
+  # one included. start* installs the latest stable release; install*, get*
+  # and help* act on THIS release. A script piped to `sh` or `iex` cannot
+  # see its own URL, so each copy is stamped with its release and its mode:
+  # a `<tag>/install.sh` that installed `latest` would be lying. The
+  # -aloelite names are the same files, for a directory holding more than
+  # one project's installers.
+  installers:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+      - name: Stamp
+        shell: bash
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for mode in start install get help; do
+            for f in "dist/$mode.sh" "dist/$mode-aloelite.sh"; do
+              sed -e "s|^STAMPED_VERSION=.*|STAMPED_VERSION=$TAG|" \
+                  -e "s|^STAMPED_MODE=.*|STAMPED_MODE=$mode|" install.sh > "$f"
+              grep -qx "STAMPED_VERSION=$TAG" "$f" && grep -qx "STAMPED_MODE=$mode" "$f" \
+                || { echo "::error::$f was not stamped with '$TAG' and '$mode'"; exit 1; }
+              [ "$(sh "$f" --version)" = "${TAG:-none (a checkout copy, which installs latest)}" ] \
+                || { echo "::error::$f --version does not print '$TAG'"; exit 1; }
+            done
+            for f in "dist/$mode.ps1" "dist/$mode-aloelite.ps1"; do
+              sed -e "s|^\\\$StampedVersion = .*|\\\$StampedVersion = '$TAG'|" \
+                  -e "s|^\\\$StampedMode = .*|\\\$StampedMode = '$mode'|" install.ps1 > "$f"
+              grep -qx "\\\$StampedVersion = '$TAG'" "$f" && grep -qx "\\\$StampedMode = '$mode'" "$f" \
+                || { echo "::error::$f was not stamped with '$TAG' and '$mode'"; exit 1; }
+              [ "$(pwsh -NoProfile -File "$f" --version)" = "${TAG:-none (a checkout copy, which installs latest)}" ] \
+                || { echo "::error::$f --version does not print '$TAG'"; exit 1; }
+            done
+          done
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-installers
+          path: dist/*
+
   # The manager image. Built for amd64 alone on a dry run (a multi-platform
   # build cannot be loaded locally, only pushed); both platforms when
   # publishing. GHCR is the GitHub side of images; Docker Hub stays the
@@ -452,7 +499,7 @@ jobs:
 
   # Dry run: what a tag would have shipped, in the run's summary.
   manifest:
-    needs: [preflight, python, native, wasm]
+    needs: [preflight, python, native, wasm, installers]
     # `always()` because `wasm` is skipped for a dev build, and a skipped
     # need would otherwise skip this too. Skipped is not failed.
     if: ${{ always() && needs.preflight.outputs.publish != 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
@@ -478,7 +525,7 @@ jobs:
   # by GITHUB_TOKEN would otherwise never trigger. publish.yml refuses a
   # -dev.<n> tag itself, so a dev build cannot reach PyPI through this.
   publish:
-    needs: [preflight, gate, python, native, wasm, image]
+    needs: [preflight, gate, python, native, wasm, installers, image]
     # `always()` for the same reason as `manifest`: a dev build skips `wasm`
     # and still publishes. Nothing ships if any need actually failed.
     if: ${{ always() && needs.preflight.outputs.publish == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
