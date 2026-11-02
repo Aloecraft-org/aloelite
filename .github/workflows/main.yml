@@ -14,6 +14,12 @@ on:
   # push. See the note in publish.yml.
   workflow_dispatch:
 
+# A newer commit on a pull request cancels the run it replaces. Runs on
+# `main`, tags and schedules are never cancelled (technoproj ci check).
+concurrency:
+  group: main-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -44,7 +50,7 @@ jobs:
     # when nobody touched it. It brings PyYAML, which is why there is no
     # separate install for it.
     - name: The shared release engine
-      run: pip install "git+https://github.com/Aloecraft-org/technoproj@v0.3.0"
+      run: pip install "git+https://github.com/Aloecraft-org/technoproj@v0.4.1"
 
     # script/version.mk is a COPY of the engine's, placed by `technoproj
     # sync`. This is what makes it a copy that is checked rather than one
@@ -55,6 +61,11 @@ jobs:
 
     - name: Changelog is generated from its source
       run: technoproj-changelog check
+
+    # release.yml still calls the shared preflight and publish halves, hands
+    # the registry leg its tag, and grants the permissions they need.
+    - name: The release workflow conforms
+      run: technoproj release check-workflow
 
     # `consistency` catches the version drifting between pyproject.toml,
     # .technoproj and rust/Cargo.toml, and calls script/checks.py for the one
@@ -237,6 +248,27 @@ jobs:
   #      fails here in minutes rather than three weeks in.
   #   2. the conformance suite runs in a REAL BROWSER, not only natively.
   # Everything else (fmt, clippy, native tests) is ordinary hygiene.
+  installer:
+    # install.sh, offline against a file:// mirror, under dash (POSIX sh as
+    # Debian's /bin/sh) and bash.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: sudo apt-get install -y -qq dash
+    - run: SH=dash script/test-installer.sh
+    - run: SH=bash script/test-installer.sh
+
+  installer-windows:
+    # install.ps1, the same cases, under PowerShell 7 and Windows
+    # PowerShell 5.1, which is what `irm | iex` gets on a stock machine.
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - shell: pwsh
+      run: ./script/test-installer.ps1 -Shell pwsh
+    - shell: pwsh
+      run: ./script/test-installer.ps1 -Shell powershell
+
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 30

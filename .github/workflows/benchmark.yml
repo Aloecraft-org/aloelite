@@ -24,6 +24,12 @@ on:
         required: false
         default: 'all'
 
+# A newer commit on a pull request cancels the run it replaces. Runs on
+# `main`, tags and schedules are never cancelled (technoproj ci check).
+concurrency:
+  group: benchmark-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Every pull request gets this one: it proves the harness still runs and
   # produces a comparable shape, in about a minute.

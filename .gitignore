@@ -18,5 +18,7 @@ bench-results/
 
 # Rust (rust/ workspace)
 rust/target/
+# ...and wasm-bindgen's page package (rust/aloelite-wasm/README.md)
+rust/pkg/
 # ...and the Extism harness, which is its own workspace and so its own target
 rust/aloelite-extism/harness/target/
