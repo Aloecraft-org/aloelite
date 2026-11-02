@@ -13,7 +13,7 @@ dispatches `release.yml`, and the workflow creates the tag itself.
 > What this document describes conforms to it throughout: §1, §2 and §4 — the
 > version scheme, `.technoproj`'s `pre`, and artifact names with no version in
 > them — §5's `BUILDINFO.txt`, §6's `SHA256SUMS.txt`, §7's dev builds (which
-> `nightly.yml` cuts and `publish.yml` keeps off PyPI), §8's Python rules and
+> a merge to `main` cuts and `publish.yml` keeps off PyPI), §8's Python rules and
 > §9's three gates. Its §3 is the reason the release tooling is
 > [technoproj](https://github.com/Aloecraft-org/technoproj), installed in CI
 > and pinned rather than copied into this tree, and aloelite is mirrored from
@@ -249,19 +249,24 @@ gate and without a hash in the version string — the hash is in
 release: it has no `CHANGELOG.yaml` entry and never will, it never reaches
 PyPI, it is not mirrored, and it is pruned once newer ones exist.
 
-`nightly.yml` cuts them — every night at 06:00 UTC, and on dispatch with a
-`ref` for any branch. It **skips when `HEAD` has not moved** since the last
-dev tag, so identical builds do not accumulate; `force` overrides that.
+**Every merge to `main` cuts one** (`"dev_builds": true` in `.technoproj`),
+and `nightly.yml` cuts one for `main`'s HEAD every night at 06:00 UTC. The
+nightly skips when the newest dev tag already names HEAD or a Release run
+for `main` is still going. Neither pushes a tag first: the publish leg
+creates it only after every build job has passed, so a failed build leaves
+no tag, and a re-run, the next merge or the next nightly takes the same
+number. Dispatch Nightly with a `ref` to build another branch, and with
+`force` to build a HEAD that already has one.
 
 ```
 make dev-tag        # v0.5.0-dev.1 — the number that would be allocated next
 ```
 
 **The number is global and never reused.** It is allocated from the tags
-that exist, not from a counter in the tree, so a nightly needs no commit and
+that exist, not from a counter in the tree, so a build needs no commit and
 two branches cannot collide. It is monotonic across versions —
 `0.4.0.dev104` then `0.5.0.dev105` — and because old dev *releases* are
-pruned (by `nightly.yml` and by the publish leg, keeping five) while their
+pruned (by the publish leg, keeping five) while their
 *tags* stay, a number names exactly one build forever.
 
 **What a dev tag does differently**, all of it keyed off the `-dev.` in the

@@ -51,6 +51,7 @@
     ]
   },
   "TECHNO_RELEASE": {
+    "dev_builds": true,
     "name": "{tag}",
     "registry": {
       "kind": "pypi",

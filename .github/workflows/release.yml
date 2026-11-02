@@ -2,12 +2,15 @@ name: Release
 
 # A `v*` tag builds every format and publishes the GitHub release, with the
 # container image on GHCR and the wheel handed to publish.yml for PyPI.
-# Two other paths build the identical matrix and publish nothing -- the
-# rehearsal that proves the pipeline before a tag exists, artifacts left on
-# the run with a manifest in the job summary: a push that changes this file
-# (so an edit to the release pipeline tests itself; `paths` filters are not
-# applied to tag pushes, so tags still always run), and a manual dispatch
-# from any ref with `publish` off. `technoproj release cut --tag vX.Y.Z` is
+# A merge to main publishes a `-dev.<n>` build (`dev_builds` in .technoproj,
+# doc/ALIGNMENT.md §7), and nightly.yml dispatches one for main's HEAD daily: preflight allocates the number, and the publish leg
+# creates the tag only once every build job has passed, so a failed build
+# leaves no tag and the next merge, or a re-run of this one, takes the same
+# number. Two other paths build the identical matrix and publish nothing --
+# the rehearsal that proves the pipeline before a tag exists, artifacts left
+# on the run with a manifest in the job summary: a pull request that changes
+# this file (so an edit to the release pipeline tests itself), and a manual
+# dispatch from any ref with `publish` off. `technoproj release cut --tag vX.Y.Z` is
 # the dispatch that publishes; the workflow creates the tag itself. An
 # existing tag is a re-run: the release is updated in place and its assets
 # replaced, so a run that died of infrastructure needs no new tag.
@@ -44,7 +47,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
-    branches: ["**"]
+    branches: ["main"]
+  pull_request:
     paths: [".github/workflows/release.yml"]
   workflow_dispatch:
     inputs:
@@ -67,8 +71,11 @@ on:
 permissions:
   contents: read
 
+# Every dev build -- a merge to main or a nightly dispatch -- shares one
+# group, so two never allocate the next number at once. A real release
+# keeps a group per tag.
 concurrency:
-  group: release-${{ inputs.tag || github.ref }}
+  group: release-${{ (github.ref == 'refs/heads/main' || contains(inputs.tag, '-dev.')) && 'dev' || (inputs.tag || github.ref) }}
   cancel-in-progress: false
 
 env:
@@ -81,8 +88,8 @@ jobs:
   # github.sha, so the assets and the notes come from one tree.
   #
   # `inputs.publish` is a boolean from the UI and a string from the API --
-  # nightly.yml dispatches this with `gh workflow run`, which sends "true".
-  # The shared workflow takes a boolean, so it is coerced here.
+  # `technoproj release cut` and `gh workflow run` send "true". The shared
+  # workflow takes a boolean, so it is coerced here.
   preflight:
     uses: Aloecraft-org/technoproj/.github/workflows/release-preflight.yml@v0.4.1
     with:
