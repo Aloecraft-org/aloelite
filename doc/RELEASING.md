@@ -13,7 +13,7 @@ dispatches `release.yml`, and the workflow creates the tag itself.
 > What this document describes conforms to it throughout: §1, §2 and §4 — the
 > version scheme, `.technoproj`'s `pre`, and artifact names with no version in
 > them — §5's `BUILDINFO.txt`, §6's `SHA256SUMS.txt`, §7's dev builds (which
-> `nightly.yml` cuts and `publish.yml` keeps off PyPI), §8's Python rules and
+> a merge to `main` cuts and `publish.yml` keeps off PyPI), §8's Python rules and
 > §9's three gates. Its §3 is the reason the release tooling is
 > [technoproj](https://github.com/Aloecraft-org/technoproj), installed in CI
 > and pinned rather than copied into this tree, and aloelite is mirrored from
@@ -249,19 +249,23 @@ gate and without a hash in the version string — the hash is in
 release: it has no `CHANGELOG.yaml` entry and never will, it never reaches
 PyPI, it is not mirrored, and it is pruned once newer ones exist.
 
-`nightly.yml` cuts them — every night at 06:00 UTC, and on dispatch with a
-`ref` for any branch. It **skips when `HEAD` has not moved** since the last
-dev tag, so identical builds do not accumulate; `force` overrides that.
+**Every merge to `main` cuts one** (`"dev_builds": true` in `.technoproj`).
+`release.yml`'s preflight allocates the number and the publish leg creates
+the tag only after every build job has passed, so a failed build leaves no
+tag: re-run it, or the next merge takes the same number. A merge whose
+commit already carries a dev tag cuts nothing. To build another branch,
+dispatch Release with its `ref`, a `tag` from `make dev-tag` and `publish`
+on.
 
 ```
 make dev-tag        # v0.5.0-dev.1 — the number that would be allocated next
 ```
 
 **The number is global and never reused.** It is allocated from the tags
-that exist, not from a counter in the tree, so a nightly needs no commit and
+that exist, not from a counter in the tree, so a build needs no commit and
 two branches cannot collide. It is monotonic across versions —
 `0.4.0.dev104` then `0.5.0.dev105` — and because old dev *releases* are
-pruned (by `nightly.yml` and by the publish leg, keeping five) while their
+pruned (by the publish leg, keeping five) while their
 *tags* stay, a number names exactly one build forever.
 
 **What a dev tag does differently**, all of it keyed off the `-dev.` in the

@@ -256,20 +256,19 @@ host path the manifest grants.
   upload can be yanked but never replaced or reused. Pruning works on
   GitHub releases and does not work there, so the exclusion has to land
   before the first dev tag rather than after.
-- **`nightly.yml`, and something that cuts a dev tag.** Every night at
-  06:00 UTC and on dispatch from any branch, with the build skipped
-  when `HEAD` has not moved since the last dev tag -- otherwise
-  identical builds accumulate. The number is allocated from the tags
-  that exist rather than from a counter in the tree, so a nightly needs
-  no commit and two branches cannot collide on one; `make dev-tag`
-  prints what it would take. Old dev *releases* are pruned and their
-  *tags* are kept, which is what makes a number name exactly one build
-  forever.
-
-  The tag is pushed and then `release.yml` is dispatched for it, rather
-  than left to the `v*` push trigger, because a ref pushed with
-  `GITHUB_TOKEN` starts no workflow run. That is GitHub's recursion
-  guard and it cannot be turned off.
+- **Every merge to `main` cuts a dev build.** `"dev_builds": true` in
+  `.technoproj` puts `release.yml` on technoproj's merge path: the
+  shared preflight allocates the next `-dev.<n>` and the publish leg
+  creates the tag only after every build job has passed. A failed
+  build therefore leaves no tag, and a re-run or the next merge takes
+  the same number; a merge whose commit already carries the newest dev
+  tag cuts nothing. The number is allocated from the tags that exist
+  rather than from a counter in the tree, so a build needs no commit
+  and two branches cannot collide on one; `make dev-tag` prints what it
+  would take. Old dev *releases* are pruned and their *tags* are kept,
+  which is what makes a number name exactly one build forever.
+  `release.yml` rehearses on a pull request that changes it rather
+  than on a branch push.
 - **A dev tag takes a different route through `release.yml`.** It has
   no `CHANGELOG.yaml` entry and never will -- it names a commit, not a
   release -- so `release-check` would refuse it and `render md --tag`

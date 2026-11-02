@@ -45,7 +45,7 @@ jobs:
   # upload a FINAL 0.5.0. A PyPI upload is IMMUTABLE: yankable, never
   # replaced and never reused. The shared publish leg hands every tag it
   # releases to this file, dev builds included, so the refusal lives here.
-  # A dev tag skips the jobs below rather than failing, so a nightly does
+  # A dev tag skips the jobs below rather than failing, so a dev build does
   # not leave a red run behind. doc/ALIGNMENT.md §7, non-negotiable 7.
   guard:
     runs-on: ubuntu-latest
