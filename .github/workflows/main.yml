@@ -14,6 +14,12 @@ on:
   # push. See the note in publish.yml.
   workflow_dispatch:
 
+# A newer commit on a pull request cancels the run it replaces. Runs on
+# `main`, tags and schedules are never cancelled (technoproj ci check).
+concurrency:
+  group: main-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     runs-on: ubuntu-latest
