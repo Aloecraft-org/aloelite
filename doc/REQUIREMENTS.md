@@ -32,7 +32,7 @@ LLM coding agents should almost NEVER change this file. Claude code has complete
 
         + **Status: [MIKE: Under Review]** - This requirement was made by Claude. Claude was not supposed to do that (Bad, Claude. Bad.). Despite this terribly eggregious breach of protocol, **THIS REQUIREMENT (-XXX-a) REMAINS IN FORCE** (for now).
 
-- **NODE-2** : A node is exactly one of two types, Container or Entry, fixed at creation. No other node types exist in this iteration.
+- **NODE-2** : ~~A node is exactly one of two types, Container or Entry, fixed at creation. No other node types exist in this iteration.~~
 
     - **NODE-2-XXX-a** : A node is exactly one of a closed set of types fixed at creation: Container, Entry, and (era 2, D-3) Symlink, Fifo, and Socket. The non-container types are leaves that place like entries; a symlink's content is its target, fifo/socket carry empty content (the kernel owns their rendezvous semantics). Device nodes are refused by decision, not omission.
 
@@ -87,7 +87,14 @@ LLM coding agents should almost NEVER change this file. Claude code has complete
 
         + **Status: [MIKE: Under Review]** - This requirement was made by Claude. Claude was not supposed to do that (Bad, Claude. Bad.). Despite this terribly eggregious breach of protocol, **THIS REQUIREMENT (-XXX-a) REMAINS IN FORCE** (for now).
 
-- **PI-2** : Every node that is part of a volume and is not that volume's root must have exactly one active incoming edge; a volume root has none.
+- **PI-2** : ~~Every node that is part of a volume and is not that volume's root must have exactly one active incoming edge; a volume root has none.~~
+
+- **PI-2b** : Every node that is part of a volume and is not that volume's root must have at least one active incoming edge.
+
+- **PI-2.1** : A container node that is part of a volume and is not that volume's root must have exactly one active incoming edge.
+
+- **PI-2.2** : A volume root node must have exactly zero incoming edges.
+
 - **PI-3** : A node with no incoming edge that is not a volume root is in a volatile (orphaned) state: addressable by id, excluded from tree traversal, and eligible for later pruning.
 - **PI-4** : The uniqueness constraint of PI-1 prevents any cycle formed by giving an already-placed node an additional parent.
 
@@ -96,13 +103,15 @@ LLM coding agents should almost NEVER change this file. Claude code has complete
         + **Status: [MIKE: Under Review]** - This requirement was made by Claude. Claude was not supposed to do that (Bad, Claude. Bad.). Despite this terribly eggregious breach of protocol, **THIS REQUIREMENT (-XXX-a) REMAINS IN FORCE** (for now).
 
 - **PI-5** : A cycle formed by relocation (i.e. placing a container beneath one of its own descendants) is not caught by PI-1 and must be prevented by an ancestor check at reparent time. The proposed new parent must be neither the node being moved nor any descendant of it.
+
 - **PI-6** : An edge's `volume_id` must equal the volume of its `from_id`; placements never span volumes. Moving a subtree between volumes re-stamps `volume_id` across the entire moved subtree.
+
 - **PI-7** : Because archived edges are retained, a subtree detached in error remains recoverable by walking archived edges. The eager prevention of PI-5 is the primary defense; this recoverability is the backstop.
 
 ## Content and I/O
 
 - **IO-1** : An Entry's content (payload) is stored separately from node metadata, keyed by node, so that namespace traversal and path resolution touch only metadata.
-- **IO-2** : Reading or writing the full content of an Entry is an atomic operation.
+- **IO-2** : ~~Reading or writing the full content of an Entry is an atomic operation.~~
 
     + **IO-2r1**: Reading or writing the full content of an Entry is atomic. Where content is chunked, a write completes by atomically advancing the Entry's committed content version to a fully-recorded new version; partial writes leave the committed version unchanged.
 
@@ -113,10 +122,8 @@ LLM coding agents should almost NEVER change this file. Claude code has complete
 
 ## Access
 
-- **ACC-1a** : A mount is a durable immutable access point bound to an explicit node in exactly one volume. All access to a volume is brokered through a mount; access is never ambient.
-- **ACC-1b** : Era 2 (D-4): a mount carries an access mode, `ro` or `rw`, fixed at creation. Every mutating operation through an `ro` mount is refused (read_only). A mount may also carry a `principal` — an opaque tenant/user identity recorded for policy and future ACLs.
-
-    + **Status: [MIKE: Under Review]** - This requirement was made by Claude. This was a requested modification, but should be reviewed in light of recent unauthorized modifications to other requirements **THIS REQUIREMENT REMAINS IN FORCE** (for now).
+- **ACC-1a** : ~~A mount is a durable immutable access point bound to an explicit node in exactly one volume. All access to a volume is brokered through a mount; access is never ambient.~~
+- **ACC-1b** : ~~Era 2 (D-4): a mount carries an access mode, `ro` or `rw`, fixed at creation. Every mutating operation through an `ro` mount is refused (read_only). A mount may also carry a `principal` — an opaque tenant/user identity recorded for policy and future ACLs.~~
 
 - **ACC-1c** : Era 2 (D-4) admission policy: by default at most one `rw` mount per subtree — a new `rw` mount whose point equals, contains, or is contained by a valid `rw` mount's point in the same volume is refused (mount_conflict) unless overlap is explicitly requested. This is authorization, not correctness: id generation is safe under arbitrary overlap (D-1/D-2) and entry write locks arbitrate write-write conflicts. `ro` mounts never conflict.
 
@@ -131,20 +138,34 @@ LLM coding agents should almost NEVER change this file. Claude code has complete
 - **ACC-8** : A lock carries validity comprising `read_count`, `write_count`, and `ttl`. The counts are recorded but not yet enforced against; they forward-provision a future multi-reader policy without committing to one now.
 - **ACC-9** : A lock is valid only while its mount exists and its ttl has not elapsed, and a lock must not outlive its mount. A long-lived streaming lock is an ordinary mount-scoped lock with a generous ttl, not a distinct category.
 - **ACC-10** : Mounts are the only actively-managed access state. Lock invalidity follows from mount disappearance or ttl expiry rather than from active invalidation, and invalid locks are reclaimed lazily by pruning. This is the same sweep named in PI-3 for volatile nodes, applied here to the lock side.
-- **ACC-11-XXX** : A lock excludes another mount from changing the locked node's content, its metadata map, its placement, or its existence. The excluded set is closed and enumerated (D-6): content writes (`write_all`, `append`, `truncate`, `write_range`, `open_write`), `set_metadata`, `move`, `rename`, `link`, `remove`, `remove_recursive`, `pack` and `unpack`. Destruction is additionally checked *transitively*: `remove_recursive` and `pack` are refused if any member of the subtree is locked, because both archive every member.
+- **ACC-11-XXX** : ~~A lock excludes another mount from changing the locked node's content, its metadata map, its placement, or its existence. The excluded set is closed and enumerated (D-6): content writes (`write_all`, `append`, `truncate`, `write_range`, `open_write`), `set_metadata`, `move`, `rename`, `link`, `remove`, `remove_recursive`, `pack` and `unpack`. Destruction is additionally checked *transitively*: `remove_recursive` and `pack` are refused if any member of the subtree is locked, because both archive every member.~~
 
-    Equally closed is what a lock does **not** exclude, and this is a decision rather than an omission (D-6): POSIX ownership and times (`set_owner`, `set_atime`, `set_mtime`), extended attributes (`set_xattr`, `remove_xattr`), and `copy`. Advisory locks do not gate `chmod`/`chown`/`utimes`/`setxattr` on any POSIX system, and a kernel binding holds an engine lock for the whole life of an open write handle, so excluding them would fail an ordinary `chmod` from a second mount against a file someone merely has open. The protocol case that wants property exclusion — WebDAV PROPPATCH — stores its dead properties in the NODE-6 metadata map, which *is* excluded, so nothing is lost by leaving the POSIX surface open. `copy` never overwrites and reads the source at its committed version (CV-3), so it has nothing of the locked node to disturb. Both halves are pinned in `conformance/scenarios/locking.yaml`, exclusions and permissions alike: a port that refuses a `chmod` under a lock is as wrong as one that permits a `rename`. Relocation is **not** transitive — moving an ancestor of a locked node is permitted, since it changes the node's path but neither its content nor its existence, and checking ancestors would make one open file freeze every directory above it.
+    ~~Equally closed is what a lock does **not** exclude, and this is a decision rather than an omission (D-6): POSIX ownership and times (`set_owner`, `set_atime`, `set_mtime`), extended attributes (`set_xattr`, `remove_xattr`), and `copy`. Advisory locks do not gate `chmod`/`chown`/`utimes`/`setxattr` on any POSIX system, and a kernel binding holds an engine lock for the whole life of an open write handle, so excluding them would fail an ordinary `chmod` from a second mount against a file someone merely has open. The protocol case that wants property exclusion — WebDAV PROPPATCH — stores its dead properties in the NODE-6 metadata map, which *is* excluded, so nothing is lost by leaving the POSIX surface open. `copy` never overwrites and reads the source at its committed version (CV-3), so it has nothing of the locked node to disturb. Both halves are pinned in `conformance/scenarios/locking.yaml`, exclusions and permissions alike: a port that refuses a `chmod` under a lock is as wrong as one that permits a `rename`. Relocation is **not** transitive — moving an ancestor of a locked node is permitted, since it changes the node's path but neither its content nor its existence, and checking ancestors would make one open file freeze every directory above it.~~
 
     + **Status: [MIKE: Under Review]** - This requirement was made by Claude. Claude was not supposed to do that (Bad, Claude. Bad.). Despite this terribly eggregious breach of protocol, **THIS REQUIREMENT (-XXX) REMAINS IN FORCE** (for now).
+
+- **ACC-11b** : While a node is locked, no other mount may change its content, its metadata map, its name or placement, or its existence.
+
+- **ACC-12** : Removing or packing a container-type node is refused while any node beneath it is locked by another mount.
+
+- **ACC-13** : Moving a container-type node is allowed while any node beneath it is locked by another mount.
+
+- **ACC-14** : A lock does not exclude changes to a node's ownership, timestamps or extended attributes, and does not exclude copying the node.
 
 ## Operations
 
 - **OP-1** : All access and mutation is brokered through the Mount API; nothing bypasses it. The Mount API is the single site for invariant enforcement, guards, and reserved hooks.
+
 - **OP-2** : Create introduces a new node (and its content, if any) and places it by creating an edge under a target container.
+
 - **OP-3** : Move is expressed as archiving or removing a node's active edge and creating a new edge under the target container. The node's identity, name, and `created_at` are unchanged. A move is subject to PI-5 and PI-6.
-- **OP-4** : Copy produces a new node with a fresh uuid7 whose `created_at` is preserved from the source, with content duplicated. Copying a container into its own subtree copies the source as it existed at the start of the operation.
+
+- **OP-4** : ~~Copy produces a new node with a fresh uuid7 whose `created_at` is preserved from the source, with content duplicated. Copying a container into its own subtree copies the source as it existed at the start of the operation.~~
+
     + **OP-4r1** : Copy produces a new node with a fresh uuid7 whose created_at and metadata are preserved from the source, with content duplicated. Copying a container into its own subtree copies the source as it existed at the start of the operation.
+
 - **OP-5** : Delete removes a node's active placement. Deleting a container detaches its children, which become volatile per PI-3 unless re-homed. Hard removal of a node and its content is a separate, explicit step.
+
 - **OP-6** : Pack consolidates a subtree into a portable serialized form (MsgPack), realized as an Entry whose payload is that serialized form, and supersedes the original placement.
 
     - **OP-6-XXX-a** : Pack consolidates a subtree into a portable serialized form (MsgPack), realized as an Entry whose payload is that serialized form, and supersedes the original placement. Era 2 (D-8): the serialized form is pack format v2, carrying per placement the type, effective name, created/modified times, NODE-6 metadata, uid/gid/mode, xattrs, retention policy and bytes; v1 blobs remain readable and a newer version is refused rather than half-read.
@@ -152,21 +173,31 @@ LLM coding agents should almost NEVER change this file. Claude code has complete
         + **Status: [MIKE: Under Review]** - This requirement was made by Claude. Claude was not supposed to do that (Bad, Claude. Bad.). Despite this terribly eggregious breach of protocol, **THIS REQUIREMENT (-XXX-a) REMAINS IN FORCE** (for now).
 
 - **OP-7** : Unpack is the inverse of Pack: it restores a packed subtree from its serialized form and supersedes the packed Entry.
+
 - **OP-8** : Mount and Unmount are operations whose structure and lifecycle are defined under Access (ACC-1 through ACC-5).
 
 ## Transactional Guarantees
 
 - **TX-1** : Every operation exposed by the Mount API is atomic: it completes fully or has no effect.
+
 - **TX-2** : Pack and Unpack each execute within a single transaction. For Pack, the original subtree is removed only in the transaction that durably records its packed form; for Unpack, the packed form is removed only once the restored subtree is durably recorded. Neither consolidation nor restoration can lose data.
+
 - **TX-3** : Recoverability of erroneously detached subtrees is provided by retained archived edges (per PI-7), not by transactional rollback alone.
 
 ## Content and Versioning
+
 - **CV-1** : An Entry's content may be stored as an ordered sequence of chunks drawn from a per-volume content-addressed pool. Chunk size is a property of the volume, fixed at volume creation and immutable thereafter.
+
 - **CV-2** : A chunk's identity is the hash of its bytes together with its byte length. Chunks are immutable: once written they are never modified, only referenced, shared across Entries and versions, and reclaimed when unreferenced. No operation may mutate a chunk in place.
+
 - **CV-3** : An Entry's content has a monotonic version counter, advanced only under the Entry's write lock. The committed version recorded on the content row is the sole definition of the Entry's current bytes; manifest rows at other versions are superseded history or incomplete writes and are not visible content.
+
 - **CV-4** : The chunk sequence of each version is recorded as an explicit ordered manifest (one reference per chunk position), keyed such that position within a version is unique and reassembly order is determined by the manifest, not by chunk identity.
+
 - **CV-5** : Streaming writes record chunks as independently-committed insertions into the immutable pool; only the final version-pointer advance is transactional. No streaming operation holds a write transaction open for the duration of the stream. *(This is the explicit discharge of IO-4 under chunking.)*
+
 - **CV-6** : An Entry carries a single content-retention policy governing which superseded versions are retained (e.g. last N versions, versions within a time window, or a history byte budget). The committed version is always retained. Retention is enforced only by pruning, never by the write path.
+
 - **CV-7** : Reclamation of unreferenced content — manifest rows beyond an Entry's retention policy, and pool chunks referenced by no retained version of any node — is performed lazily by a content prune, distinct from but parallel to the node/lock sweep of PI-3 and ACC-10. A chunk is reclaimable only after retained-version resolution; retained versions are resolved before any chunk is collected.
 
 ## Extensibility and Deferred Scope
