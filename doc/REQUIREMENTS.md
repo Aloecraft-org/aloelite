@@ -24,6 +24,22 @@ Requirements are immutable. Once a requirement is committed, it's wording should
 
 LLM coding agents should almost NEVER change this file. Claude code has completely undermined the integrity of these requirements. From today (November 22 2026) we're going to clean up as best we can and move on.
 
+
+## Proposed:
+
+- Encryption section:
+    - Volumes can be encrypted and unlocked with a PIN
+    - Volume PIN can be changed
+- Extended attributes. They have their own table and four operations. The only mention is in ACC-14, which says what a lock doesn't stop.
+- Ownership and POSIX times. uid, gid, mode, atime and ctime exist in NODE-4-XXX-a. Nothing says whether permission bits are enforced or merely stored.
+- OP requirements for Hardlinks and rename.
+- NODE requirements for Symlinks. (e.g. path resolution)
+- OP requirements for Prune / what prune may destroy or when.
+- Conformance section:
+    - Format compatibility
+    - Schema eras and migration
+    - two pack format versions
+
 ## Nodes
 
 - **NODE-1** : Every node has a globally unique identity expressed as a uuid7, assigned once at creation and never reminted or backdated. The identity reflects the node's actual creation time and defines a stable time order.
@@ -122,12 +138,15 @@ LLM coding agents should almost NEVER change this file. Claude code has complete
 
 ## Access
 
-- **ACC-1a** : ~~A mount is a durable immutable access point bound to an explicit node in exactly one volume. All access to a volume is brokered through a mount; access is never ambient.~~
-- **ACC-1b** : ~~Era 2 (D-4): a mount carries an access mode, `ro` or `rw`, fixed at creation. Every mutating operation through an `ro` mount is refused (read_only). A mount may also carry a `principal` — an opaque tenant/user identity recorded for policy and future ACLs.~~
+- **ACC-1** : A mount is a durable immutable access point bound to an explicit node in exactly one volume. All access to a volume is brokered through a mount; access is never ambient.
 
-- **ACC-1c** : Era 2 (D-4) admission policy: by default at most one `rw` mount per subtree — a new `rw` mount whose point equals, contains, or is contained by a valid `rw` mount's point in the same volume is refused (mount_conflict) unless overlap is explicitly requested. This is authorization, not correctness: id generation is safe under arbitrary overlap (D-1/D-2) and entry write locks arbitrate write-write conflicts. `ro` mounts never conflict.
+- **ACC-1-XXX-b** : Era 2 (D-4): a mount carries an access mode, `ro` or `rw`, fixed at creation. Every mutating operation through an `ro` mount is refused (read_only). A mount may also carry a `principal` — an opaque tenant/user identity recorded for policy and future ACLs.
 
-    + **Status: [MIKE: Under Review]** - This requirement was made by Claude. This was a requested modification, but should be reviewed in light of recent unauthorized modifications to other requirements **THIS REQUIREMENT REMAINS IN FORCE** (for now).
+    + **Status: [MIKE: Under Review]** - This requirement was made by Claude. This was NOT a requested modification, and should be reviewed in light of recent unauthorized modifications to other requirements **THIS REQUIREMENT REMAINS IN FORCE** (for now).
+
+- **ACC-1-XXX-c** : Era 2 (D-4) admission policy: by default at most one `rw` mount per subtree — a new `rw` mount whose point equals, contains, or is contained by a valid `rw` mount's point in the same volume is refused (mount_conflict) unless overlap is explicitly requested. This is authorization, not correctness: id generation is safe under arbitrary overlap (D-1/D-2) and entry write locks arbitrate write-write conflicts. `ro` mounts never conflict.
+
+    + **Status: [MIKE: Under Review]** - This requirement was made by Claude. This was NOT a requested modification, and should be reviewed in light of recent unauthorized modifications to other requirements **THIS REQUIREMENT REMAINS IN FORCE** (for now).
 
 - **ACC-2** : A mount has a mount point: a reference to a node within its volume that anchors the session for resolution and scoping.
 - **ACC-3** : A mount carries a ttl. The mounts table is part of the schema, but its contents are not held to the same persistence expectations as the rest of the model.
