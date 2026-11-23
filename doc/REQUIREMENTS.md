@@ -16,6 +16,14 @@
 
 Each requirement is identified by a stable prefix and number for reference. Requirements use *must* for invariants the system enforces and *may* for permitted-but-optional behavior. This section is self-contained and does not depend on the surrounding abstract or discussion.
 
+**IMPORTANT: Requirements are immutable**
+
+Requirements are immutable. Once a requirement is committed, it's wording should NEVER, EVER be changed.
+
+**IMPORTANT: LLM-usage**
+
+LLM coding agents should almost NEVER change this file. Claude code has completely undermined the integrity of these requirements. From today (November 22 2026) we're going to clean up as best we can and move on.
+
 ## Nodes
 
 - **NODE-1** : Every node has a globally unique identity expressed as a uuid7, assigned once at creation and never reminted or backdated. Ids are host-minted from a per-mount monotonic watermark fenced by the volume's high-water mark (D-1/D-2). The ordering contract: ids minted through one mount are strictly ordered; ids minted through different mounts separated by more than the coordination window are strictly ordered; within the window, cross-mount order is arbitrary (concurrent unlocked writers have no defined "later" — a caller that needs one takes the entry write lock, ACC-6/7).
