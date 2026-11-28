@@ -215,7 +215,9 @@ LLM coding agents should almost NEVER change this file. Claude code has complete
 
 - **CV-5** : Streaming writes record chunks as independently-committed insertions into the immutable pool; only the final version-pointer advance is transactional. No streaming operation holds a write transaction open for the duration of the stream. *(This is the explicit discharge of IO-4 under chunking.)*
 
-- **CV-6** : An Entry carries a single content-retention policy governing which superseded versions are retained (e.g. last N versions, versions within a time window, or a history byte budget). The committed version is always retained. Retention is enforced only by pruning, never by the write path.
+- **CV-6** : ~~An Entry carries a single content-retention policy governing which superseded versions are retained (e.g. last N versions, versions within a time window, or a history byte budget). The committed version is always retained. Retention is enforced only by pruning, never by the write path.~~
+
+- **CV-6r1** : The content-retention policy for an entry node (e.g. last N versions, versions within a time window, or a history byte budget) may be defined on an individual entry, by a default content-retention policy defined by the volume, or not at all. If no content-retention policy is defined, all entry versions are retained. Retention is enforced only by pruning.
 
 - **CV-7** : Reclamation of unreferenced content — manifest rows beyond an Entry's retention policy, and pool chunks referenced by no retained version of any node — is performed lazily by a content prune, distinct from but parallel to the node/lock sweep of PI-3 and ACC-10. A chunk is reclaimable only after retained-version resolution; retained versions are resolved before any chunk is collected.
 
