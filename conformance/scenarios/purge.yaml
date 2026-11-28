@@ -5,7 +5,7 @@
 # covered by each engine's own tests.
 scenarios:
   - scenario: purge-destroys-the-node
-    requirements: [OP-5, CV-6]
+    requirements: [OP-5, CV-6r1]
     description: >
       After remove the node is still addressable by id; after purge it is
       not.
@@ -23,7 +23,7 @@ scenarios:
         raises: not_found
 
   - scenario: purge-by-id-destroys-an-already-removed-node
-    requirements: [OP-5, CV-6]
+    requirements: [OP-5, CV-6r1]
     description: >
       A removed node has no path. The id form is how it is destroyed.
     steps:
