@@ -813,17 +813,9 @@ def _committed(db, nid):
 
 
 def _chunk_lengths(db, nid):
-    return [
-        r[0]
-        for r in db.connection.execute(
-            "SELECT cc.length FROM content_version cv "
-            "JOIN content_chunk cc ON cc.chunk_hash=cv.chunk_hash "
-            "WHERE cv.content_id=? "
-            "AND cv.version=(SELECT version FROM content WHERE node_id=?) "
-            "ORDER BY cv.chunk_index",
-            (nid, nid),
-        ).fetchall()
-    ]
+    pool = db.connection.execute("SELECT chunk_hash, length FROM content_chunk")
+    lengths = dict(pool.fetchall())
+    return [lengths[h] for h in _hashes(db, nid, _committed(db, nid))]
 
 
 def _pool_count(db):
@@ -882,13 +874,35 @@ def test_shared_chunk_immutability(db, chunky):
 
 
 def _hashes(db, nid, version):
+    """The chunk at every position of `version`, resolved through the delta
+    manifest by hand (CV-4r1): the latest row at or below the version, for
+    each position inside the version's chunk count."""
+    c = db.connection
+    row = c.execute(
+        "SELECT chunks FROM content_commit WHERE content_id=? AND version=?",
+        (nid, version),
+    ).fetchone()
+    out = []
+    for i in range(row[0] if row else 0):
+        out.append(
+            c.execute(
+                "SELECT chunk_hash FROM content_version WHERE content_id=? "
+                "AND chunk_index=? AND version<=? ORDER BY version DESC LIMIT 1",
+                (nid, i, version),
+            ).fetchone()[0]
+        )
+    return out
+
+
+def _rows(db, nid, version):
+    """The positions `version` itself wrote a manifest row for."""
     return [
         r[0]
         for r in db.connection.execute(
-            "SELECT chunk_hash FROM content_version WHERE content_id=? AND version=? "
-            "ORDER BY chunk_index",
+            "SELECT chunk_index FROM content_version WHERE content_id=? "
+            "AND version=? ORDER BY chunk_index",
             (nid, version),
-        ).fetchall()
+        )
     ]
 
 
@@ -904,6 +918,7 @@ def test_write_range_midfile_carries_prefix_and_suffix(db, chunky):
     h1, h2 = _hashes(db, nid, v1), _hashes(db, nid, v2)
     assert h2[0] == h1[0] and h2[2:] == h1[2:]  # prefix + suffix by reference
     assert h2[1] != h1[1]  # only the window re-chunked
+    assert _rows(db, nid, v2) == [1]  # and only it got a manifest row
     assert _pool_count(db) == pool_before + 1  # one new pool row
 
 
@@ -997,7 +1012,8 @@ def test_crash_atomicity_stage_without_swap(db, chunky):
     committed_before = _committed(db, nid)
     vol = ops.mount_info(db, chunky).volume
 
-    v = db.alloc_version(nid)
+    v = db.alloc_staging(nid)
+    assert v > 1 << 62  # nowhere near a number a commit will take
     with db.txn():
         db.stage_chunks(nid, v, vol, b"NEWDATA!")  # staged, NOT committed
 
@@ -1278,8 +1294,7 @@ def _versions(db, nid):
     return [
         r[0]
         for r in db.connection.execute(
-            "SELECT DISTINCT version FROM content_version WHERE content_id=? "
-            "ORDER BY version",
+            "SELECT version FROM content_commit WHERE content_id=? ORDER BY version",
             (nid,),
         )
     ]
@@ -1491,3 +1506,129 @@ def test_purge_by_id_reaches_an_entry_that_is_already_deleted(db, chunky):
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
+# --------------------------------------------------------------------------
+# Delta manifests (CV-4r1)
+# --------------------------------------------------------------------------
+def test_delta_versions_write_only_changed_positions(db, chunky):
+    ops.create_entry(db, chunky, "/f", b"aaaabbbbccccdd")  # 4 positions
+    nid = _nid(db, chunky, "/f")
+    assert _rows(db, nid, 1) == [0, 1, 2, 3]
+    ops.append(db, chunky, "/f", b"EEEE")  # rebuilds the short tail, adds one
+    assert _rows(db, nid, 2) == [3, 4]
+    ops.truncate(db, chunky, "/f", 8)  # aligned shrink: no row at all
+    assert _rows(db, nid, 3) == []
+    assert ops.read_all(db, chunky, "/f") == b"aaaabbbb"
+    ops.truncate(db, chunky, "/f", 6)  # into a chunk: the boundary chunk
+    assert _rows(db, nid, 4) == [1]
+    with ops.open_write(db, chunky, "/f", ops.WriteMode.APPEND) as w:
+        w.write(b"XXXXXXYY")  # 6 + 8 = 14 bytes
+    assert _rows(db, nid, 5) == [1, 2, 3]
+    assert ops.read_all(db, chunky, "/f") == b"aaaabbXXXXXXYY"
+    assert ops.verify(db, chunky).problems == []
+
+
+def test_delta_shrink_then_grow_never_resurfaces_old_bytes(db, chunky):
+    ops.create_entry(db, chunky, "/f", b"aaaabbbbccccdddd")
+    ops.truncate(db, chunky, "/f", 4)
+    ops.truncate(db, chunky, "/f", 16)
+    assert ops.read_all(db, chunky, "/f") == b"aaaa" + bytes(12)
+    ops.truncate(db, chunky, "/f", 4)
+    assert ops.write_range(db, chunky, "/f", 13, b"Z") == 14
+    assert ops.read_all(db, chunky, "/f") == b"aaaa" + bytes(9) + b"Z"
+    ops.truncate(db, chunky, "/f", 4)
+    ops.append(db, chunky, "/f", b"12345")
+    assert ops.read_all(db, chunky, "/f") == b"aaaa12345"
+
+
+def test_delta_prune_keeps_what_the_floor_still_reads(db, chunky):
+    ops.create_entry(db, chunky, "/f", b"aaaabbbbccccdddd")  # v1
+    nid = _nid(db, chunky, "/f")
+    ops.write_range(db, chunky, "/f", 4, b"BBBB")  # v2: position 1
+    ops.write_range(db, chunky, "/f", 4, b"bbBB")  # v3: position 1 again
+    ops.truncate(db, chunky, "/f", 12)  # v4: no rows
+    want = {v: _hashes(db, nid, v) for v in (3, 4)}
+    ops.set_retention(db, chunky, "/f", 2)  # keeps v4 and v3
+    report = ops.prune_content(db)
+    assert _versions(db, nid) == [3, 4]
+    # v1's and v2's rows at position 1 are shadowed by v3's. Everything else
+    # of v1 is still read by v3, the floor, which is four chunks long.
+    assert report.versions_pruned == 2
+    assert _rows(db, nid, 1) == [0, 2, 3] and _rows(db, nid, 2) == []
+    assert {v: _hashes(db, nid, v) for v in (3, 4)} == want
+    assert ops.prune_content(db).versions_pruned == 0  # a second pass is a no-op
+    ops.set_retention(db, chunky, "/f", 1)  # the floor moves up to v4
+    assert ops.prune_content(db).versions_pruned == 1  # position 3: past v4's end
+    assert _versions(db, nid) == [4]
+    assert _rows(db, nid, 1) == [0, 2] and _rows(db, nid, 3) == [1]
+    assert ops.read_all(db, chunky, "/f") == b"aaaabbBBcccc"
+    assert ops.verify(db, chunky).problems == []
+
+
+def test_delta_abandoned_stream_is_never_inherited(db, chunky):
+    ops.create_entry(db, chunky, "/f", b"aaaabbbbcccc")
+    nid = _nid(db, chunky, "/f")
+    w = ops.open_write(db, chunky, "/f")
+    w.write(b"XXXXYYYYZZZZ")  # three full chunks staged
+    staged = db.connection.execute(
+        "SELECT min(version) FROM content_version WHERE content_id=? AND version>1",
+        (nid,),
+    ).fetchone()[0]
+    assert staged > 1 << 62
+    w.abort()
+    ops.write_range(db, chunky, "/f", 0, b"N")  # v2 touches position 0 only
+    assert ops.read_all(db, chunky, "/f") == b"Naaabbbbcccc"
+    ops.prune_content(db)
+    assert _rows(db, nid, staged) == []
+    assert ops.read_all(db, chunky, "/f") == b"Naaabbbbcccc"
+
+
+def test_delta_append_stream_pins_its_prefix_when_the_base_moves(db, chunky):
+    ops.create_entry(db, chunky, "/f", b"aaaabbbbcc")
+    w = ops.open_write(db, chunky, "/f", ops.WriteMode.APPEND)
+    w.write(b"DDEEEE")
+    ops.write_all(db, chunky, "/f", b"zzzzzzzzzzzzzzzzzzzz")  # same mount, mid-stream
+    w.close()
+    assert ops.read_all(db, chunky, "/f") == b"aaaabbbbccDDEEEE"
+    assert ops.verify(db, chunky).problems == []
+
+
+def test_delta_random_writes_match_a_plain_buffer(db, chunky):
+    import random
+
+    rng = random.Random(11)
+    ref = bytearray(b"seed")
+    ops.create_entry(db, chunky, "/f", bytes(ref))
+    for step in range(400):
+        op = rng.choice(["range"] * 3 + ["append", "truncate", "all", "stream"])
+        if op == "range":
+            off = rng.randrange(0, len(ref) + 6)
+            data = bytes(rng.randrange(1, 256) for _ in range(rng.randrange(1, 11)))
+            if off + len(data) > len(ref):
+                ref.extend(bytes(off + len(data) - len(ref)))
+            ref[off : off + len(data)] = data
+            ops.write_range(db, chunky, "/f", off, data)
+        elif op == "append":
+            data = bytes(rng.randrange(1, 256) for _ in range(rng.randrange(1, 11)))
+            ref.extend(data)
+            ops.append(db, chunky, "/f", data)
+        elif op == "truncate":
+            size = rng.randrange(0, len(ref) + 9)
+            ref[:] = ref[:size] + bytes(max(0, size - len(ref)))
+            ops.truncate(db, chunky, "/f", size)
+        elif op == "all":
+            ref[:] = bytes(rng.randrange(1, 256) for _ in range(rng.randrange(0, 30)))
+            ops.write_all(db, chunky, "/f", bytes(ref))
+        else:
+            data = bytes(rng.randrange(1, 256) for _ in range(rng.randrange(0, 14)))
+            mode = rng.choice([ops.WriteMode.APPEND, ops.WriteMode.TRUNCATE])
+            with ops.open_write(db, chunky, "/f", mode) as w:
+                w.write(data)
+            ref[:] = (ref if mode is ops.WriteMode.APPEND else b"") + data
+        assert ops.read_all(db, chunky, "/f") == bytes(ref), (step, op)
+        if step % 7 == 0:
+            ops.set_retention(db, chunky, "/f", rng.choice([None, 1, 1, 2, 3]))
+            ops.prune_content(db)
+            assert ops.read_all(db, chunky, "/f") == bytes(ref), (step, "prune")
+            assert ops.verify(db, chunky).problems == [], step

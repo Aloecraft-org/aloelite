@@ -317,9 +317,9 @@ domain-separated by volume id, so identical plaintext cannot produce
 identical addresses. This is the property `doc/ENCRYPTION.md` claims, and
 `dedup_across_volumes` is where it gets measured.
 
-**Cheap versions of large files.** `write_range` carries every untouched
-chunk into the new version by reference, so an edit costs the chunk it
-touched, not the file it was in. Measured on a 64 MiB file with 1 MiB
+**Cheap versions of large files.** A version records only the chunks it
+changes (CV-4r1), so an edit costs the chunk it touched, not the file it
+was in. Measured on a 64 MiB file with 1 MiB
 chunks: a 1-byte edit adds 1.07 MB (1.02 chunks), a 4 KiB edit adds the same,
 and a 1 MiB edit straddling a boundary adds 2.11 MB (2.02 chunks). The floor
 is the chunk, and it does not move with file size.
@@ -614,35 +614,34 @@ volume under PGDATA's own size. After the kill, recovery was clean on every
 frontend.
 
 Chunk size is the first knob. A chunk is rewritten whole when any byte in
-it changes, and a database changes 8 KiB at a time. The same run on
-`rust-fuse` plain, on volumes made with `--chunk-size`:
+it changes, and a database changes 8 KiB at a time. The same run on plain
+volumes made with `--chunk-size`, on both daemons:
 
-| chunk size | TPC-B tps | host bytes per PGDATA byte |
-|---|---|---|
-| 1M (default) | 121 | 10.2 |
-| 64K | 194 | 2.6 |
-| 16K | 64 | 2.2 |
+| chunk size | TPC-B tps, `rust-fuse` | TPC-B tps, `fuse` | host bytes per PGDATA byte |
+|---|---|---|---|
+| 1M (default) | 115 | 111 | 9.7 |
+| 64K | 574 | 602 | 3.5 |
+| 16K | 835 | 693 | 1.8 |
 
-Smaller is not monotonically better. Every version records a full manifest,
-one row per chunk position (CV-4), so at 16K each commit copies sixteen
-times the rows it does at 64K, and that outweighs the smaller chunk.
+Smaller is better down to the database's own page. A version records only
+the chunks it changes (CV-4r1), so a commit costs the chunks it touches and
+nothing for the rest of the file, however many chunks that is.
 
-Retention is the second. The same run with `--retention 1
+Retention is the second. The 64K run with `--retention 1
 --retention-on-delete 0 --prune-every 5` on the daemon, which keeps one
 version of each file and prunes the volume every five seconds:
 
-| chunk size | TPC-B tps | host bytes per PGDATA byte | the same after VACUUM |
+| | TPC-B tps | host bytes per PGDATA byte | the same after VACUUM |
 |---|---|---|---|
-| 1M (default) | 120 | 7.0 | 0.70 |
-| 64K | 185 | 1.6 | 0.67 |
+| `rust-fuse` | 795 | 2.4 | 0.70 |
+| `fuse` | 656 | 2.0 | 0.70 |
 
 A prune frees pages inside the file and does not shrink it. So the file
-settles at the live data plus whatever is written between two prunes, and
-at `--prune-every 2` the two rows read 3.9 and 1.1. With the sweep on,
-TPC-B at 64K ran at 185 tps against 194 without it, one run each.
+settles at the live data plus whatever is written between two prunes. The
+sweep costs nothing measurable: neither daemon ran slower with it than
+without, one run each, and the slowest transaction was 72 ms.
 
-The Python daemon (`fuse`) has no column because it has not been measured
-yet. The suite runs postgres as another user only when the harness is root.
+The suite runs postgres as another user only when the harness is root.
 Both daemons then record the calling uid and gid as the owner of each node,
 and the kernel enforces the modes (`default_permissions`).
 

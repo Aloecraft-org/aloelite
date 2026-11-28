@@ -94,7 +94,7 @@ records:
     { nodes_pruned: int, locks_pruned: int }
   ContentPruneReport:
     { versions_pruned: int, chunks_pruned: int,
-      note: "CV-7: superseded/aborted manifest versions dropped, and pool chunks reclaimed because no retained version referenced them" }
+      note: "CV-7: versions_pruned counts the manifest rows dropped -- those of superseded versions that no retained version still reads, and those of aborted writes. A version records only the chunks it changes (CV-4r1), so dropping one can leave rows behind and count less than its length. chunks_pruned counts pool chunks reclaimed because no surviving row referenced them" }
   VerifyReport:
     { entries_checked: int, chunks_checked: int, problems: [string],
       note: "empty problems = clean; the returns type of maintenance.verify" }
@@ -274,9 +274,9 @@ operations:
       flags:   { mutates: true, atomic: true, locks: true, addr: path }
       raises:  [not_found, not_an_entry, lock_held, mount_invalid]
       note: >
-        atomically append and return the new size. One new version per call;
-        the prior version's full leading chunks are carried BY REFERENCE and
-        only the partial tail is rebuilt (CV-1/CV-4).
+        atomically append and return the new size. One new version per call,
+        which records only the rebuilt partial tail and the new chunks; the
+        full leading chunks stay with the prior version (CV-1/CV-4r1).
     truncate:
       params:  { mount: MountId, path: Path, size: int }
       returns: void

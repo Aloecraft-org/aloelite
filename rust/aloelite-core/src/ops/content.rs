@@ -1,5 +1,6 @@
 //! Whole-content and ranged writes: one new version per call, committed
-//! pointer swapped atomically, unchanged chunks carried by reference.
+//! pointer swapped atomically. A version records only the chunks it changes
+//! (CV-4r1); the rest stay with the version beneath it.
 //! `write_ranges` lands many ranges in that one version; `write_range` is
 //! its one-range case.
 
@@ -9,7 +10,7 @@ use crate::content::split_chunks;
 use crate::db::Db;
 use crate::errors::{FsError, Result};
 use crate::resolve::resolve;
-use crate::templates::mutation::{COPY_CHUNK_REFS_RANGE, UPDATE_CONTENT};
+use crate::templates::mutation::UPDATE_CONTENT;
 use crate::types::{MountId, NodeId, NodeType};
 
 use super::{lock_held, require_mount};
@@ -30,9 +31,9 @@ pub fn write_all(db: &mut Db, mount: &MountId, path: &str, data: &[u8]) -> Resul
     })
 }
 
-/// Atomically append and return the new size. The prior version's full
-/// leading chunks are carried BY REFERENCE; only the partial tail plus the
-/// new bytes are re-chunked (CV-1/CV-4).
+/// Atomically append and return the new size. Only the partial tail plus
+/// the new bytes are re-chunked and recorded; the full leading chunks stay
+/// with the prior version and get no row in the new one (CV-1/CV-4r1).
 pub fn append(db: &mut Db, mount: &MountId, path: &str, data: &[u8]) -> Result<u64> {
     if data.is_empty() {
         let m = require_mount(db, mount, true)?;
@@ -49,9 +50,6 @@ pub fn append(db: &mut Db, mount: &MountId, path: &str, data: &[u8]) -> Result<u
         let new_version = db.alloc_version(&node)?;
         let full = size / cs;
         let partial = size % cs;
-        if full > 0 {
-            carry(db, &node, new_version, src_version, 0, full - 1)?;
-        }
         // rebuild from the old partial tail + new data, re-chunked from `full`
         let mut tail = Vec::new();
         if partial > 0 {
@@ -87,8 +85,9 @@ pub fn write_range(
 ///
 /// A chunk is rebuilt only if a range touches it, or if it lies between the
 /// prior EOF chunk and the new end (a short final chunk is rebuilt, a gap
-/// zero-fills). Every other chunk carries into the new version BY
-/// REFERENCE, in contiguous runs. Rebuilt chunks are read, patched and
+/// zero-fills). Every other chunk is left to the prior version: the new one
+/// writes no row for it (CV-4r1), so the cost does not depend on the size of
+/// the entry. Rebuilt chunks are read, patched and
 /// staged one at a time, so memory is one chunk plus the ranges, however
 /// far apart they are. Chunk alignment is preserved, which keeps the
 /// uniform-chunks-except-last invariant the ranged reader depends on.
@@ -135,25 +134,6 @@ pub fn write_ranges(
         }
         let rebuild = merge_spans(spans);
 
-        // depth: carry every untouched run of the source by reference
-        let mut next = 0;
-        for &(lo, hi) in &rebuild {
-            if lo > next && next <= src_last {
-                carry(
-                    db,
-                    &node,
-                    new_version,
-                    src_version,
-                    next,
-                    (lo - 1).min(src_last),
-                )?;
-            }
-            next = hi + 1;
-        }
-        if next <= src_last {
-            carry(db, &node, new_version, src_version, next, src_last)?;
-        }
-
         // depth: rebuild touched chunks one at a time
         for &(lo, hi) in &rebuild {
             for index in lo..=hi {
@@ -195,9 +175,9 @@ fn merge_spans(mut spans: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
     out
 }
 
-/// Atomically set a leaf's size. Shrink carries full leading chunks by
-/// reference and trims the boundary chunk; grow zero-fills, rebuilding only
-/// the prior short final chunk. No-op when the size is unchanged.
+/// Atomically set a leaf's size. Shrink trims the boundary chunk and writes
+/// nothing else (the new version's chunk count hides the rest); grow
+/// zero-fills, rebuilding only the prior short final chunk. No-op when the size is unchanged.
 pub fn truncate(db: &mut Db, mount: &MountId, path: &str, size: u64) -> Result<()> {
     db.txn(|db| {
         let m = require_mount(db, mount, true)?;
@@ -211,9 +191,6 @@ pub fn truncate(db: &mut Db, mount: &MountId, path: &str, size: u64) -> Result<(
         let new_version = db.alloc_version(&node)?;
         if size < cur {
             let full = size / cs;
-            if full > 0 {
-                carry(db, &node, new_version, src_version, 0, full - 1)?;
-            }
             let rem = size % cs;
             if rem > 0 {
                 let chunk = first_chunk(db, &node, src_version, full)?;
@@ -221,9 +198,6 @@ pub fn truncate(db: &mut Db, mount: &MountId, path: &str, size: u64) -> Result<(
             }
         } else {
             let full = cur / cs;
-            if full > 0 {
-                carry(db, &node, new_version, src_version, 0, full - 1)?;
-            }
             let mut pad = Vec::new();
             if cur % cs > 0 {
                 pad = first_chunk(db, &node, src_version, full)?;
@@ -254,22 +228,6 @@ fn writable_leaf(db: &mut Db, mount_point: &NodeId, path: &str, mount: &MountId)
         return Err(FsError::LockHeld { node: node.0 });
     }
     Ok(node)
-}
-
-/// Carry chunks `[lo, hi]` of `src_version` into `dst_version` by reference.
-fn carry(
-    db: &mut Db,
-    node: &NodeId,
-    dst_version: i64,
-    src_version: i64,
-    lo: i64,
-    hi: i64,
-) -> Result<()> {
-    db.run(
-        COPY_CHUNK_REFS_RANGE,
-        named_params! { ":node": node, ":dst_version": dst_version, ":src_version": src_version, ":lo": lo, ":hi": hi },
-    )?;
-    Ok(())
 }
 
 /// The bytes of chunk `index` of `version` (empty when absent).

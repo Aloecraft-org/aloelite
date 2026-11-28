@@ -130,7 +130,7 @@ It is designed for situations where you want filesystem semantics (paths, direct
 
 - **Core model** — nodes, edges, volumes, and mounts are fully realized: path resolution, structural operations (create, move, rename, copy, remove, pack/unpack), advisory locking, and mount-scoped sessions.
 - **Content storage** — content-addressed chunk pool with deduplication, per-version manifests, configurable retention, and bounded-memory streaming I/O; production-validated against files in the tens of gigabytes.
-- **Random access** — `write_range` and `truncate` are first-class engine operations: unchanged chunks carry into the new version by reference, so partial overwrites of large files are cheap and bounded-memory.
+- **Random access** — `write_range` and `truncate` are first-class engine operations: a new version records only the chunks it changes, so a partial overwrite costs what it touches whatever the size of the file, in bounded memory.
 - **Encryption** — at-rest at the storage boundary (ChaCha20-Poly1305, Argon2id, per-volume wrapped key), with convergent and random nonce modes.
 - **FUSE** — O_RDWR access through a dirty-extent handle (memory bounded by dirty bytes, flushed atomically on fsync/release); symlinks and permission bits (chmod, executables) persist across remounts; honors utimens; streaming writes commit at flush time, synchronously with the application's `close()`, so a crashed daemon loses only truly in-flight data; hardened handlers return EIO rather than detaching the mount. Hard links are first-class (a leaf may be placed many times, each placement carrying its own name). Shared-writable mmap and byte-range locks across separate mounts are not yet implemented.
 - **CLI** — covers the library verbs for scripting.
@@ -643,8 +643,8 @@ binary reads correctly in the other, plain and encrypted. The Rust CLI starts
 in 1.6 ms against Python's 173 ms, which is most of the difference for
 one-shot commands.
 
-Opening a file written by an older build migrates it to schema era 4 in
-place; a file it has touched is not readable by an era-3 build.
+Opening a file written by an older build migrates it to schema era 5 in
+place; a file it has touched is not readable by an era-4 build.
 
 ## Design Background
 

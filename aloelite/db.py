@@ -69,7 +69,12 @@ MIN_SQLITE = (3, 45)
 # Era 4: two volume columns (retention_keep, the CV-6r1 default policy, and
 # retention_on_delete) and the views that read them (effective_retention,
 # retained_version, purgeable_node).
-SCHEMA_ERA = 4
+#
+# Era 5: delta manifests (CV-4r1). A version's content_version rows are only
+# the positions it changed; content_commit records each committed version's
+# size and chunk count; streams stage above STAGING_BASE. Manifests written by
+# earlier eras are full and read correctly as they stand.
+SCHEMA_ERA = 5
 
 # ms epochs stay below 1e15 until the year 33658; ns epochs passed 1e18 in
 # 2001. Any stored value under this bound is an unmigrated millisecond value,
@@ -164,7 +169,70 @@ def _migrate_to_era4(conn: sqlite3.Connection) -> None:
             conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {decl}')
 
 
-_MIGRATIONS = {2: _migrate_to_era2, 3: _migrate_to_era3, 4: _migrate_to_era4}
+def _migrate_to_era5(conn: sqlite3.Connection) -> None:
+    """Era 4 -> 5. Earlier eras wrote a full manifest per version, which a
+    delta reader resolves unchanged, so no manifest row is rewritten. What is
+    missing is the record of which versions exist and how long each is:
+
+    1. Rows above the committed pointer go. They are abandoned writes that
+       only a prune would have collected, and they sit at the very numbers
+       the next commits will take.
+    2. content_commit is created and filled: one row per version that has
+       manifest rows (its chunk count, and the sum of its chunk lengths as
+       its size), then the committed version of every entry from the content
+       row itself, which also covers a committed version with no chunks.
+
+    Reruns harmlessly after a crash: the delete is idempotent and the fill is
+    INSERT OR IGNORE over manifests that are still full."""
+    if (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'content_version'"
+        ).fetchone()
+        is None
+    ):
+        return  # a file from before chunked content: nothing to record
+    conn.execute(
+        "DELETE FROM content_version WHERE version > coalesce("
+        "  (SELECT c.version FROM content c"
+        "   WHERE c.node_id = content_version.content_id), 0)"
+    )
+    conn.execute(_CONTENT_COMMIT_DDL)
+    conn.execute(
+        "INSERT OR IGNORE INTO content_commit (content_id, version, size, chunks) "
+        "SELECT cv.content_id, cv.version, coalesce(sum(cc.length), 0), count(*) "
+        "FROM content_version cv "
+        "LEFT JOIN content_chunk cc ON cc.chunk_hash = cv.chunk_hash "
+        "GROUP BY cv.content_id, cv.version"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO content_commit (content_id, version, size, chunks) "
+        "SELECT c.node_id, c.version, c.size, "
+        "  (SELECT count(*) FROM content_version cv "
+        "   WHERE cv.content_id = c.node_id AND cv.version = c.version) "
+        "FROM content c WHERE c.version > 0"
+    )
+
+
+# The era-5 migration fills this table before the schema script runs, so it
+# has to create it. Must stay the same shape as content_commit in schema.sql
+# (tests/test_schema_era.py compares a migrated file against a fresh one).
+_CONTENT_COMMIT_DDL = """
+CREATE TABLE IF NOT EXISTS content_commit (
+  content_id TEXT    NOT NULL REFERENCES node (node_id) ON DELETE CASCADE,
+  version    INTEGER NOT NULL,
+  size       INTEGER NOT NULL,
+  chunks     INTEGER NOT NULL,
+  PRIMARY KEY (content_id, version)
+) STRICT
+"""
+
+_MIGRATIONS = {
+    2: _migrate_to_era2,
+    3: _migrate_to_era3,
+    4: _migrate_to_era4,
+    5: _migrate_to_era5,
+}
 
 
 def _check_sqlite_capabilities(conn: sqlite3.Connection) -> None:
@@ -477,13 +545,22 @@ class Db:
         return self.scalar("resolution.read_chunk_size", {"volume": volume})
 
     def alloc_version(self, node: str) -> int:
-        """The next per-content version to write (CV-3), allocated under the
-        entry's write lock. Held by the caller; this is just the read."""
+        """The next per-content version to commit (CV-3): the committed pointer
+        plus one, read under the entry's write lock. A writer stages only the
+        positions it changes at this number (CV-4r1) and commits in the same
+        transaction."""
         return self.scalar("mutation.next_version", {"node": node})
+
+    def alloc_staging(self, node: str) -> int:
+        """Where a streaming writer keeps its chunks until close: a number far
+        above any commit, so rows left by a writer that died are never
+        mistaken for content. promote_staged renumbers them at commit."""
+        return self.scalar("mutation.staging_version", {"node": node})
 
     def stage_chunks(self, node: str, version: int, volume: str, data: bytes) -> int:
         """Split `data`, upsert each chunk into the immutable pool (dedup), and
-        record the ordered manifest rows for (node, version). Returns the total
+        record a manifest row for every position of (node, version) -- a full
+        write, so the version takes nothing from the one beneath it. Returns the total
         byte size. Does NOT advance the committed pointer — that is the separate
         swap (update_content). Uniform chunking: even a tiny file is one short
         chunk; an empty payload stages zero chunks.

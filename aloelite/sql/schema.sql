@@ -94,11 +94,21 @@ CREATE TABLE IF NOT EXISTS content_chunk (
   enc_tag    BLOB    NOT NULL                  -- ENC-2: ChaCha20-Poly1305 tag (16 bytes)
 ) STRICT;
 
--- CV-4: the ordered manifest. one row per chunk reference. Composite PK makes
--- position-within-version unique and pins reassembly order. chunk_hash FK into
--- the pool; the separate index below supports the GC reverse walk
--- (chunk -> versions). `proof` reserves a per-reference Merkle membership slot
--- (EXT-2); it is never populated here.
+-- CV-4r1: the ordered manifest, stored as deltas. A committed version writes a
+-- row only for the positions it changed; every other position is taken from
+-- the latest earlier row at that position. So position i of version V is the
+-- row with the greatest version <= V at (content_id, i), for i below V's chunk
+-- count (content_commit). Two rules keep that sound:
+--   * a version that grows the content writes every position from the prior
+--     end-of-content chunk to its own end, so a row left beyond an earlier
+--     shrink can never resurface;
+--   * rows ABOVE the committed pointer are not content (CV-3). A streaming
+--     writer stages there, at a number above STAGING_BASE (mutation.
+--     staging_version), and its close renumbers them to committed + 1.
+-- The composite PK makes position-within-version unique. chunk_hash FKs into
+-- the pool; its index supports the GC reverse walk (chunk -> versions).
+-- `proof` reserves a per-reference Merkle membership slot (EXT-2); it is never
+-- populated here.
 CREATE TABLE IF NOT EXISTS content_version (
   content_id  TEXT    NOT NULL REFERENCES node (node_id) ON DELETE CASCADE,
   version     INTEGER NOT NULL,
@@ -110,6 +120,25 @@ CREATE TABLE IF NOT EXISTS content_version (
 
 -- GC reverse walk: given a chunk, which version references it (for sweeping).
 CREATE INDEX IF NOT EXISTS content_version_chunk ON content_version (chunk_hash);
+
+-- Resolving a position: the latest row at (content_id, chunk_index) at or
+-- below a version is one seek here.
+CREATE INDEX IF NOT EXISTS content_version_position
+  ON content_version (content_id, chunk_index, version);
+
+-- One row per committed version above 0: its byte size and chunk count. The
+-- chunk count is what bounds a delta manifest (a shorter version must not read
+-- a longer one's trailing rows), and the rows are the list of versions that
+-- exist, which retention counts. Written only by the content_commit_* triggers,
+-- so no writer in either engine can commit a version without its record.
+-- Version 0 is the empty state an entry is born in and has no row.
+CREATE TABLE IF NOT EXISTS content_commit (
+  content_id TEXT    NOT NULL REFERENCES node (node_id) ON DELETE CASCADE,
+  version    INTEGER NOT NULL,
+  size       INTEGER NOT NULL,
+  chunks     INTEGER NOT NULL,
+  PRIMARY KEY (content_id, version)
+) STRICT;
 
 -- Origin. VOL-1..4. root_node_id nullable for bootstrapping; UNIQUE so a node
 -- roots at most one volume. wm_ts/wm_seq are this volume's id HIGH-WATER MARK
@@ -258,6 +287,31 @@ BEGIN
   UPDATE node SET modified_at = cast(unixepoch('subsec') * 1000000000 AS INTEGER),
                   ctime       = cast(unixepoch('subsec') * 1000000000 AS INTEGER)
   WHERE node_id = NEW.node_id;
+END;
+
+-- Every commit records its version in content_commit. The chunk count comes
+-- from the size and the volume's fixed chunk size (CV-1); an entry outside any
+-- volume has none, and the NOT NULL on `chunks` then refuses the commit.
+CREATE TRIGGER IF NOT EXISTS content_commit_insert
+AFTER INSERT ON content
+WHEN NEW.version > 0
+BEGIN
+  INSERT OR REPLACE INTO content_commit (content_id, version, size, chunks)
+  VALUES (NEW.node_id, NEW.version, NEW.size, (
+    SELECT (NEW.size + v.chunk_size - 1) / v.chunk_size
+    FROM node n JOIN volume v ON v.volume_id = n.volume_id
+    WHERE n.node_id = NEW.node_id));
+END;
+
+CREATE TRIGGER IF NOT EXISTS content_commit_update
+AFTER UPDATE OF version, size ON content
+WHEN NEW.version > 0
+BEGIN
+  INSERT OR REPLACE INTO content_commit (content_id, version, size, chunks)
+  VALUES (NEW.node_id, NEW.version, NEW.size, (
+    SELECT (NEW.size + v.chunk_size - 1) / v.chunk_size
+    FROM node n JOIN volume v ON v.volume_id = n.volume_id
+    WHERE n.node_id = NEW.node_id));
 END;
 
 CREATE TRIGGER IF NOT EXISTS node_touch_name
@@ -507,34 +561,43 @@ CREATE VIEW IF NOT EXISTS effective_retention AS
   JOIN node   n ON n.node_id   = c.node_id
   JOIN volume v ON v.volume_id = n.volume_id;
 
--- CV-7: which (content_id, version) pairs survive a content prune. Resolved
--- BEFORE any chunk is collected. With `keep` from effective_retention:
---   * keep IS NULL -> every version at or below committed is retained;
---   * keep = N     -> the N highest at or below committed (committed is the
---                     first), so N = 1 is the current bytes alone;
---   * keep = 0     -> nothing: only a deleted node on a volume whose
---                     retention_on_delete is 0 gets here;
+-- CV-7: the oldest version each entry retains. Retention is keep-last-N, so
+-- the retained versions are exactly the committed ones from `floor` up to the
+-- committed pointer. With `keep` from effective_retention:
+--   * keep IS NULL -> floor 0: every version is retained;
+--   * keep = N     -> the N-th highest committed version (committed is the
+--                     first), so N = 1 is the current bytes alone. Fewer than
+--                     N versions on record -> floor 0;
+--   * keep = 0     -> NO ROW: nothing is retained. Only a deleted node on a
+--                     volume whose retention_on_delete is 0 gets here;
 --   * a PLACED node's committed version is retained whatever its policy says
 --     (effective_retention floors its keep at 1): a policy never removes
---     current content;
---   * versions ABOVE committed are NEVER retained — they are incomplete/aborted
---     writes (staged chunks whose pointer swap never happened), so this view is
---     also what makes crash-orphans collectable.
+--     current content.
+CREATE VIEW IF NOT EXISTS retention_floor AS
+  SELECT
+    er.node_id AS content_id,
+    er.committed,
+    CASE WHEN er.keep IS NULL THEN 0 ELSE coalesce(r.version, 0) END AS floor
+  FROM effective_retention er
+  LEFT JOIN (
+    SELECT content_id, version,
+           row_number() OVER (
+             PARTITION BY content_id ORDER BY version DESC
+           ) AS rnk
+    FROM content_commit
+  ) r ON r.content_id = er.node_id AND r.rnk = er.keep
+  WHERE er.keep IS NULL OR er.keep > 0;
+
+-- CV-7: which (content_id, version) pairs survive a content prune. Resolved
+-- BEFORE any chunk is collected. Nothing above the committed pointer is ever
+-- here: rows up there are incomplete or abandoned writes, which is what makes
+-- crash-orphans collectable.
 CREATE VIEW IF NOT EXISTS retained_version AS
-  SELECT content_id, version
-  FROM (
-    SELECT
-      cv.content_id,
-      cv.version,
-      er.keep,
-      row_number() OVER (
-        PARTITION BY cv.content_id ORDER BY cv.version DESC
-      ) AS rnk
-    FROM (SELECT DISTINCT content_id, version FROM content_version) cv
-    JOIN effective_retention er ON er.node_id = cv.content_id
-    WHERE cv.version <= er.committed
-  )
-  WHERE keep IS NULL OR rnk <= keep;
+  SELECT k.content_id, k.version
+  FROM retention_floor f
+  JOIN content_commit k
+    ON k.content_id = f.content_id
+   AND k.version >= f.floor AND k.version <= f.committed;
 
 -- What the node sweep may purge beyond volatile_node: a deleted node on a
 -- volume that keeps nothing on delete (retention_on_delete = 0). It must have

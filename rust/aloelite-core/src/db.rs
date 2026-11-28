@@ -32,7 +32,7 @@ use crate::errors::{FsError, Result};
 use crate::ids::{MonotonicMint, stateless_uuid7};
 use crate::platform::{Clock, CryptoRngCore};
 use crate::templates::SCHEMA_SQL;
-use crate::templates::mutation::{INSERT_CHUNK_REF, NEXT_VERSION, UPSERT_CHUNK};
+use crate::templates::mutation::{INSERT_CHUNK_REF, NEXT_VERSION, STAGING_VERSION, UPSERT_CHUNK};
 use crate::templates::resolution::{
     GET_CONTENT_META, READ_CHUNK_SIZE, READ_CHUNKS, READ_CHUNKS_RANGE,
 };
@@ -54,7 +54,7 @@ pub const MIN_SQLITE: (u32, u32) = (3, 45);
 /// from the current schema on open, after any table-shape migration in
 /// [`MIGRATIONS`]. A file stamped NEWER is refused rather than half-read.
 /// Bump whenever `schema.sql` changes any view, trigger, or table.
-pub const SCHEMA_ERA: i64 = 4;
+pub const SCHEMA_ERA: i64 = 5;
 
 /// Second writers wait this long before failing (multi-connection model:
 /// a mount is a row, not a connection).
@@ -72,7 +72,19 @@ const MIGRATIONS: &[(i64, Migration)] = &[
     (2, migrate_to_era2),
     (3, migrate_to_era3),
     (4, migrate_to_era4),
+    (5, migrate_to_era5),
 ];
+
+/// The era-5 migration fills this table before the schema script runs, so it
+/// has to create it. Must stay the same shape as `content_commit` in
+/// `schema.sql`.
+const CONTENT_COMMIT_DDL: &str = "CREATE TABLE IF NOT EXISTS content_commit (
+  content_id TEXT    NOT NULL REFERENCES node (node_id) ON DELETE CASCADE,
+  version    INTEGER NOT NULL,
+  size       INTEGER NOT NULL,
+  chunks     INTEGER NOT NULL,
+  PRIMARY KEY (content_id, version)
+) STRICT";
 
 /// One table-shape upgrade step, run against the raw connection.
 type Migration = fn(&Connection) -> rusqlite::Result<()>;
@@ -336,15 +348,26 @@ impl Db {
         }
     }
 
-    /// The next per-content version to write (CV-3), allocated under the
-    /// entry's write lock. Held by the caller; this is just the read.
+    /// The next per-content version to commit (CV-3): the committed pointer
+    /// plus one, read under the entry's write lock. A writer stages only the
+    /// positions it changes at this number (CV-4r1) and commits in the same
+    /// transaction.
     pub fn alloc_version(&self, node: &NodeId) -> Result<i64> {
         self.scalar(NEXT_VERSION, named_params! { ":node": node })?
             .ok_or_else(|| FsError::internal("next_version returned no row"))
     }
 
+    /// Where a streaming writer keeps its chunks until close: a number far
+    /// above any commit, so rows left by a writer that died are never
+    /// mistaken for content. `promote_staged` renumbers them at commit.
+    pub fn alloc_staging(&self, node: &NodeId) -> Result<i64> {
+        self.scalar(STAGING_VERSION, named_params! { ":node": node })?
+            .ok_or_else(|| FsError::internal("staging_version returned no row"))
+    }
+
     /// Split `data`, upsert each chunk into the immutable pool (dedup), and
-    /// record the ordered manifest rows for (node, version). Returns the
+    /// record a manifest row for every position of (node, version): a full
+    /// write, which takes nothing from the version beneath it. Returns the
     /// total byte size. Does NOT advance the committed pointer — that is the
     /// separate swap (`update_content`). Uniform chunking: a tiny file is one
     /// short chunk; an empty payload stages zero chunks.
@@ -531,7 +554,7 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn install_schema(conn: &Connection) -> Result<()> {
+pub(crate) fn install_schema(conn: &Connection) -> Result<()> {
     let era: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if era > SCHEMA_ERA {
         return Err(FsError::unsupported(format!(
@@ -661,6 +684,53 @@ fn migrate_to_era4(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Era 4 → 5. Earlier eras wrote a full manifest per version, which a delta
+/// reader resolves unchanged, so no manifest row is rewritten. What is
+/// missing is the record of which versions exist and how long each is:
+///
+/// 1. Rows above the committed pointer go. They are abandoned writes that
+///    only a prune would have collected, and they sit at the very numbers
+///    the next commits will take.
+/// 2. `content_commit` is created and filled: one row per version that has
+///    manifest rows (its chunk count, and the sum of its chunk lengths as
+///    its size), then the committed version of every entry from the content
+///    row itself, which also covers a committed version with no chunks.
+///
+/// Reruns harmlessly after a crash: the delete is idempotent and the fill is
+/// `INSERT OR IGNORE` over manifests that are still full.
+fn migrate_to_era5(conn: &Connection) -> rusqlite::Result<()> {
+    let chunked = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_version'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !chunked {
+        return Ok(()); // a file from before chunked content: nothing to record
+    }
+    conn.execute_batch(
+        "DELETE FROM content_version WHERE version > coalesce(
+           (SELECT c.version FROM content c
+            WHERE c.node_id = content_version.content_id), 0)",
+    )?;
+    conn.execute_batch(CONTENT_COMMIT_DDL)?;
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO content_commit (content_id, version, size, chunks)
+         SELECT cv.content_id, cv.version, coalesce(sum(cc.length), 0), count(*)
+         FROM content_version cv
+         LEFT JOIN content_chunk cc ON cc.chunk_hash = cv.chunk_hash
+         GROUP BY cv.content_id, cv.version;
+         INSERT OR REPLACE INTO content_commit (content_id, version, size, chunks)
+         SELECT c.node_id, c.version, c.size,
+           (SELECT count(*) FROM content_version cv
+            WHERE cv.content_id = c.node_id AND cv.version = c.version)
+         FROM content c WHERE c.version > 0;",
+    )?;
+    Ok(())
+}
+
 /// Era 2 → 3. Materialise `edge.name` for every placement that inherited it.
 ///
 /// In era 2 a null `edge.name` meant "use the node's name", so every lookup
@@ -775,8 +845,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            tables, 9,
-            "node, content, content_chunk, content_version, volume, edge, mount, lock, xattr"
+            tables, 10,
+            "node, content, content_chunk, content_version, content_commit, volume, edge, mount, lock, xattr"
         );
     }
 
