@@ -139,3 +139,11 @@ plain, 71 s -> 3.9 s convergent; space 27.6x -> 10.2x plain, 24.8x ->
 meant one version per transaction); that cost is item 3 (in-place or
 delta manifests, smaller chunks). The Python daemon still cannot be
 measured as root (#15).
+
+Added on the owner's ask, same PR (#16): `--chunk-size SIZE` on both
+daemons and both CLIs (a global there, like the pin flags; cli.yaml
+updated). Refused where no volume is created and for an existing volume
+of another size (CV-1). Measured on postgres, rust-fuse plain: 1M 121
+tps / 10.2x, 64K 194 tps / 2.6x, 16K 64 tps / 2.2x; the 16K loss is
+the per-version full manifest copy (CV-4). Also in #16: a token for
+setup-geckodriver, whose anonymous release lookup was rate-limited.

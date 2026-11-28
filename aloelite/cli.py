@@ -39,6 +39,7 @@ import sys
 from . import errors
 from .aloelite import Aloelite, Mount
 from .pin import PinError, add_pin_arguments, read_pin
+from .sizes import parse_size
 from .types import VolumeId
 
 
@@ -414,6 +415,21 @@ def _cmd_prune(fs: Aloelite, args) -> int:
     return 0
 
 
+_DEFAULT_CHUNK_SIZE = 1 << 20  # the spec default (mount-api.yaml create_volume)
+_CHUNK_SIZE_SCOPE = (
+    "--chunk-size only applies where a volume is created: "
+    "'volume create', or 'aloelite -f FILE' on a new file"
+)
+
+
+def _chunk_size(args) -> int:
+    """The chunk size for a volume this command creates (CV-1). main() has
+    already checked the spelling and that the command creates one."""
+    if args.chunk_size is None:
+        return _DEFAULT_CHUNK_SIZE
+    return parse_size(args.chunk_size)
+
+
 def _cmd_status(fs: Aloelite, args) -> int:
     vols = fs.list_volumes()
     fresh = not vols
@@ -422,7 +438,7 @@ def _cmd_status(fs: Aloelite, args) -> int:
             pin = read_pin(args.pin, args.pin_file, args.pin_env, confirm=True)
         except PinError as e:
             raise SystemExit(_fail(str(e)))
-        fs.create_volume("main", pin=pin)
+        fs.create_volume("main", _chunk_size(args), pin=pin)
         vols = fs.list_volumes()
         enc = "encrypted" if pin is not None else "unencrypted"
         print(f"{args.file}: created")
@@ -476,7 +492,9 @@ def _cmd_volume(fs: Aloelite, args) -> int:
         except PinError as e:
             raise SystemExit(_fail(str(e)))
         try:
-            v = fs.create_volume(args.name, pin=pin, ensure_unique=True)
+            v = fs.create_volume(
+                args.name, _chunk_size(args), pin=pin, ensure_unique=True
+            )
         except errors.FsError as e:
             return _fail(str(e))
         enc = "encrypted" if pin is not None else "unencrypted"
@@ -561,6 +579,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="append stdin to PATH (creates it); with no piped stdin, "
         "touch-like create",
+    )
+    ap.add_argument(
+        "--chunk-size",
+        metavar="SIZE",
+        help="chunk size of a volume this command creates: bytes, or with a "
+        "K or M suffix (64K). Default 1M; fixed for the life of the volume",
     )
     add_pin_arguments(ap)
     sub = ap.add_subparsers(dest="cmd", required=False)
@@ -693,6 +717,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.file:
         return _fail("no file given: pass -f or set ALOELITE_FILE")
     bare = args.cmd is None and not (args.in_path or args.append_path)
+    if args.chunk_size is not None:
+        try:
+            parse_size(args.chunk_size)
+        except ValueError as e:
+            return _fail(f"--chunk-size: {e}")
+        creates = args.cmd == "volume" and args.volume_cmd == "create"
+        if not (bare or creates):
+            return _fail(_CHUNK_SIZE_SCOPE)
     if not bare and not os.path.exists(args.file):
         return _fail(
             f"{args.file}: no such file (run 'aloelite -f {args.file}' to create it)"
@@ -710,6 +742,8 @@ def main(argv: list[str] | None = None) -> int:
                         m.put(args.in_path, data)
                 return 0
             if args.cmd is None:
+                if fs.list_volumes() and args.chunk_size is not None:
+                    return _fail(_CHUNK_SIZE_SCOPE)
                 if fs.list_volumes() and (
                     args.pin is not None or args.pin_file or args.pin_env
                 ):

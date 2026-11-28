@@ -24,6 +24,25 @@ use serde::{Deserialize, Serialize};
 /// Unix epoch nanoseconds (era 2; era 1 stored milliseconds).
 pub type Timestamp = i64;
 
+/// A byte size as a command line spells it: `65536`, `64K` or `1M`, the
+/// suffix binary and case-insensitive. `None` for anything else, zero
+/// included. Shared by every front-end that takes `--chunk-size`; the
+/// Python side is `aloelite/sizes.py` and accepts exactly the same strings.
+pub fn parse_size(text: &str) -> Option<usize> {
+    let digits = text.trim_end_matches(['K', 'k', 'M', 'm']);
+    let unit: usize = match &text[digits.len()..] {
+        "" => 1,
+        "K" | "k" => 1 << 10,
+        "M" | "m" => 1 << 20,
+        _ => return None,
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let size = digits.parse::<usize>().ok()?.checked_mul(unit)?;
+    (size > 0).then_some(size)
+}
+
 macro_rules! id_type {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
@@ -201,6 +220,21 @@ token_enum!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_parse_as_bytes_or_binary_multiples() {
+        assert_eq!(parse_size("65536"), Some(65536));
+        assert_eq!(parse_size("64K"), Some(65536));
+        assert_eq!(parse_size("64k"), Some(65536));
+        assert_eq!(parse_size("1M"), Some(1 << 20));
+        assert_eq!(parse_size("2m"), Some(2 << 20));
+        for bad in [
+            "", "K", "0", "0K", "-1", "+1", "1.5M", "64KB", "64KK", "1G", " 1",
+        ] {
+            assert_eq!(parse_size(bad), None, "{bad:?}");
+        }
+        assert_eq!(parse_size("99999999999999999999M"), None, "overflow");
+    }
 
     #[test]
     fn tokens_round_trip() {

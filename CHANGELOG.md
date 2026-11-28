@@ -28,6 +28,17 @@ host path the manifest grants.
 
 ### Added
 
+- **`--chunk-size SIZE` on `aloelite` and both `aloelite-fuse`
+  daemons.** It sets the chunk size (CV-1) of a volume the command
+  creates: `aloelite-fuse --create`, `aloelite volume create`, or the
+  default volume of a new file. SIZE is bytes or a binary `K`/`M`
+  count (`65536`, `64K`, `1M`); the default stays 1 MiB. Chunk size
+  was always per volume, but only the library could choose it. A
+  chunk is rewritten whole when any byte in it changes, so a smaller
+  one suits files edited in place: PostgreSQL on a 64 KiB volume ran
+  1.6x the transactions in a quarter of the space of the 1 MiB
+  default (`doc/BENCHMARKS.md`). The flag is refused wherever no
+  volume is created, and for an existing volume of another size.
 - **`write_ranges`: many byte ranges in one atomic commit.** It lands a
   list of `{offset, data}` ranges as one transaction and one new content
   version, exactly as if `write_range` had been applied to each in

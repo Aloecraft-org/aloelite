@@ -613,6 +613,20 @@ it. Setting keep-last-1 on every file and pruning again brought the same
 volume under PGDATA's own size. After the kill, recovery was clean on every
 frontend.
 
+Chunk size is the first knob. A chunk is rewritten whole when any byte in
+it changes, and a database changes 8 KiB at a time. The same run on
+`rust-fuse` plain, on volumes made with `--chunk-size`:
+
+| chunk size | TPC-B tps | host bytes per PGDATA byte |
+|---|---|---|
+| 1M (default) | 121 | 10.2 |
+| 64K | 194 | 2.6 |
+| 16K | 64 | 2.2 |
+
+Smaller is not monotonically better. Every version records a full manifest,
+one row per chunk position (CV-4), so at 16K each commit copies sixteen
+times the rows it does at 64K, and that outweighs the smaller chunk.
+
 The Python daemon (`fuse`) has no column. It records its own uid as the
 owner of every node created through it, and it mounts with
 `default_permissions`. A root daemon serving postgres through `allow_other`

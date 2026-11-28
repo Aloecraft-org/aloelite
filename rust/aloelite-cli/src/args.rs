@@ -274,6 +274,13 @@ pub const GLOBALS: &[Global] = &[
         help: "append stdin to PATH (creates it)",
     },
     Global {
+        name: "chunk_size",
+        opts: &["--chunk-size"],
+        value: Some("SIZE"),
+        optional_value: false,
+        help: "chunk size of a volume this command creates: bytes, or 64K, 1M (default 1M)",
+    },
+    Global {
         name: "pin",
         opts: &["--pin"],
         value: Some("SECRET"),
@@ -314,6 +321,8 @@ pub struct Globals {
     pub volume: Option<String>,
     pub in_path: Option<String>,
     pub append_path: Option<String>,
+    /// `--chunk-size`, as written; `verbs` checks it and where it applies.
+    pub chunk_size: Option<String>,
     pub pin: Option<PinArg>,
     pub pin_file: Option<String>,
     pub pin_env: Option<String>,
@@ -418,6 +427,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
             "volume" => g.volume = value,
             "in" => g.in_path = value,
             "append" => g.append_path = value,
+            "chunk_size" => g.chunk_size = value,
             "pin" => g.pin = Some(value.map_or(PinArg::Prompt, PinArg::Value)),
             "pin_file" => g.pin_file = value,
             "pin_env" => g.pin_env = value,
@@ -444,7 +454,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
 pub fn usage() -> String {
     let mut s = String::from(
         "usage: aloelite [-f FILE] [-v NAME_OR_ID] [--pin [SECRET] | --pin-file PATH | --pin-env VAR]\n\
-         \x20               [-i PATH | -a PATH] [--version] [VERB ...]\n\n\
+         \x20               [-i PATH | -a PATH] [--chunk-size SIZE] [--version] [VERB ...]\n\n\
          Operate on an Aloelite filesystem file. With no VERB, create the file\n\
          (with a default volume) or show what it holds.\n\nverbs:\n",
     );

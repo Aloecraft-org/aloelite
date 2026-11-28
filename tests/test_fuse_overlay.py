@@ -53,6 +53,21 @@ def test_a_refused_flush_keeps_the_dirty_bytes(m):
     assert of.extents and of.dirty
 
 
+def test_create_takes_a_chunk_size_and_an_existing_volume_keeps_its_own(tmp_path):
+    """--chunk-size reaches the volume --create makes; CV-1 fixes it there, so
+    naming a different size for a volume that exists is refused."""
+    with Aloelite(str(tmp_path / "c.fs")) as fs:
+        vid = fuse._find_or_create_volume(fs, "db", create=True, chunk_size=65536)
+        assert fs.db.chunk_size_of(vid) == 65536
+        same = fuse._find_or_create_volume(fs, "db", create=True, chunk_size=65536)
+        assert same == vid
+        assert fuse._find_or_create_volume(fs, "db", create=True) == vid
+        with pytest.raises(fuse.ChunkSizeFixed):
+            fuse._find_or_create_volume(fs, "db", create=True, chunk_size=16384)
+        plain = fuse._find_or_create_volume(fs, "plain", create=True)
+        assert fs.db.chunk_size_of(plain) == 1 << 20
+
+
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

@@ -68,6 +68,10 @@ pub struct Options<'a> {
     pub access: Access,
     /// Create the volume if the file has none by that name.
     pub create: bool,
+    /// Chunk size (CV-1) of the volume `create` makes; `None` is
+    /// [`DEFAULT_CHUNK_SIZE`]. Immutable afterwards, so a size an existing
+    /// volume does not have is refused rather than ignored.
+    pub chunk_size: Option<usize>,
     /// Let other UIDs reach the mount (consumer containers).
     pub allow_other: bool,
 }
@@ -92,7 +96,8 @@ impl Mount {
             )));
         }
         let mut db = aloelite_store::file::open(opts.file)?;
-        let volume = find_or_create_volume(&mut db, opts.volume, opts.pin, opts.create)?;
+        let volume =
+            find_or_create_volume(&mut db, opts.volume, opts.pin, opts.create, opts.chunk_size)?;
         let mount = ops::mount(
             &mut db,
             &volume,
@@ -204,9 +209,17 @@ fn find_or_create_volume(
     name: &str,
     pin: Option<&[u8]>,
     create: bool,
+    chunk_size: Option<usize>,
 ) -> Result<VolumeId, DaemonError> {
     for v in ops::list_volumes(db)? {
         if v.name.as_deref() == Some(name) {
+            let have = db.chunk_size_of(&v.id)?;
+            if chunk_size.is_some_and(|want| want != have) {
+                return Err(DaemonError::Config(format!(
+                    "volume {name:?} already exists with chunk size {have}; \
+                     chunk size is fixed when a volume is created"
+                )));
+            }
             return Ok(v.id);
         }
     }
@@ -217,7 +230,8 @@ fn find_or_create_volume(
     }
     // pin=None yields a plain volume regardless of enc_mode (create_volume
     // installs the identity cipher when there is no PIN).
-    Ok(ops::create_volume(db, Some(name), DEFAULT_CHUNK_SIZE, pin, EncMode::Convergent)?.id)
+    let chunk_size = chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
+    Ok(ops::create_volume(db, Some(name), chunk_size, pin, EncMode::Convergent)?.id)
 }
 
 fn spawn_renew(inner: Arc<Mutex<Inner>>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
@@ -262,5 +276,36 @@ fn install_signal_handlers() {
     unsafe {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_takes_a_chunk_size_and_an_existing_volume_keeps_its_own() {
+        let dir = std::env::temp_dir().join(format!("aloelite-fuse-cs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut db = aloelite_store::file::open(dir.join("c.fs")).unwrap();
+
+        let vid = find_or_create_volume(&mut db, "db", None, true, Some(65536)).unwrap();
+        assert_eq!(db.chunk_size_of(&vid).unwrap(), 65536);
+        // the same size, or none, finds it again
+        let again = find_or_create_volume(&mut db, "db", None, true, Some(65536)).unwrap();
+        assert_eq!(again, vid);
+        assert_eq!(
+            find_or_create_volume(&mut db, "db", None, true, None).unwrap(),
+            vid
+        );
+        // CV-1: a different size for a volume that exists is refused
+        let refused = find_or_create_volume(&mut db, "db", None, true, Some(16384));
+        assert!(matches!(refused, Err(DaemonError::Config(_))));
+        // and absent means the spec default
+        let plain = find_or_create_volume(&mut db, "plain", None, true, None).unwrap();
+        assert_eq!(db.chunk_size_of(&plain).unwrap(), DEFAULT_CHUNK_SIZE);
+
+        db.close().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

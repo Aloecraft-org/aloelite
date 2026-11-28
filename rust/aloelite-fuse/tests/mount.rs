@@ -60,6 +60,7 @@ impl Mounted {
             pin: None,
             access: Access::Rw,
             create: true,
+            chunk_size: None,
             allow_other: false,
         };
         match Mount::spawn(&opts) {

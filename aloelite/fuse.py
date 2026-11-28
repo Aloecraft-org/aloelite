@@ -872,16 +872,31 @@ for _name in dir(AloeFuse):
 del _name, _fn
 
 
-def _find_or_create_volume(fs, name, pin=None, create=False):
+class ChunkSizeFixed(Exception):
+    """--chunk-size named a size the existing volume does not have (CV-1)."""
+
+
+def _find_or_create_volume(fs, name, pin=None, create=False, chunk_size=None):
+    """The volume's id, creating it when asked. `chunk_size` (CV-1) applies
+    only to a volume this call creates: it is immutable afterwards, so asking
+    for a size an existing volume does not have is refused, not ignored."""
     for v in fs.list_volumes():
         if v.name == name:
+            have = fs.db.chunk_size_of(v.id)
+            if chunk_size is not None and chunk_size != have:
+                raise ChunkSizeFixed(
+                    f"volume {name!r} already exists with chunk size {have}; "
+                    "chunk size is fixed when a volume is created"
+                )
             return v.id
     if not create:
         raise aloe_errors.NotFound(
             f"no volume named {name!r} — run 'aloelite -f FILE' to see "
             "volumes, or pass --create to bootstrap one"
         )
-    return fs.create_volume(name, pin=pin).id
+    if chunk_size is None:
+        return fs.create_volume(name, pin=pin).id
+    return fs.create_volume(name, chunk_size, pin=pin).id
 
 
 def _read_pin(args) -> bytes | None:
@@ -933,6 +948,7 @@ async def fuse_main(
     debug: bool = False,
     create: bool = False,
     access: str = "rw",
+    chunk_size: int | None = None,
 ) -> None:
     """Mount one Aloelite volume at `mountpoint` and serve FUSE until the mount
     is torn down (external `fusermount3 -uz`, or `stop_event` being set).
@@ -947,7 +963,9 @@ async def fuse_main(
     """
     fs = Aloelite(sqlite_path)
     try:
-        vol_id = _find_or_create_volume(fs, volume_name, pin=pin, create=create)
+        vol_id = _find_or_create_volume(
+            fs, volume_name, pin=pin, create=create, chunk_size=chunk_size
+        )
         mount = fs.mount(
             vol_id, pin=pin, access=access, ttl_ms=_MOUNT_TTL_MS
         ).__enter__()
@@ -1029,6 +1047,13 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         action="store_true",
         help="create the volume if it does not exist (off by default)",
     )
+    ap.add_argument(
+        "--chunk-size",
+        metavar="SIZE",
+        help="chunk size of the volume --create makes: bytes, or with a K or "
+        "M suffix (64K). Default 1M. Fixed for the life of the volume; "
+        "smaller suits files rewritten in place, such as databases",
+    )
     ap.add_argument("--debug", action="store_true")
     ap.add_argument(
         "--ro",
@@ -1057,6 +1082,18 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
             file=sys.stderr,
         )
         sys.exit(1)
+    chunk_size = None
+    if args.chunk_size is not None:
+        from aloelite.sizes import parse_size
+
+        if not args.create:
+            print("aloefuse: --chunk-size only applies with --create", file=sys.stderr)
+            sys.exit(1)
+        try:
+            chunk_size = parse_size(args.chunk_size)
+        except ValueError as e:
+            print(f"aloefuse: --chunk-size: {e}", file=sys.stderr)
+            sys.exit(1)
     if args.volume is None:
         if args.create:
             print("aloefuse: --create requires an explicit -v NAME", file=sys.stderr)
@@ -1100,6 +1137,7 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         debug=args.debug,
         create=args.create,
         access="ro" if args.ro else "rw",
+        chunk_size=chunk_size,
     )
     try:
         trio.run(runner)
@@ -1114,7 +1152,7 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
                 raise rest
         print("\naloefuse: interrupted; unmounted cleanly", file=sys.stderr)
         sys.exit(130)
-    except aloe_errors.NotFound as e:
+    except (aloe_errors.NotFound, ChunkSizeFixed) as e:
         print(f"aloefuse: {e}", file=sys.stderr)
         sys.exit(1)
     except aloe_errors.BadKey:

@@ -33,6 +33,12 @@ pub const DEFAULT_CHUNK_SIZE: usize = 1 << 20;
 /// The volume `aloelite -f FILE` creates on a fresh file.
 pub const DEFAULT_VOLUME: &str = "main";
 
+/// What `--chunk-size` is told when the command creates no volume (CV-1:
+/// the size is fixed at creation, so accepting it elsewhere would look like
+/// it had changed something).
+pub const CHUNK_SIZE_SCOPE: &str = "--chunk-size only applies where a volume is created: \
+     'volume create', or 'aloelite -f FILE' on a new file";
+
 /// Parse, run, and return the process exit code, printing what the
 /// reference prints: usage errors on stderr with exit 2, failures as one
 /// `aloelite: <why>` line with exit 1.
@@ -79,6 +85,14 @@ fn execute(g: &Globals, cmd: Option<&Command>) -> Result<i32> {
         return fail("no file given: pass -f or set ALOELITE_FILE");
     };
     let bare = cmd.is_none() && g.in_path.is_none() && g.append_path.is_none();
+    if g.chunk_size.is_some() {
+        chunk_size(g)?;
+        let creates =
+            cmd.is_some_and(|c| c.verb.name == "volume" && c.sub.map(|s| s.name) == Some("create"));
+        if !(bare || creates) {
+            return fail(CHUNK_SIZE_SCOPE);
+        }
+    }
     if !bare && !Path::new(file).exists() {
         return fail(format!(
             "{file}: no such file (run 'aloelite -f {file}' to create it)"
@@ -109,6 +123,9 @@ fn dispatch(db: &mut Db, g: &Globals, cmd: Option<&Command>, file: &str) -> Resu
                 }
                 Ok(0)
             });
+        }
+        if !ops::list_volumes(db)?.is_empty() && g.chunk_size.is_some() {
+            return fail(CHUNK_SIZE_SCOPE);
         }
         if !ops::list_volumes(db)?.is_empty() && g.any_pin_flag() {
             eprintln!(
@@ -449,6 +466,20 @@ fn prune(db: &mut Db, g: &Globals, vacuum: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// The chunk size for a volume this command creates: `--chunk-size`, or
+/// the spec default.
+fn chunk_size(g: &Globals) -> Result<usize> {
+    match g.chunk_size.as_deref() {
+        None => Ok(DEFAULT_CHUNK_SIZE),
+        Some(text) => match aloelite_core::types::parse_size(text) {
+            Some(size) => Ok(size),
+            None => fail(format!(
+                "--chunk-size: {text:?} is not a size: use bytes, or a K or M suffix (64K, 1M)"
+            )),
+        },
+    }
+}
+
 fn volume_create(db: &mut Db, g: &Globals, name: &str) -> Result<i32> {
     let pin = read_pin(
         g.pin.as_ref(),
@@ -462,7 +493,7 @@ fn volume_create(db: &mut Db, g: &Globals, name: &str) -> Result<i32> {
     let v = ops::create_volume(
         db,
         Some(name),
-        DEFAULT_CHUNK_SIZE,
+        chunk_size(g)?,
         pin.as_deref(),
         EncMode::Convergent,
     )?;
@@ -525,7 +556,7 @@ fn status(db: &mut Db, g: &Globals, file: &str) -> Result<i32> {
         ops::create_volume(
             db,
             Some(DEFAULT_VOLUME),
-            DEFAULT_CHUNK_SIZE,
+            chunk_size(g)?,
             pin.as_deref(),
             EncMode::Convergent,
         )?;
