@@ -211,7 +211,9 @@ LLM coding agents should almost NEVER change this file. Claude code has complete
 
 - **CV-3** : An Entry's content has a monotonic version counter, advanced only under the Entry's write lock. The committed version recorded on the content row is the sole definition of the Entry's current bytes; manifest rows at other versions are superseded history or incomplete writes and are not visible content.
 
-- **CV-4** : The chunk sequence of each version is recorded as an explicit ordered manifest (one reference per chunk position), keyed such that position within a version is unique and reassembly order is determined by the manifest, not by chunk identity.
+- **CV-4** : ~~The chunk sequence of each version is recorded as an explicit ordered manifest (one reference per chunk position), keyed such that position within a version is unique and reassembly order is determined by the manifest, not by chunk identity.~~
+
+- **CV-4r1** : The chunk sequence of each version is determined by an ordered manifest, in which position within a version is unique and reassembly order is determined by the manifest, not by chunk identity. A version may record only the positions at which it differs from an earlier version of the same Entry, and takes every other position from that version.
 
 - **CV-5** : Streaming writes record chunks as independently-committed insertions into the immutable pool; only the final version-pointer advance is transactional. No streaming operation holds a write transaction open for the duration of the stream. *(This is the explicit discharge of IO-4 under chunking.)*
 
