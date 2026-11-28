@@ -34,6 +34,14 @@ pub const OPS: &[Op] = &[
         args: &["volume", "old_pin", "new_pin"],
     },
     Op {
+        name: "set_default_retention",
+        args: &["volume", "keep"],
+    },
+    Op {
+        name: "set_retention_on_delete",
+        args: &["volume", "keep"],
+    },
+    Op {
         name: "list_volumes",
         args: &[],
     },
@@ -153,6 +161,14 @@ pub const OPS: &[Op] = &[
     Op {
         name: "remove",
         args: &["mount", "path"],
+    },
+    Op {
+        name: "purge",
+        args: &["mount", "path"],
+    },
+    Op {
+        name: "purge_by_id",
+        args: &["mount", "node"],
     },
     Op {
         name: "remove_recursive",

@@ -147,3 +147,46 @@ of another size (CV-1). Measured on postgres, rust-fuse plain: 1M 121
 tps / 10.2x, 64K 194 tps / 2.6x, 16K 64 tps / 2.2x; the 16K loss is
 the per-version full manifest copy (CV-4). Also in #16: a token for
 setup-geckodriver, whose anonymous release lookup was rate-limited.
+
+## 2026-11-28 volume retention default, retention on delete, purge
+
+Plan: the owner's direction in the thread, after the CV-6 discussion. He
+writes CV-6r1 himself (doc/REQUIREMENTS.md is his alone): a retention
+policy on the entry, or a volume default, or neither, and with neither
+every version is kept; enforced only by pruning. Plus a volume integer
+`retention_on_delete` (-1 everything, 0 nothing, N last N; default 1),
+a `purge()` that destroys a deleted entry and overrides the setting, and
+both settings exposed together so a volume can turn retention off for
+something like postgres. He approved schema era 4 in 0.5.0 on a decision
+card. Steps: schema + era-4 migration; Python engine; spec; Rust port;
+conformance scenarios; CLI and both daemons; periodic prune in the
+daemons, since retention acts only at a prune; re-run the postgres suite.
+
+Done: `volume.retention_keep` and `volume.retention_on_delete`; views
+`effective_retention` and `purgeable_node`, `retained_version` rewritten
+over them; `set_default_retention`, `set_retention_on_delete`, `purge`,
+`purge_by_id` in both engines, mount-api.yaml and the api table;
+conformance/scenarios/purge.yaml; `--retention`, `--retention-on-delete`
+on both CLIs (`volume create`, new `volume set`, a new file) and both
+daemons; `rm --purge`; `--prune-every SECONDS` on both daemons, default
+0. bench: $ALOELITE_BENCH_FUSE_ARGS passes daemon flags.
+
+Choices the owner has seen and not objected to: the entry's policy beats
+the volume default; settings act at prune and only purge is immediate;
+"deleted" means no active placement left, so a hardlinked file is not;
+existing volumes take retention_on_delete = 1.
+
+Found on the way: `prune_content_versions` used a row-value NOT IN, which
+SQLite answers with a scan of the retained list per manifest row. 102,400
+rows took 3.7 s; as NOT EXISTS, 0.38 s. With `--prune-every 2` the old
+form made initdb on a 64K volume take 42 s.
+
+Not done, and why: an rw handle on a file that is unlinked while open
+reads through a path that no longer resolves, so with retention_on_delete
+= 0 a prune can take the node from under it. Flushing such a handle
+already failed before this change (overlays are path-addressed). A read
+descriptor holds a lock and is spared.
+
+For the owner: CV-6r1 is his to write; PI-7 (archived placements are
+retained), TX-3 and OP-5 read as contradicted by retention_on_delete = 0
+and purge, and need his revision or his word that they stand.

@@ -37,6 +37,7 @@ Configurable values
   RUST_BIN_DIRS      where a built Rust binary is looked for
   EXTISM_PLUGIN_DIRS where the built plug-in is looked for
   EXTISM_PAGES       plug-in memory cap; Argon2id runs inside the sandbox
+  FUSE_ARGS_ENV    $ALOELITE_BENCH_FUSE_ARGS, extra flags for every daemon
   MOUNT_WAIT_S     how long a FUSE mount gets to appear
   BENCH_PIN        the PIN encrypted benchmark volumes use
   STREAM_BLOCK     the unit of every streaming read and write here
@@ -52,6 +53,7 @@ Fan-out points
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -66,6 +68,10 @@ from .harness import MiB
 
 BENCH_PIN = b"benchmark-pin-not-a-secret"
 MOUNT_WAIT_S = 30.0
+# Extra daemon flags, shell-split, for a run that measures a non-default
+# volume: "--chunk-size 64K --retention 1 --prune-every 5". Both daemons take
+# the same ones. Unset, a run measures the defaults.
+FUSE_ARGS_ENV = "ALOELITE_BENCH_FUSE_ARGS"
 STREAM_BLOCK = 4 * MiB
 
 # Where a built Rust binary is looked for, in order. $ALOELITE_RUST_BIN_DIR
@@ -748,6 +754,7 @@ def fuse_session(
     # uid, and FUSE turns other uids away without this.
     if allow_other:
         argv.append("--allow-other")
+    argv += shlex.split(os.environ.get(FUSE_ARGS_ENV, ""))
     # Mountpoint LAST: the Rust parser is hand-rolled and takes the first bare
     # token as the mountpoint, so a flag placed after it would be read as one.
     argv.append(str(mountpoint))

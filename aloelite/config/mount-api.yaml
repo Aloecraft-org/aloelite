@@ -67,7 +67,9 @@ enums:
 # ----------------------------------------------------------------------------
 records:
   VolumeInfo:
-    { id: VolumeId, name: "string?", root: "NodeId?", api_version: int, created_at: Timestamp }
+    { id: VolumeId, name: "string?", root: "NodeId?", api_version: int, created_at: Timestamp,
+      retention: "int?", retention_on_delete: int,
+      note: "retention is the volume's default keep-last-N (CV-6r1), null when it has none. retention_on_delete is what a prune keeps of a deleted entry: -1 everything, 0 nothing, N its last N versions; 1 unless set." }
   NodeInfo:
     { id: NodeId, type: NodeType, name: string, created_at: Timestamp,
       modified_at: Timestamp, volume: "VolumeId?", size: "int?",
@@ -159,6 +161,30 @@ operations:
       flags:   { mutates: true, atomic: true, locks: false }
       raises:  [not_found, encryption_required, bad_key]
       note:    "PIN rotation: unwrap K_v with old K_u, re-wrap under new K_u (fresh N_wrap). K_v immutable; EncryptionRequired on 'none', BadKey on wrong old pin. Live mounts unaffected."
+    set_default_retention:
+      params:  { fs: FsHandle, volume: VolumeId, keep: "int?" }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false }
+      raises:  [not_found]
+      note: >
+        CV-6r1: the volume's default content-retention policy. An entry with
+        no policy of its own (set_retention) keeps its last `keep` versions,
+        the committed one counted first; keep must be at least 1. null clears
+        the default, and such entries keep every version again. An entry's
+        own policy always wins. Nothing is removed until the next
+        prune_content.
+    set_retention_on_delete:
+      params:  { fs: FsHandle, volume: VolumeId, keep: int }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: false }
+      raises:  [not_found]
+      note: >
+        What a prune keeps of a DELETED entry, one with no active placement
+        left, whatever the entry's own policy was: -1 everything, 0 nothing,
+        N its last N versions. A new volume has 1: the bytes the entry had
+        when it was deleted, and none of its history. With 0 the next prune
+        removes the node itself and nothing of it is recoverable. remove
+        never destroys anything by itself under any setting; purge does.
     list_volumes:
       params:  { fs: FsHandle }
       returns: [VolumeInfo]
@@ -384,6 +410,21 @@ operations:
         detach a leaf or empty container: archive active edge; node becomes
         detached, not yet purged (OP-5). Refuses a non-empty container with
         not_empty.
+    purge:
+      params:  { mount: MountId, path: Path }
+      returns: void
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, not_empty, lock_held, volume_mismatch, unsupported, mount_invalid]
+      note: >
+        remove, then destroy: the node and all of its content are gone when
+        this returns, whatever the volume's retention_on_delete says. Takes
+        what remove takes and refuses what it refuses. A node still reachable
+        through another placement (a hardlink) only loses this one, as with
+        remove. purge_by_id names the node itself, which is how an entry
+        that is already deleted is destroyed; on a node still placed it
+        detaches every placement first, it raises volume_mismatch for a node
+        of another volume, and unsupported for a volume root. Pool chunks
+        are reclaimed by the next prune_content (CV-7).
     remove_recursive:
       params:  { mount: MountId, path: Path }
       returns: void
@@ -568,7 +609,7 @@ operations:
       params:  { fs: FsHandle, volume: "VolumeId?" }
       returns: PruneReport
       flags:   { mutates: true, atomic: true }
-      note:    "lazy sweep: volatile nodes (PI-3) + invalid locks (ACC-10)"
+      note:    "lazy sweep: volatile nodes (PI-3) + invalid locks (ACC-10), and the deleted nodes of a volume whose retention_on_delete is 0"
     prune_content:
       params:  { fs: FsHandle, volume: "VolumeId?" }
       returns: ContentPruneReport
@@ -576,7 +617,9 @@ operations:
       note: >
         CV-7 companion to prune: drop superseded/aborted manifest versions
         beyond each entry's retention policy, then reclaim pool chunks no
-        retained version still references.
+        retained version still references. The policy in force is the
+        entry's own, else its volume's default, else keep everything; for a
+        deleted entry it is the volume's retention_on_delete.
     verify:
       params:  { fs: FsHandle, mount: MountId, deep: "bool = false" }
       returns: VerifyReport
@@ -596,7 +639,7 @@ id_variants:
     reaching hidden same-name siblings (NODE-5) and for callers that already
     hold a resolved id. Same returns, same raises minus not_found-by-path.
   applies_to:
-    [stat, list, read_all, move, copy, rename, remove, remove_recursive,
+    [stat, list, read_all, move, copy, rename, remove, purge, remove_recursive,
      pack, unpack, open_read, open_write]
   # path_of is deliberately absent: it is already id-addressed (flags.addr: id),
   # taking a NodeId and returning the Path. There is no path-first form of it to

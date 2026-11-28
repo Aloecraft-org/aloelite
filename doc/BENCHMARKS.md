@@ -627,6 +627,20 @@ Smaller is not monotonically better. Every version records a full manifest,
 one row per chunk position (CV-4), so at 16K each commit copies sixteen
 times the rows it does at 64K, and that outweighs the smaller chunk.
 
+Retention is the second. The same run with `--retention 1
+--retention-on-delete 0 --prune-every 5` on the daemon, which keeps one
+version of each file and prunes the volume every five seconds:
+
+| chunk size | TPC-B tps | host bytes per PGDATA byte | the same after VACUUM |
+|---|---|---|---|
+| 1M (default) | 120 | 7.0 | 0.70 |
+| 64K | 185 | 1.6 | 0.67 |
+
+A prune frees pages inside the file and does not shrink it. So the file
+settles at the live data plus whatever is written between two prunes, and
+at `--prune-every 2` the two rows read 3.9 and 1.1. With the sweep on,
+TPC-B at 64K ran at 185 tps against 194 without it, one run each.
+
 The Python daemon (`fuse`) has no column. It records its own uid as the
 owner of every node created through it, and it mounts with
 `default_permissions`. A root daemon serving postgres through `allow_other`

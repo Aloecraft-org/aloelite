@@ -157,12 +157,18 @@ pub const VERBS: &[Verb] = &[
         name: "rm",
         scope: Scope::Mount,
         args: &[req("path")],
-        flags: &[Flag {
-            name: "recursive",
-            opts: &["-r", "--recursive"],
-        }],
+        flags: &[
+            Flag {
+                name: "recursive",
+                opts: &["-r", "--recursive"],
+            },
+            Flag {
+                name: "purge",
+                opts: &["--purge"],
+            },
+        ],
         sub: &[],
-        help: "remove an entry or empty container (-r: a tree)",
+        help: "remove an entry or empty container (-r: a tree; --purge: destroy it now)",
     },
     Verb {
         name: "mv",
@@ -194,8 +200,12 @@ pub const VERBS: &[Verb] = &[
                 name: "create",
                 args: &[req("name")],
             },
+            Sub {
+                name: "set",
+                args: &[],
+            },
         ],
-        help: "manage volumes: ls, create NAME (encrypted iff a --pin* flag is given)",
+        help: "manage volumes: ls, create NAME (encrypted iff a --pin* flag is given), set (--retention*)",
     },
     Verb {
         name: "mounts",
@@ -281,6 +291,20 @@ pub const GLOBALS: &[Global] = &[
         help: "chunk size of a volume this command creates: bytes, or 64K, 1M (default 1M)",
     },
     Global {
+        name: "retention",
+        opts: &["--retention"],
+        value: Some("KEEP"),
+        optional_value: false,
+        help: "volume create/set: default retention, the last KEEP versions of each entry, or all",
+    },
+    Global {
+        name: "retention_on_delete",
+        opts: &["--retention-on-delete"],
+        value: Some("KEEP"),
+        optional_value: false,
+        help: "volume create/set: versions a prune keeps of a deleted entry (default 1; 0; all)",
+    },
+    Global {
         name: "pin",
         opts: &["--pin"],
         value: Some("SECRET"),
@@ -323,6 +347,9 @@ pub struct Globals {
     pub append_path: Option<String>,
     /// `--chunk-size`, as written; `verbs` checks it and where it applies.
     pub chunk_size: Option<String>,
+    /// `--retention` and `--retention-on-delete`, as written.
+    pub retention: Option<String>,
+    pub retention_on_delete: Option<String>,
     pub pin: Option<PinArg>,
     pub pin_file: Option<String>,
     pub pin_env: Option<String>,
@@ -428,6 +455,8 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
             "in" => g.in_path = value,
             "append" => g.append_path = value,
             "chunk_size" => g.chunk_size = value,
+            "retention" => g.retention = value,
+            "retention_on_delete" => g.retention_on_delete = value,
             "pin" => g.pin = Some(value.map_or(PinArg::Prompt, PinArg::Value)),
             "pin_file" => g.pin_file = value,
             "pin_env" => g.pin_env = value,

@@ -339,7 +339,8 @@ resolution:
 
   get_volume:
     sql: |
-      SELECT volume_id, root_node_id, name, api_version, created_at
+      SELECT volume_id, root_node_id, name, api_version, created_at,
+             retention_keep, retention_on_delete
       FROM volume WHERE volume_id = :volume
     params: { volume: "VolumeId" }
     returns: "VolumeInfo or empty"
@@ -356,7 +357,8 @@ resolution:
 
   list_volumes:
     sql: |
-      SELECT volume_id, root_node_id, name, api_version, created_at
+      SELECT volume_id, root_node_id, name, api_version, created_at,
+             retention_keep, retention_on_delete
       FROM volume
       ORDER BY volume_id
     params: {}
@@ -554,6 +556,14 @@ mutation:
       hardlinked node never touches its other placements. Retained for
       recovery like archive_edge (PI-7).
 
+  archive_placements_of:
+    sql: |
+      UPDATE edge SET archived = 1 WHERE to_id = :node AND archived = 0
+    params: { node: "NodeId" }
+    returns: rowcount
+    consumed_by: [purge_by_id]
+    notes: "Detach EVERY placement of a node: the id-addressed purge names the node itself, not one directory entry of it."
+
   archive_edge:
     sql: |
       UPDATE edge SET archived = 1 WHERE edge_id = :edge AND archived = 0
@@ -697,6 +707,38 @@ mutation:
     returns: none
     consumed_by: [create_volume]
     notes: "Direct base-table insert (era 2 retired the insert-views); wm_ts/wm_seq start at the table default (0, 0). api_version is the literal current era. chunk_size is fixed here and immutable thereafter (CV-1)."
+
+  set_volume_retention_keep:
+    sql: |
+      UPDATE volume SET retention_keep = :keep WHERE volume_id = :volume
+    params: { volume: "VolumeId", keep: "keep-last-N (>= 1), or NULL for no default" }
+    returns: rowcount
+    consumed_by: [set_default_retention]
+    notes: "CV-6r1: the volume's default policy, used by entries whose own retention_keep is NULL. Takes effect at the next prune_content."
+
+  set_volume_retention_on_delete:
+    sql: |
+      UPDATE volume SET retention_on_delete = :keep WHERE volume_id = :volume
+    params: { volume: "VolumeId", keep: "-1 keep everything, 0 keep nothing, N keep the last N versions" }
+    returns: rowcount
+    consumed_by: [set_retention_on_delete]
+    notes: "What a prune keeps of a deleted entry (no active placement). Takes effect at the next prune / prune_content."
+
+  purge_edges_of:
+    sql: |
+      DELETE FROM edge WHERE to_id = :node OR (from_id = :node AND archived = 1)
+    params: { node: "NodeId being purged; it must have no active placement" }
+    returns: rowcount
+    consumed_by: [purge]
+    notes: "Hard removal, step 1: drop every placement record of the node (all archived by now) and the archived placements beneath it, so nothing references the row. An ACTIVE edge from it is left in place and makes step 2 fail on the foreign key, which is the guard against purging a container that still holds something."
+
+  purge_node:
+    sql: |
+      DELETE FROM node WHERE node_id = :node
+    params: { node: "NodeId" }
+    returns: rowcount
+    consumed_by: [purge]
+    notes: "Hard removal, step 2. content, manifest and xattr rows cascade; pool chunks are reclaimed by the next prune_content (CV-7), since a chunk may be shared."
 
   update_volume_crypto:
     sql: |
@@ -845,6 +887,14 @@ validation:
     consumed_by: [remove]
     notes: "has_children = 1 => raise not_empty (use remove_recursive instead)."
 
+  has_active_placement:
+    sql: |
+      SELECT EXISTS (SELECT 1 FROM active_edge WHERE to_id = :node) AS placed
+    params: { node: "NodeId" }
+    returns: "{ placed: 0|1 }"
+    consumed_by: [purge]
+    notes: "placed = 1 => the node is still reachable through another placement (a hardlink), so a purge of one path is only a remove."
+
   check_lock_held:
     sql: |
       SELECT EXISTS (
@@ -947,6 +997,17 @@ recursive:
 # ----------------------------------------------------------------------------
 maintenance:
 
+  prune_deleted_edges:
+    sql: |
+      DELETE FROM edge
+      WHERE (to_id IN (SELECT node_id FROM purgeable_node)
+             OR from_id IN (SELECT node_id FROM purgeable_node))
+        AND (:volume IS NULL OR volume_id = :volume)
+    params: { volume: "VolumeId to scope the sweep, or NULL for all" }
+    returns: rowcount
+    consumed_by: [prune]
+    notes: "retention_on_delete = 0: drop the placement records of deleted nodes on volumes that keep nothing on delete, which makes those nodes volatile for prune_nodes in the same transaction. Must run before prune_nodes."
+
   prune_nodes:
     sql: |
       DELETE FROM node
@@ -968,7 +1029,10 @@ maintenance:
   prune_content_versions:
     sql: |
       DELETE FROM content_version
-      WHERE (content_id, version) NOT IN (SELECT content_id, version FROM retained_version)
+      WHERE NOT EXISTS (
+              SELECT 1 FROM retained_version r
+              WHERE r.content_id = content_version.content_id
+                AND r.version = content_version.version)
         AND content_id NOT IN (SELECT node_id FROM valid_lock)
         AND (:volume IS NULL
              OR content_id IN (SELECT node_id FROM node WHERE volume_id = :volume))
@@ -985,6 +1049,9 @@ maintenance:
       never reap a locked node's rows. An orphan is precisely above-committed
       rows with NO valid lock (the writer died, mount ended, or ttl lapsed).
       Must run before prune_content_chunks.
+      NOT EXISTS, not a row-value NOT IN: SQLite answers the latter by
+      scanning the whole retained list for every manifest row, which made a
+      sweep of 100,000 rows take seconds instead of milliseconds.
 
   prune_content_chunks:
     sql: |

@@ -48,6 +48,11 @@ class VolumeInfo(_Record):
     root: NodeId | None
     api_version: int
     created_at: Timestamp
+    # CV-6r1: the default keep-last-N for entries with no policy of their own
+    # (None = no default), and what a prune keeps of a deleted entry
+    # (-1 everything, 0 nothing, N the last N versions).
+    retention: int | None = None
+    retention_on_delete: int = 1
 
     @classmethod
     def from_row(cls, r: Mapping[str, Any]) -> "VolumeInfo":
@@ -57,6 +62,8 @@ class VolumeInfo(_Record):
             root=NodeId(r["root_node_id"]) if r["root_node_id"] is not None else None,
             api_version=r["api_version"],
             created_at=Timestamp(r["created_at"]),
+            retention=r["retention_keep"],
+            retention_on_delete=r["retention_on_delete"],
         )
 
 

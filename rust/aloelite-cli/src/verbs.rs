@@ -24,7 +24,7 @@ use crate::volume::{enc_label, is_encrypted, resolve_volume_name, select_volume}
 // ---------------------------------------------------------------------------
 //
 // Entry point: run(argv) -> exit code. Configurable: DEFAULT_CHUNK_SIZE,
-// DEFAULT_VOLUME. Fan-out: the two match blocks in `dispatch` (file-scoped
+// DEFAULT_VOLUME, CHUNK_SIZE_SCOPE, RETENTION_SCOPE. Fan-out: the two match blocks in `dispatch` (file-scoped
 // verbs, then mount-scoped verbs), one arm per verb in args::VERBS.
 
 /// Chunk size of a volume this command creates (the spec default).
@@ -38,6 +38,11 @@ pub const DEFAULT_VOLUME: &str = "main";
 /// it had changed something).
 pub const CHUNK_SIZE_SCOPE: &str = "--chunk-size only applies where a volume is created: \
      'volume create', or 'aloelite -f FILE' on a new file";
+
+/// What the two retention flags are told with a command that sets nothing
+/// on a volume.
+pub const RETENTION_SCOPE: &str = "--retention and --retention-on-delete only apply to a volume \
+     command: 'volume create', 'volume set', or 'aloelite -f FILE' on a new file";
 
 /// Parse, run, and return the process exit code, printing what the
 /// reference prints: usage errors on stderr with exit 2, failures as one
@@ -93,6 +98,15 @@ fn execute(g: &Globals, cmd: Option<&Command>) -> Result<i32> {
             return fail(CHUNK_SIZE_SCOPE);
         }
     }
+    if g.retention.is_some() || g.retention_on_delete.is_some() {
+        retention_flags(g)?;
+        let volume_cmd = cmd.is_some_and(|c| {
+            c.verb.name == "volume" && matches!(c.sub.map(|s| s.name), Some("create" | "set"))
+        });
+        if !(bare || volume_cmd) {
+            return fail(RETENTION_SCOPE);
+        }
+    }
     if !bare && !Path::new(file).exists() {
         return fail(format!(
             "{file}: no such file (run 'aloelite -f {file}' to create it)"
@@ -127,6 +141,11 @@ fn dispatch(db: &mut Db, g: &Globals, cmd: Option<&Command>, file: &str) -> Resu
         if !ops::list_volumes(db)?.is_empty() && g.chunk_size.is_some() {
             return fail(CHUNK_SIZE_SCOPE);
         }
+        if !ops::list_volumes(db)?.is_empty()
+            && (g.retention.is_some() || g.retention_on_delete.is_some())
+        {
+            return fail(RETENTION_SCOPE);
+        }
         if !ops::list_volumes(db)?.is_empty() && g.any_pin_flag() {
             eprintln!(
                 "aloelite: note: this file already exists; pin flags have no effect on the status view"
@@ -142,6 +161,7 @@ fn dispatch(db: &mut Db, g: &Globals, cmd: Option<&Command>, file: &str) -> Resu
             "volume" => match cmd.sub.map(|s| s.name) {
                 Some("ls") => volumes(db),
                 Some("create") => volume_create(db, g, cmd.arg("name").unwrap_or_default()),
+                Some("set") => volume_set(db, g),
                 _ => fail("unknown volume command"),
             },
             "pin" => match cmd.sub.map(|s| s.name) {
@@ -173,7 +193,12 @@ fn dispatch(db: &mut Db, g: &Globals, cmd: Option<&Command>, file: &str) -> Resu
             }
             "rm" => {
                 let path = cmd.arg("path").unwrap_or_default();
-                if cmd.flag("recursive") {
+                if cmd.flag("purge") {
+                    if cmd.flag("recursive") {
+                        return fail("--purge takes one entry or empty container, not -r");
+                    }
+                    ops::purge(db, m, path)?;
+                } else if cmd.flag("recursive") {
                     ops::remove_recursive(db, m, path)?;
                 } else {
                     ops::remove(db, m, path)?;
@@ -410,11 +435,13 @@ fn tree(db: &mut Db, m: &MountId, root: &str) -> Result<i32> {
 
 fn volume_line(db: &Db, v: &aloelite_core::records::VolumeInfo) -> String {
     format!(
-        "{}  {:<9}  {}  {}",
+        "{}  {:<9}  {}  {}  retention={} on-delete={}",
         v.id.0,
         enc_label(db, &v.id),
         minute_utc(Some(v.created_at)),
-        v.name.as_deref().unwrap_or("(unnamed)")
+        v.name.as_deref().unwrap_or("(unnamed)"),
+        keep_label(v.retention),
+        keep_label(Some(v.retention_on_delete)),
     )
 }
 
@@ -480,6 +507,66 @@ fn chunk_size(g: &Globals) -> Result<usize> {
     }
 }
 
+/// (`--retention`, `--retention-on-delete`) as counts, -1 for `all`, `None`
+/// for a flag that was not given.
+fn retention_flags(g: &Globals) -> Result<(Option<i64>, Option<i64>)> {
+    let read = |flag: &str, text: Option<&str>, least: i64| -> Result<Option<i64>> {
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        match aloelite_core::types::parse_keep(text) {
+            None => fail(format!(
+                "{flag}: {text:?} is not a count: use a number, or 'all'"
+            )),
+            Some(keep) if keep > -1 && keep < least => {
+                fail(format!("{flag}: must be at least {least}, or 'all'"))
+            }
+            Some(keep) => Ok(Some(keep)),
+        }
+    };
+    Ok((
+        read("--retention", g.retention.as_deref(), 1)?,
+        read("--retention-on-delete", g.retention_on_delete.as_deref(), 0)?,
+    ))
+}
+
+/// Set whichever of the two volume retention settings the flags name.
+fn apply_retention(db: &mut Db, vol: &aloelite_core::types::VolumeId, g: &Globals) -> Result<()> {
+    let (keep, on_delete) = retention_flags(g)?;
+    if let Some(keep) = keep {
+        ops::set_default_retention(db, vol, (keep != -1).then_some(keep))?;
+    }
+    if let Some(keep) = on_delete {
+        ops::set_retention_on_delete(db, vol, keep)?;
+    }
+    Ok(())
+}
+
+fn keep_label(keep: Option<i64>) -> String {
+    match keep {
+        None | Some(-1) => "all".to_owned(),
+        Some(n) => n.to_string(),
+    }
+}
+
+fn volume_set(db: &mut Db, g: &Globals) -> Result<i32> {
+    if g.retention.is_none() && g.retention_on_delete.is_none() {
+        return fail("volume set: pass --retention and/or --retention-on-delete");
+    }
+    let vol = select_volume(db, g.volume.as_deref())?;
+    apply_retention(db, &vol, g)?;
+    let Some(v) = ops::list_volumes(db)?.into_iter().find(|v| v.id == vol) else {
+        return fail("volume vanished");
+    };
+    println!(
+        "volume '{}': retention {}, on delete {}",
+        v.name.as_deref().unwrap_or(&v.id.0),
+        keep_label(v.retention),
+        keep_label(Some(v.retention_on_delete)),
+    );
+    Ok(0)
+}
+
 fn volume_create(db: &mut Db, g: &Globals, name: &str) -> Result<i32> {
     let pin = read_pin(
         g.pin.as_ref(),
@@ -497,6 +584,7 @@ fn volume_create(db: &mut Db, g: &Globals, name: &str) -> Result<i32> {
         pin.as_deref(),
         EncMode::Convergent,
     )?;
+    apply_retention(db, &v.id, g)?;
     let enc = if pin.is_some() {
         "encrypted"
     } else {
@@ -553,13 +641,14 @@ fn status(db: &mut Db, g: &Globals, file: &str) -> Result<i32> {
             g.pin_env.as_deref(),
             true,
         )?;
-        ops::create_volume(
+        let v = ops::create_volume(
             db,
             Some(DEFAULT_VOLUME),
             chunk_size(g)?,
             pin.as_deref(),
             EncMode::Convergent,
         )?;
+        apply_retention(db, &v.id, g)?;
         let enc = if pin.is_some() {
             "encrypted"
         } else {

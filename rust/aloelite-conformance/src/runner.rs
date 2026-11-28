@@ -610,6 +610,14 @@ fn mount_op(op: &str, a: &Args, db: &mut Db, mount: &MountId, via: &str) -> Step
             a.allow(&["path"]);
             ops::remove(db, mount, a.str("path")).map(|()| unit())
         }
+        "purge" => {
+            a.allow(&["path"]);
+            ops::purge(db, mount, a.str("path")).map(|()| unit())
+        }
+        "purge_by_id" => {
+            a.allow(&["node"]);
+            ops::purge_by_id(db, mount, &a.node("node")).map(|()| unit())
+        }
         "remove_recursive" => {
             a.allow(&["path"]);
             ops::remove_recursive(db, mount, a.str("path")).map(|()| unit())

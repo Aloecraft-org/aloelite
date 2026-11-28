@@ -65,7 +65,11 @@ MIN_SQLITE = (3, 45)
 # each entry upgrades a file FROM era-1 (one below its key) and runs before
 # the executescript that rebuilds the derived objects. Steps must be
 # crash-idempotent -- a failure between migration and stamp reruns them.
-SCHEMA_ERA = 3
+#
+# Era 4: two volume columns (retention_keep, the CV-6r1 default policy, and
+# retention_on_delete) and the views that read them (effective_retention,
+# retained_version, purgeable_node).
+SCHEMA_ERA = 4
 
 # ms epochs stay below 1e15 until the year 33658; ns epochs passed 1e18 in
 # 2001. Any stored value under this bound is an unmigrated millisecond value,
@@ -137,7 +141,26 @@ def _migrate_to_era3(conn: sqlite3.Connection) -> None:
     )
 
 
-_MIGRATIONS = {2: _migrate_to_era2, 3: _migrate_to_era3}
+def _migrate_to_era4(conn: sqlite3.Connection) -> None:
+    """Era 3 -> 4. Two additive volume columns, each guarded so a crashed run
+    reruns. Existing volumes take the column defaults: no default retention
+    (as before), and retention_on_delete = 1, so the next prune keeps a
+    deleted entry's latest version and drops the history beneath it."""
+    for column, decl in [
+        (
+            "retention_keep",
+            "INTEGER CHECK (retention_keep IS NULL OR retention_keep >= 1)",
+        ),
+        (
+            "retention_on_delete",
+            "INTEGER NOT NULL DEFAULT 1 CHECK (retention_on_delete >= -1)",
+        ),
+    ]:
+        if not _column_exists(conn, "volume", column):
+            conn.execute(f'ALTER TABLE "volume" ADD COLUMN "{column}" {decl}')
+
+
+_MIGRATIONS = {2: _migrate_to_era2, 3: _migrate_to_era3, 4: _migrate_to_era4}
 
 
 def _check_sqlite_capabilities(conn: sqlite3.Connection) -> None:

@@ -68,6 +68,36 @@ def test_create_takes_a_chunk_size_and_an_existing_volume_keeps_its_own(tmp_path
         assert fs.db.chunk_size_of(plain) == 1 << 20
 
 
+def test_mount_retention_settings_reach_the_volume_and_a_prune_enforces_them(tmp_path):
+    """--retention / --retention-on-delete are volume settings the daemon
+    writes before mounting; --prune-every runs _prune_once on a timer."""
+    with Aloelite(str(tmp_path / "r.fs")) as fs:
+        vid = fuse._find_or_create_volume(fs, "db", create=True, chunk_size=4)
+
+        def settings():
+            v = fs.list_volumes()[0]
+            return v.retention, v.retention_on_delete
+
+        fuse._apply_retention(fs, vid, None, None)  # not asked: left alone
+        assert settings() == (None, 1)
+        fuse._apply_retention(fs, vid, 1, 0)
+        with fs.mount(vid) as m:
+            m.put("/kept", b"aaaa")
+            m.put("/kept", b"bbbb")
+            m.put("/gone", b"cccc")
+            m.remove("/gone")
+            fuse._prune_once(fs, vid)
+            assert m.read_all("/kept") == b"bbbb"
+        rows = fs.db.connection.execute(
+            "SELECT (SELECT count(*) FROM content_version), "
+            "(SELECT count(*) FROM content_chunk), "
+            "(SELECT count(*) FROM node WHERE type = 'entry')"
+        ).fetchone()
+        assert tuple(rows) == (1, 1, 1)
+        fuse._apply_retention(fs, vid, -1, -1)  # "all" clears the default
+        assert settings() == (None, -1)
+
+
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

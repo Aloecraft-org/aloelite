@@ -224,6 +224,74 @@ def test_chunk_size_is_refused_where_no_volume_is_created(fsfile, capsys):
         assert fs.resolve_volume_name("x") is None
 
 
+def _retention_of(path, name):
+    with Aloelite(path) as fs:
+        v = next(v for v in fs.list_volumes() if v.name == name)
+        return v.retention, v.retention_on_delete
+
+
+def test_retention_flags_set_a_volumes_settings(fsfile, tmp_path, capsys):
+    assert _retention_of(fsfile, "vol") == (None, 1)  # nobody configured it
+    # at creation
+    assert (
+        run("-f", fsfile, "--retention", "3", "--retention-on-delete", "0",
+            "volume", "create", "db")
+        == 0
+    )  # fmt: skip
+    assert _retention_of(fsfile, "db") == (3, 0)
+    # on an existing volume, either setting alone; `all` clears / keeps all
+    assert run("-f", fsfile, "-v", "db", "--retention", "ALL", "volume", "set") == 0
+    assert _retention_of(fsfile, "db") == (None, 0)
+    assert "retention all, on delete 0" in capsys.readouterr().out
+    assert (
+        run("-f", fsfile, "-v", "db", "--retention-on-delete", "all", "volume", "set")
+        == 0
+    )
+    assert _retention_of(fsfile, "db") == (None, -1)
+    assert _retention_of(fsfile, "vol") == (None, 1)  # the other volume is untouched
+    # on the default volume of a new file
+    fresh = str(tmp_path / "fresh.fs")
+    assert run("-f", fresh, "--retention", "1", "--retention-on-delete", "0") == 0
+    assert _retention_of(fresh, "main") == (1, 0)
+    # and `volumes` shows them
+    assert run("-f", fresh, "volumes") == 0
+    assert "retention=1 on-delete=0" in capsys.readouterr().out
+
+
+def test_retention_flags_are_refused_where_they_would_do_nothing(fsfile, capsys):
+    assert run("-f", fsfile, "--retention", "1", "ls") == 1
+    assert run("-f", fsfile, "--retention-on-delete", "0") == 1  # status of a file
+    assert "only apply to a volume command" in capsys.readouterr().err
+    assert run("-f", fsfile, "volume", "set") == 1  # nothing to set
+    for flag, bad in [
+        ("--retention", "0"),
+        ("--retention", "-1"),
+        ("--retention", "two"),
+        ("--retention-on-delete", "-1"),
+        ("--retention-on-delete", "1.5"),
+        ("--retention-on-delete", ""),
+    ]:
+        assert run("-f", fsfile, f"{flag}={bad}", "volume", "set") == 1, (flag, bad)
+    assert _retention_of(fsfile, "vol") == (None, 1)
+
+
+def test_rm_purge_destroys_the_entry(fsfile, tmp_path, capsys):
+    src = tmp_path / "s.txt"
+    src.write_bytes(b"secret")
+    assert run("-f", fsfile, "put", str(src), "/s.txt") == 0
+    assert run("-f", fsfile, "mkdir", "/d") == 0
+    assert run("-f", fsfile, "put", str(src), "/d/s.txt") == 0
+    with Aloelite(fsfile) as fs:
+        before = fs.db.connection.execute("SELECT count(*) FROM node").fetchone()[0]
+    assert run("-f", fsfile, "rm", "--purge", "/s.txt") == 0
+    assert run("-f", fsfile, "rm", "-r", "--purge", "/d") == 1  # one node at a time
+    assert run("-f", fsfile, "rm", "--purge", "/d") == 1  # not empty
+    with Aloelite(fsfile) as fs:
+        after = fs.db.connection.execute("SELECT count(*) FROM node").fetchone()[0]
+    assert after == before - 1
+    assert run("-f", fsfile, "cat", "/d/s.txt") == 0
+
+
 def test_volumes_and_mounts(fsfile, capsys):
     assert run("-f", fsfile, "ls") == 0  # mints a mount row
     assert run("-f", fsfile, "volumes") == 0

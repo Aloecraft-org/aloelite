@@ -529,6 +529,139 @@ fn chunk_size_is_refused_where_no_volume_is_created() {
     db.close().unwrap();
 }
 
+fn retention_of(file: &str, name: &str) -> (Option<i64>, i64) {
+    let mut db = aloelite_store::file::open(Path::new(file)).unwrap();
+    let vol = ops::list_volumes(&mut db)
+        .unwrap()
+        .into_iter()
+        .find(|v| v.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("no volume {name}"));
+    db.close().unwrap();
+    (vol.retention, vol.retention_on_delete)
+}
+
+#[test]
+fn retention_flags_set_a_volumes_settings() {
+    let dir = scratch("retention");
+    let f = fsfile(&dir);
+    assert_eq!(retention_of(&f, "vol"), (None, 1), "nobody configured it");
+    // at creation
+    let made = run(&[
+        "-f",
+        &f,
+        "--retention",
+        "3",
+        "--retention-on-delete",
+        "0",
+        "volume",
+        "create",
+        "db",
+    ]);
+    assert_eq!(made.code, 0, "{}", made.err);
+    assert_eq!(retention_of(&f, "db"), (Some(3), 0));
+    // on an existing volume, either setting alone; `all` clears / keeps all
+    let set = run(&["-f", &f, "-v", "db", "--retention", "ALL", "volume", "set"]);
+    assert_eq!(set.code, 0, "{}", set.err);
+    assert!(
+        set.out.contains("retention all, on delete 0"),
+        "{}",
+        set.out
+    );
+    assert_eq!(retention_of(&f, "db"), (None, 0));
+    let set = run(&[
+        "-f",
+        &f,
+        "-v",
+        "db",
+        "--retention-on-delete",
+        "all",
+        "volume",
+        "set",
+    ]);
+    assert_eq!(set.code, 0, "{}", set.err);
+    assert_eq!(retention_of(&f, "db"), (None, -1));
+    assert_eq!(retention_of(&f, "vol"), (None, 1), "the other is untouched");
+    // on the default volume of a new file
+    let fresh = dir.join("fresh.fs").to_string_lossy().into_owned();
+    assert_eq!(
+        run(&[
+            "-f",
+            &fresh,
+            "--retention",
+            "1",
+            "--retention-on-delete",
+            "0"
+        ])
+        .code,
+        0
+    );
+    assert_eq!(retention_of(&fresh, "main"), (Some(1), 0));
+    // and `volumes` shows them
+    let listed = run(&["-f", &fresh, "volumes"]);
+    assert!(
+        listed.out.contains("retention=1 on-delete=0"),
+        "{}",
+        listed.out
+    );
+}
+
+#[test]
+fn retention_flags_are_refused_where_they_would_do_nothing() {
+    let dir = scratch("retention-scope");
+    let f = fsfile(&dir);
+    assert_eq!(run(&["-f", &f, "--retention", "1", "ls"]).code, 1);
+    let status = run(&["-f", &f, "--retention-on-delete", "0"]);
+    assert_eq!(status.code, 1);
+    assert!(
+        status.err.contains("only apply to a volume command"),
+        "{}",
+        status.err
+    );
+    assert_eq!(run(&["-f", &f, "volume", "set"]).code, 1, "nothing to set");
+    for (flag, bad) in [
+        ("--retention", "0"),
+        ("--retention", "-1"),
+        ("--retention", "two"),
+        ("--retention-on-delete", "-1"),
+        ("--retention-on-delete", "1.5"),
+        ("--retention-on-delete", ""),
+    ] {
+        let arg = format!("{flag}={bad}");
+        let out = run(&["-f", &f, &arg, "volume", "set"]);
+        assert_eq!(out.code, 1, "{flag} {bad:?}: {}", out.err);
+    }
+    assert_eq!(retention_of(&f, "vol"), (None, 1));
+}
+
+#[test]
+fn rm_purge_destroys_the_entry() {
+    let dir = scratch("purge");
+    let f = fsfile(&dir);
+    let put = |path: &str| run_with(&[], Some(b"secret"), &["-f", &f, "put", "-", path]).code;
+    assert_eq!(put("/s.txt"), 0);
+    assert_eq!(run(&["-f", &f, "mkdir", "/d"]).code, 0);
+    assert_eq!(put("/d/s.txt"), 0);
+    let nodes = |file: &str| -> i64 {
+        let db = aloelite_store::file::open(Path::new(file)).unwrap();
+        let n = db
+            .connection()
+            .query_row("SELECT count(*) FROM node", [], |r| r.get(0))
+            .unwrap();
+        db.close().unwrap();
+        n
+    };
+    let before = nodes(&f);
+    assert_eq!(run(&["-f", &f, "rm", "--purge", "/s.txt"]).code, 0);
+    assert_eq!(
+        run(&["-f", &f, "rm", "-r", "--purge", "/d"]).code,
+        1,
+        "one node at a time"
+    );
+    assert_eq!(run(&["-f", &f, "rm", "--purge", "/d"]).code, 1, "not empty");
+    assert_eq!(nodes(&f), before - 1);
+    assert_eq!(run(&["-f", &f, "cat", "/d/s.txt"]).bytes, b"secret");
+}
+
 #[test]
 fn usage_errors_exit_2_and_help_exits_0() {
     let dir = scratch("usage");

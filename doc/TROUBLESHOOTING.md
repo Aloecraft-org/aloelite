@@ -31,6 +31,8 @@ Two things to know about the eras that exist:
 - **era 3** arrived in 0.4.0 (every placement carries its own name, which is
   what makes a child lookup an index seek). Neither 0.3.x nor 0.4.0rc1 can
   open an era-3 file.
+- **era 4** arrived in 0.5.0 (a volume's default retention and what it keeps
+  of a deleted entry). 0.4.x cannot open an era-4 file.
 
 **To fix it**, install the newer build. That is the intended path and the
 error says so.
@@ -107,14 +109,15 @@ PRAGMA busy_timeout=5000;      -- readers wait for the writer instead of errorin
 ```
 
 Every page write commits a content version, so a busy database grows the
-.fs file until pruned. Set retention on the db file and prune periodically:
+.fs file until pruned. Set retention on the volume and let the mount prune:
 
-```python
-m.set_retention("/test.db", keep=1)
-```
 ```bash
-aloelite -f file.fs prune --vacuum
+aloelite-fuse -f file.fs -v vol --retention 1 --prune-every 60 /mnt/vol
 ```
+
+`--retention 1` keeps only the current bytes of each file, and an entry's
+own `set_retention` still wins. Pruning frees pages inside the file;
+`aloelite -f file.fs prune --vacuum` returns them to the host.
 
 ### "no volume named ..." from aloelite-fuse
 
@@ -253,10 +256,12 @@ write traffic, set retention and prune the outer file periodically:
 
 ```bash
 # on the OUTER file
-aloelite -f outer.fs -v vol stat /backups/inner.aloelite   # sanity
-python3 -c "..."   # m.set_retention('/backups/inner.aloelite', keep=1)
+aloelite -f outer.fs -v vol --retention 1 volume set
 aloelite -f outer.fs prune --vacuum
 ```
+
+That is the volume's default. For one file only, use
+`m.set_retention('/backups/inner.aloelite', keep=1)` from Python.
 
 Storing an aloelite file as plain *content* (`put` / `get`, no live
 access) has none of these caveats and dedups across repeated backups.
@@ -285,14 +290,19 @@ descriptor). Locks release when the descriptor closes; abandoned locks
 ### File keeps growing even though content doesn't
 
 Every write commits a new content version, and superseded versions are
-kept until pruned. For hot files set a retention policy and prune
-periodically:
+kept until pruned. Set a retention policy, on the file or as the volume's
+default, and prune periodically:
 
 ```python
-m.set_retention("/hot.log", keep=3)
+m.set_retention("/hot.log", keep=3)       # one file
+fs.set_default_retention(vol.id, 1)       # every file without its own
 ...
 fs.prune_content()
 ```
+
+A removed file is kept too: a prune leaves its last version, unless the
+volume says otherwise (`fs.set_retention_on_delete(vol.id, 0)` keeps
+nothing, `-1` everything). `m.purge(path)` destroys one file at once.
 
 `fs.health_check()` returning `[]` confirms the file is structurally
 consistent.

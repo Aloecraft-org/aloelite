@@ -218,6 +218,14 @@ fn engine_op<S: Surface>(
             )?;
             S::unit()
         }
+        "set_default_retention" => {
+            ops::set_default_retention(db, &a.volume("volume")?, a.opt_int("keep")?)?;
+            S::unit()
+        }
+        "set_retention_on_delete" => {
+            ops::set_retention_on_delete(db, &a.volume("volume")?, a.int("keep")?)?;
+            S::unit()
+        }
         "list_volumes" => S::record(&ops::list_volumes(db)?),
         "resolve_volume_name" => S::record(&resolve_volume_name(db, &a.str("name")?)?),
         "mount" => {
@@ -333,6 +341,14 @@ fn engine_op<S: Surface>(
         }
         "remove" => {
             ops::remove(db, &mnt()?, &path()?)?;
+            S::unit()
+        }
+        "purge" => {
+            ops::purge(db, &mnt()?, &path()?)?;
+            S::unit()
+        }
+        "purge_by_id" => {
+            ops::purge_by_id(db, &mnt()?, &a.node("node")?)?;
             S::unit()
         }
         "remove_recursive" => {

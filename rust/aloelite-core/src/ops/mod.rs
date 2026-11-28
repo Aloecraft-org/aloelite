@@ -36,14 +36,14 @@ pub use maintenance::{health_check, prune, prune_content, verify};
 pub use read::{exists, list, path_of, read_all, stat, stat_by_id};
 pub use session::{
     MountOptions, change_pin, create_volume, list_mounts, list_volumes, mount, mount_info,
-    renew_mount, unmount,
+    renew_mount, set_default_retention, set_retention_on_delete, unmount,
 };
 pub use streaming::{open_read, open_write};
 pub use structural::{
     create_container, create_entry, create_special, get_xattr, link, list_xattrs, move_,
     remove_xattr, rename, set_atime, set_metadata, set_mtime, set_owner, set_retention, set_xattr,
 };
-pub use tree::{copy, pack, remove, remove_recursive, unpack};
+pub use tree::{copy, pack, purge, purge_by_id, remove, remove_recursive, unpack};
 
 mod content;
 mod locking;

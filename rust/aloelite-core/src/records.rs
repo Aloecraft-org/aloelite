@@ -32,6 +32,12 @@ pub struct VolumeInfo {
     pub root: Option<NodeId>,
     pub api_version: i64,
     pub created_at: Timestamp,
+    /// CV-6r1 default policy for entries with none of their own: keep the
+    /// last N versions. `None` keeps every version.
+    pub retention: Option<i64>,
+    /// What a prune keeps of a deleted entry: -1 everything, 0 nothing,
+    /// N its last N versions.
+    pub retention_on_delete: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -138,6 +144,8 @@ impl VolumeInfo {
             root: r.get("root_node_id")?,
             api_version: r.get("api_version")?,
             created_at: r.get("created_at")?,
+            retention: r.get("retention_keep")?,
+            retention_on_delete: r.get("retention_on_delete")?,
         })
     }
 }

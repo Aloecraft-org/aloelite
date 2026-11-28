@@ -834,6 +834,16 @@ impl Inner {
     pub fn renew(&mut self, ttl_ms: i64) -> Result<()> {
         aloelite_core::ops::renew_mount(&mut self.db, &self.mount, Some(ttl_ms)).map(|_| ())
     }
+
+    /// One retention sweep of the mounted volume: nodes, then content. The
+    /// engine skips an entry that is being written (its lock), and a
+    /// deleted one somebody still holds a lock on.
+    pub fn prune(&mut self) -> Result<()> {
+        let volume = aloelite_core::ops::mount_info(&mut self.db, &self.mount)?.volume;
+        aloelite_core::ops::prune(&mut self.db, Some(&volume))?;
+        aloelite_core::ops::prune_content(&mut self.db, Some(&volume))?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

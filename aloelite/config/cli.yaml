@@ -24,6 +24,8 @@ globals:
   in:       {flags: [-i, --in], value: PATH}
   append:   {flags: [-a, --append], value: PATH}
   chunk_size: {flags: [--chunk-size], value: SIZE}
+  retention: {flags: [--retention], value: KEEP}
+  retention_on_delete: {flags: [--retention-on-delete], value: KEEP}
   pin:      {flags: [--pin], value: SECRET, optional_value: true}
   pin_file: {flags: [--pin-file], value: PATH}
   pin_env:  {flags: [--pin-env], value: VAR}
@@ -40,10 +42,10 @@ verbs:
   stat:    {scope: mount, args: [{name: path}]}
   tree:    {scope: mount, args: [{name: path, optional: true}]}
   mkdir:   {scope: mount, args: [{name: path}], flags: {parents: [-p, --parents]}}
-  rm:      {scope: mount, args: [{name: path}], flags: {recursive: [-r, --recursive]}}
+  rm:      {scope: mount, args: [{name: path}], flags: {recursive: [-r, --recursive], purge: [--purge]}}
   mv:      {scope: mount, args: [{name: src}, {name: dst}]}
   volumes: {scope: file}
-  volume:  {scope: file, sub: {ls: {}, create: {args: [{name: name}]}}}
+  volume:  {scope: file, sub: {ls: {}, create: {args: [{name: name}]}, set: {}}}
   mounts:  {scope: file, flags: {all: [--all]}}
   prune:   {scope: file, flags: {vacuum: [--vacuum]}}
   pin:     {scope: file, sub: {check: {}}}
@@ -55,6 +57,19 @@ chunk_size:
     a count with a binary K or M suffix (65536, 64K, 1M), case-insensitive.
     Default 1M. With any command that creates no volume it is refused with
     exit 1, because a chunk size cannot be changed afterwards.
+
+retention:
+  note: |
+    --retention and --retention-on-delete set a volume's two retention
+    settings: on the volume `volume create` makes, on the default volume of
+    a new file, or with `volume set` on the volume -v selects (at least one
+    of the two is then required). KEEP is a count of versions or `all`.
+    --retention is the default for entries with no policy of their own and
+    must be at least 1; --retention-on-delete is what a prune keeps of a
+    deleted entry and may be 0, which keeps nothing. With any other command
+    they are refused with exit 1. `volumes` shows both on each line.
+    `rm --purge` destroys one entry or empty container at once whatever the
+    volume retains; with -r it is refused with exit 1.
 
 no_verb:
   note: |

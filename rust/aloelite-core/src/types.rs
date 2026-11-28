@@ -43,6 +43,20 @@ pub fn parse_size(text: &str) -> Option<usize> {
     (size > 0).then_some(size)
 }
 
+/// A version count as a command line spells it: `all` (any case) as -1, or
+/// a non-negative number. `None` for anything else. Whether 0 is meaningful
+/// is the caller's business: it is for `--retention-on-delete` and not for
+/// `--retention`. The Python side is `aloelite/sizes.py::parse_keep`.
+pub fn parse_keep(text: &str) -> Option<i64> {
+    if text.eq_ignore_ascii_case("all") {
+        return Some(-1);
+    }
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 macro_rules! id_type {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
