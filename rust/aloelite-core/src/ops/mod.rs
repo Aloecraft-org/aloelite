@@ -30,7 +30,7 @@ use crate::types::{Access, EdgeId, MountId, NodeId, NodeType, VolumeId};
 // ---------------------------------------------------------------------------
 
 pub use crate::pack::{PACK_FMT, PACK_VER};
-pub use content::{append, truncate, write_all, write_range};
+pub use content::{append, truncate, write_all, write_range, write_ranges};
 pub use locking::{lock, renew_lock, unlock};
 pub use maintenance::{health_check, prune, prune_content, verify};
 pub use read::{exists, list, path_of, read_all, stat, stat_by_id};

@@ -251,6 +251,19 @@ operations:
         in-place overwrite of [offset, offset+len), zero-filling any gap past
         EOF; returns the new size. Chunk alignment is preserved (an overwrite
         never shifts bytes), so untouched chunks either side carry by reference.
+    write_ranges:
+      params:  { mount: MountId, path: Path, ranges: "list[{offset: int, data: Bytes}]" }
+      returns: int
+      flags:   { mutates: true, atomic: true, locks: true, addr: path }
+      raises:  [not_found, not_an_entry, lock_held, mount_invalid]
+      note: >
+        several write_range overwrites landed as ONE commit and ONE new
+        content version, as if applied in order (later ranges win where they
+        overlap); returns the new size. Only chunks a range touches, plus the
+        prior EOF chunk and any zero-filled gap when the entry grows, are
+        rebuilt; every other chunk carries by reference. An empty list, or
+        ranges with no bytes, leaves the entry untouched. This is what a POSIX
+        frontend's fsync maps to: one durability point, one version.
     link:
       params:  { mount: MountId, "from": Path, to: Path }
       returns: void

@@ -1,7 +1,7 @@
-//! Random-access write state over the engine's `write_range`, the port of
+//! Random-access write state over the engine's `write_ranges`, the port of
 //! `fuse.py`'s `_OpenFile`. It buffers only DIRTY byte extents (sorted,
 //! non-overlapping), overlays them on ranged reads of committed content, and
-//! flushes each coalesced extent as one atomic `write_range`. Memory is
+//! flushes them all as one atomic `write_ranges` (one version). Memory is
 //! bounded by dirty bytes, never by file size.
 //!
 //! ONE overlay per inode, shared by every rw handle on it (the registry in
@@ -115,12 +115,21 @@ impl Overlay {
         Ok(())
     }
 
-    /// Commit every dirty extent as one `write_range` and clear the buffer.
+    /// Commit every dirty extent in ONE `write_ranges` — one transaction and
+    /// one content version per flush/fsync, however scattered the writes —
+    /// and clear the buffer only once it has landed, so a refused commit
+    /// leaves the dirty bytes in place rather than half of them committed.
     /// Idempotent: a second flush (another handle's release) is a no-op.
     pub fn flush(&mut self, db: &mut Db, mount: &MountId) -> Result<()> {
-        for (lo, b) in std::mem::take(&mut self.extents) {
-            ops::write_range(db, mount, &self.path, lo, &b)?;
+        if !self.extents.is_empty() {
+            let ranges: Vec<(u64, &[u8])> = self
+                .extents
+                .iter()
+                .map(|(lo, b)| (*lo, b.as_slice()))
+                .collect();
+            ops::write_ranges(db, mount, &self.path, &ranges)?;
         }
+        self.extents.clear();
         self.dirty = 0;
         Ok(())
     }
@@ -227,6 +236,25 @@ mod tests {
         assert!(!ov.is_dirty());
         ov.flush(&mut db, &m).unwrap(); // no-op
         assert_eq!(ops::read_all(&mut db, &m, "/f").unwrap(), b"committed");
+    }
+
+    #[test]
+    fn a_flush_of_scattered_extents_is_one_version() {
+        // A database checkpoint: many small writes far apart, then one fsync.
+        // Each extent used to land as its own write_range, so its own version.
+        let (mut db, m) = engine();
+        ops::create_entry(&mut db, &m, "/f", Some(&[b'.'; 64 << 10])).unwrap();
+        let before = ops::stat(&mut db, &m, "/f").unwrap().version;
+        let mut ov = Overlay::new(&mut db, &m, "/f").unwrap();
+        for i in 0..200u64 {
+            ov.write(&mut db, &m, i * 300, b"W").unwrap();
+        }
+        ov.flush(&mut db, &m).unwrap();
+        let after = ops::stat(&mut db, &m, "/f").unwrap().version;
+        assert_eq!(after, before.map(|v| v + 1));
+        let got = ops::read_all(&mut db, &m, "/f").unwrap();
+        assert!((0..200).all(|i| got[i * 300] == b'W'));
+        assert_eq!(got.iter().filter(|&&b| b == b'W').count(), 200);
     }
 
     #[test]

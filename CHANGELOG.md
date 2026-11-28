@@ -28,6 +28,23 @@ host path the manifest grants.
 
 ### Added
 
+- **`--chunk-size SIZE` on `aloelite` and both `aloelite-fuse`
+  daemons.** It sets the chunk size (CV-1) of a volume the command
+  creates: `aloelite-fuse --create`, `aloelite volume create`, or the
+  default volume of a new file. SIZE is bytes or a binary `K`/`M`
+  count (`65536`, `64K`, `1M`); the default stays 1 MiB. Chunk size
+  was always per volume, but only the library could choose it. A
+  chunk is rewritten whole when any byte in it changes, so a smaller
+  one suits files edited in place: PostgreSQL on a 64 KiB volume ran
+  1.6x the transactions in a quarter of the space of the 1 MiB
+  default (`doc/BENCHMARKS.md`). The flag is refused wherever no
+  volume is created, and for an existing volume of another size.
+- **`write_ranges`: many byte ranges in one atomic commit.** It lands a
+  list of `{offset, data}` ranges as one transaction and one new content
+  version, exactly as if `write_range` had been applied to each in
+  order. It is in `mount-api.yaml`, both engines, the browser and
+  plug-in surfaces, and the conformance suite; `write_range` is now its
+  one-range case.
 - **New crate: `aloelite-extism`, Aloelite as an Extism plug-in.**
   Seven exports -- `fs_open`, `fs_open_memory`, `fs_open_image`,
   `fs_snapshot`, `fs_call`, `fs_close`, `fs_operations` -- over
@@ -137,6 +154,13 @@ host path the manifest grants.
 
 ### Changed
 
+- **A flush or fsync on a mount commits one version, not one per dirty
+  range.** Both FUSE daemons now hand every dirty extent of a file to a
+  single `write_ranges`. Before, each extent was its own `write_range`:
+  its own transaction, durable commit, rebuilt chunk and version, so a
+  database checkpoint of 1,600 scattered pages took 1,600 commits and
+  left 1,600 versions. A refused flush now also leaves every dirty byte
+  buffered instead of committing some of them.
 - **Release artifacts carry no version, and the checksum manifest is
   `SHA256SUMS.txt`.** Both from `doc/ALIGNMENT.md`, the Aloecraft-wide
   standard this repository is moving to. The mirror materialises

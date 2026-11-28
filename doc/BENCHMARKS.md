@@ -592,32 +592,47 @@ fsync on: initdb, `pgbench -i -s 1`, 5 s of the TPC-B-like mix with two
 clients, then a SIGKILL of the daemon mid-load. One smoke-scale run, one
 4-vCPU host:
 
-| | ext4 | `rust-fuse` plain | `rust-fuse` convergent | `fuse` plain |
-|---|---|---|---|---|
-| `pgbench -i` | 0.14 s | 36 s | 71 s | 110 s |
-| TPC-B tps | 3,571 | 150 | 103 | 125 |
-| TPC-B p99 | 1.1 ms | 24 ms | 34 ms | 34 ms |
-| read-only tps | 37,350 | 38,470 | 37,430 | 35,660 |
-| host bytes per PGDATA byte | 1.00 | 27.9 | 24.8 | 26.5 |
-| the same after keep-last-1 + VACUUM | | 0.74 | 0.73 | 0.73 |
-| pg_amcheck findings after the kill | 0 | 0 | 0 | 0 |
+| | ext4 | `rust-fuse` plain | `rust-fuse` convergent |
+|---|---|---|---|
+| `pgbench -i` | 0.17 s | 4.2 s | 3.9 s |
+| TPC-B tps | 2,681 | 121 | 83 |
+| TPC-B p99 | 1.6 ms | 29 ms | 45 ms |
+| read-only tps | 31,590 | 32,540 | 31,070 |
+| host bytes per PGDATA byte | 1.00 | 10.2 | 7.4 |
+| the same after keep-last-1 + VACUUM | | 0.75 | 0.74 |
+| pg_amcheck findings after the kill | 0 | 0 | 0 |
 
 Reads are free, because the server's own buffer cache answers them. Writes
-pay 24 to 35x in tps, and `pgbench -i` pays 250x or more, most of it in
-`VACUUM`. The space is the number to act on. Every fsync commits a version
-of the file. Retention is per entry, and its default is NULL, which keeps
-every superseded version (CV-6). So a 73 MB cluster grew to 2 GB within a minute,
-and prune followed by VACUUM returned none of it. Setting keep-last-1 on
-every file and pruning again brought the same volume under PGDATA's own
-size. After the kill, recovery was clean on every frontend.
+pay 22 to 34x in tps, and `pgbench -i` about 25x. A flush or fsync commits
+one version of the file, however many ranges it carries. TPC-B fsyncs about
+once per transaction, so each transaction still costs one version and one
+rewritten 1 MiB chunk. Retention is per entry, and its default is NULL,
+which keeps every superseded version (CV-6). So a 73 MB cluster grew to
+550 to 750 MB within a minute, and prune followed by VACUUM returned none of
+it. Setting keep-last-1 on every file and pruning again brought the same
+volume under PGDATA's own size. After the kill, recovery was clean on every
+frontend.
 
-The `fuse` column was taken with a local fix to the Python daemon. As
-released, that daemon records its own uid as the owner of every node created
-through it, and it mounts with `default_permissions`. A root daemon serving
-postgres through `allow_other` therefore refuses initdb its own
-subdirectories. The suite runs postgres as another user only when the harness
-is root. On a non-root runner the daemon and the cluster share one uid, and
-this case never arises.
+Chunk size is the first knob. A chunk is rewritten whole when any byte in
+it changes, and a database changes 8 KiB at a time. The same run on
+`rust-fuse` plain, on volumes made with `--chunk-size`:
+
+| chunk size | TPC-B tps | host bytes per PGDATA byte |
+|---|---|---|
+| 1M (default) | 121 | 10.2 |
+| 64K | 194 | 2.6 |
+| 16K | 64 | 2.2 |
+
+Smaller is not monotonically better. Every version records a full manifest,
+one row per chunk position (CV-4), so at 16K each commit copies sixteen
+times the rows it does at 64K, and that outweighs the smaller chunk.
+
+The Python daemon (`fuse`) has no column. It records its own uid as the
+owner of every node created through it, and it mounts with
+`default_permissions`. A root daemon serving postgres through `allow_other`
+therefore refuses initdb its own subdirectories (#15). The suite runs
+postgres as another user only when the harness is root. On a non-root runner
+the daemon and the cluster share one uid, and this case never arises.
 
 ## The measured rows
 

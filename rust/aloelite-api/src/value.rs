@@ -66,6 +66,8 @@ pub trait Value: Sized {
     const WANTED_MAP: &'static str = "an object of strings";
     /// …and an object, for the arguments themselves.
     const WANTED_OBJECT: &'static str = "an object";
+    /// …and a list.
+    const WANTED_LIST: &'static str = "a list";
 
     /// Not present at all — JavaScript's `undefined`. A surface that draws
     /// no such distinction never says yes, which is the default.
@@ -98,6 +100,11 @@ pub trait Value: Sized {
     /// argument, so the values come back as values and the string coercion
     /// (and its error message) stays in one place.
     fn entries(&self) -> Option<Vec<(String, Self)>>;
+
+    /// The elements of an array, in order; `None` if this is not one. Only
+    /// `write_ranges` takes a list today, and it reads each element back
+    /// through [`Value::entries`].
+    fn items(&self) -> Option<Vec<Self>>;
 
     /// What an error message says the caller passed: a type name, as the
     /// surface's own users would recognise it.

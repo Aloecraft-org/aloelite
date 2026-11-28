@@ -203,6 +203,27 @@ def test_no_undeclared_public_operations(spec):
 _LOCK_MARKERS = ("check_lock_held", "_require_own_lock", "mutation.create_lock")
 
 
+def _touches_locks(fn) -> bool:
+    """A marker in the function's own source, or in a public operation it
+    delegates to by calling it (write_range is write_ranges' one-range
+    case). One level is enough: delegation in operations.py is never
+    deeper, and a deeper chain would be worth noticing."""
+    src = inspect.getsource(fn)
+    if any(m in src for m in _LOCK_MARKERS):
+        return True
+    for name, other in vars(ops).items():
+        if (
+            other is not fn
+            and inspect.isfunction(other)
+            and not name.startswith("_")
+            and other.__module__ == "aloelite.operations"
+            and f"return {name}(" in src
+        ):
+            if any(m in inspect.getsource(other) for m in _LOCK_MARKERS):
+                return True
+    return False
+
+
 def test_lock_flag_matches_the_implementation(spec):
     """`locks` was documentation, and it had already drifted.
 
@@ -222,7 +243,7 @@ def test_lock_flag_matches_the_implementation(spec):
         if fn is None or not inspect.isfunction(fn):
             continue  # reachability is test_every_declared_operation_is_reachable's job
         declared = bool((spec_flags(spec, op) or {}).get("locks", False))
-        actual = any(m in inspect.getsource(fn) for m in _LOCK_MARKERS)
+        actual = _touches_locks(fn)
         if declared != actual:
             mismatched.append(f"{op}: spec says locks={declared}, code says {actual}")
     assert not mismatched, (

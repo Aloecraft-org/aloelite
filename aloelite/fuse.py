@@ -42,8 +42,8 @@ a rising offset and rebuilding the listing per call made a scan cost one
 listing per call.
 
 Writes buffer only the touched byte ranges, reads overlay them on ranged reads
-of committed content, and flush/fsync/ release commit each coalesced extent as
-one atomic engine write_range (unchanged chunks carried by reference). Memory
+of committed content, and flush/fsync/release commit every coalesced extent together
+as one atomic engine write_ranges (unchanged chunks carried by reference). Memory
 is bounded by dirty bytes, never file size. A non-sequential write on a
 *streaming* handle (O_WRONLY|O_TRUNC path) still returns ENOTSUP; open the file
 O_RDWR for random access instead.
@@ -80,10 +80,10 @@ _DIRTY_FLUSH = 32 << 20  # flush a rw handle once dirty bytes reach this
 
 
 class _OpenFile:
-    """Random-access state backed by write_range: buffers only DIRTY byte
+    """Random-access state backed by write_ranges: buffers only DIRTY byte
     extents (sorted, non-overlapping), overlays them on ranged reads of the
-    committed content, and flushes each coalesced extent as one atomic
-    write_range. Memory is bounded by dirty bytes, never file size.
+    committed content, and flushes all of them as one atomic write_ranges
+    (one version). Memory is bounded by dirty bytes, never file size.
 
     Keyed BY INODE and shared by every rw file handle open on that inode
     (refcounted; AloeFuse._files owns the registry). Per-fh instances lost
@@ -152,11 +152,16 @@ class _OpenFile:
         self.size = new_size
 
     def flush(self) -> None:
-        for lo, b in self.extents:
-            self.m.write_range(self.path, lo, bytes(b))
+        # Every dirty extent lands in ONE write_ranges: one transaction and
+        # one new content version per flush/fsync, however scattered the
+        # writes were. One write_range per extent made a version (and a
+        # durable SQLite commit, and a rebuilt chunk) per extent, which is
+        # what made a database's checkpoint cost thousands of commits.
+        if self.extents:
+            self.m.write_ranges(self.path, [(lo, bytes(b)) for lo, b in self.extents])
         self.extents = []
         self.dirty = 0
-        # an extension past committed EOF is realized by write_range; a pure
+        # an extension past committed EOF is realized by write_ranges; a pure
         # ftruncate-style grow with no bytes is handled in truncate()
         # Idempotent: a second flush (another fh's RELEASE) is a no-op.
 
@@ -816,7 +821,7 @@ class AloeFuse(pyfuse3.Operations):
                 # (sh redirects: open, dup2 to stdout, close the original).
                 # So the handle must survive: convert to a random-access
                 # rw handle over the just-committed state; later writes
-                # land as atomic write_ranges, later flushes flush extents.
+                # buffer as extents, and each flush lands them as one write_ranges.
                 h["w"].close()
                 h["of"] = self._openfile(h["inode"], h["path"])
                 h["mode"] = "rw"
@@ -867,16 +872,31 @@ for _name in dir(AloeFuse):
 del _name, _fn
 
 
-def _find_or_create_volume(fs, name, pin=None, create=False):
+class ChunkSizeFixed(Exception):
+    """--chunk-size named a size the existing volume does not have (CV-1)."""
+
+
+def _find_or_create_volume(fs, name, pin=None, create=False, chunk_size=None):
+    """The volume's id, creating it when asked. `chunk_size` (CV-1) applies
+    only to a volume this call creates: it is immutable afterwards, so asking
+    for a size an existing volume does not have is refused, not ignored."""
     for v in fs.list_volumes():
         if v.name == name:
+            have = fs.db.chunk_size_of(v.id)
+            if chunk_size is not None and chunk_size != have:
+                raise ChunkSizeFixed(
+                    f"volume {name!r} already exists with chunk size {have}; "
+                    "chunk size is fixed when a volume is created"
+                )
             return v.id
     if not create:
         raise aloe_errors.NotFound(
             f"no volume named {name!r} — run 'aloelite -f FILE' to see "
             "volumes, or pass --create to bootstrap one"
         )
-    return fs.create_volume(name, pin=pin).id
+    if chunk_size is None:
+        return fs.create_volume(name, pin=pin).id
+    return fs.create_volume(name, chunk_size, pin=pin).id
 
 
 def _read_pin(args) -> bytes | None:
@@ -928,6 +948,7 @@ async def fuse_main(
     debug: bool = False,
     create: bool = False,
     access: str = "rw",
+    chunk_size: int | None = None,
 ) -> None:
     """Mount one Aloelite volume at `mountpoint` and serve FUSE until the mount
     is torn down (external `fusermount3 -uz`, or `stop_event` being set).
@@ -942,7 +963,9 @@ async def fuse_main(
     """
     fs = Aloelite(sqlite_path)
     try:
-        vol_id = _find_or_create_volume(fs, volume_name, pin=pin, create=create)
+        vol_id = _find_or_create_volume(
+            fs, volume_name, pin=pin, create=create, chunk_size=chunk_size
+        )
         mount = fs.mount(
             vol_id, pin=pin, access=access, ttl_ms=_MOUNT_TTL_MS
         ).__enter__()
@@ -1024,6 +1047,13 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         action="store_true",
         help="create the volume if it does not exist (off by default)",
     )
+    ap.add_argument(
+        "--chunk-size",
+        metavar="SIZE",
+        help="chunk size of the volume --create makes: bytes, or with a K or "
+        "M suffix (64K). Default 1M. Fixed for the life of the volume; "
+        "smaller suits files rewritten in place, such as databases",
+    )
     ap.add_argument("--debug", action="store_true")
     ap.add_argument(
         "--ro",
@@ -1052,6 +1082,18 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
             file=sys.stderr,
         )
         sys.exit(1)
+    chunk_size = None
+    if args.chunk_size is not None:
+        from aloelite.sizes import parse_size
+
+        if not args.create:
+            print("aloefuse: --chunk-size only applies with --create", file=sys.stderr)
+            sys.exit(1)
+        try:
+            chunk_size = parse_size(args.chunk_size)
+        except ValueError as e:
+            print(f"aloefuse: --chunk-size: {e}", file=sys.stderr)
+            sys.exit(1)
     if args.volume is None:
         if args.create:
             print("aloefuse: --create requires an explicit -v NAME", file=sys.stderr)
@@ -1095,6 +1137,7 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         debug=args.debug,
         create=args.create,
         access="ro" if args.ro else "rw",
+        chunk_size=chunk_size,
     )
     try:
         trio.run(runner)
@@ -1109,7 +1152,7 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
                 raise rest
         print("\naloefuse: interrupted; unmounted cleanly", file=sys.stderr)
         sys.exit(130)
-    except aloe_errors.NotFound as e:
+    except (aloe_errors.NotFound, ChunkSizeFixed) as e:
         print(f"aloefuse: {e}", file=sys.stderr)
         sys.exit(1)
     except aloe_errors.BadKey:

@@ -210,6 +210,70 @@ scenarios:
         args: {path: /f.bin}
         expect: {hex: "6162000000 7a"}
 
+  - scenario: write-ranges-lands-every-range-as-one-version
+    requirements: [IO-2, CV-1, CV-3]
+    description: >
+      Three ranges, one in the first chunk, one straddling the old end and
+      one past it with a gap, land in a single commit: the version advances
+      once, and the bytes are what three write_range calls would produce.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "0123456789abcdefghij"}}
+      - op: stat
+        args: {path: /f.bin}
+        expect: {size: 20, version: 1}
+      - op: write_ranges
+        args:
+          path: /f.bin
+          ranges:
+            - {offset: 1, data: {utf8: "AB"}}
+            - {offset: 18, data: {utf8: "XYZW"}}
+            - {offset: 30, data: {utf8: "!"}}
+        expect: 31
+      - op: stat
+        args: {path: /f.bin}
+        expect: {size: 31, version: 2}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {hex: "30414233343536373839616263646566 6768 58595a57 0000000000000000 21"}
+
+  - scenario: write-ranges-applies-overlapping-ranges-in-order
+    requirements: [IO-2]
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "abcdefghij"}}
+      - op: write_ranges
+        args:
+          path: /f.bin
+          ranges:
+            - {offset: 2, data: {utf8: "XXXX"}}
+            - {offset: 4, data: {utf8: "yy"}}
+        expect: 10
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "abXXyyghij"}
+
+  - scenario: write-ranges-with-nothing-to-write-leaves-the-entry-alone
+    requirements: [IO-2, CV-3]
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "abc"}}
+      - op: write_ranges
+        args: {path: /f.bin, ranges: []}
+        expect: 3
+      - op: write_ranges
+        args:
+          path: /f.bin
+          ranges:
+            - {offset: 1, data: {utf8: ""}}
+        expect: 3
+      - op: stat
+        args: {path: /f.bin}
+        expect: {size: 3, version: 1}
+
   - scenario: payload-spanning-many-chunks-round-trips-exactly
     requirements: [CV-1, CV-2, CV-4]
     description: >

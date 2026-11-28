@@ -27,6 +27,9 @@ OPTIONS:
     -f, --file FILE     the .fs/.sqlite file (default: $ALOELITE_FILE)
     -v, --volume NAME   volume name (optional if the file has exactly one)
         --create        create the volume if it does not exist (needs -v)
+        --chunk-size SIZE  chunk size of the volume --create makes: bytes,
+                        or with a K or M suffix (64K). Default 1M. Fixed for
+                        the life of the volume
         --ro            mount read-only
         --allow-other   let other UIDs reach the mount
         --pin SECRET    PIN for an encrypted volume (prefer --pin-file/-env)
@@ -85,6 +88,7 @@ pub fn main() -> i32 {
             aloelite_core::types::Access::Rw
         },
         create: parsed.create,
+        chunk_size: parsed.chunk_size,
         allow_other: parsed.allow_other,
     };
 
@@ -131,6 +135,7 @@ pub struct Parsed {
     pub volume: Option<String>,
     pub mountpoint: String,
     pub create: bool,
+    pub chunk_size: Option<usize>,
     pub ro: bool,
     pub allow_other: bool,
     pub debug: bool,
@@ -160,6 +165,16 @@ impl Parsed {
                 "-f" | "--file" => p.file = value("-f/--file")?,
                 "-v" | "--volume" => p.volume = Some(value("-v/--volume")?),
                 "--create" => p.create = true,
+                "--chunk-size" => {
+                    let text = value("--chunk-size")?;
+                    let size = aloelite_core::types::parse_size(&text).ok_or_else(|| {
+                        format!(
+                            "--chunk-size: {text:?} is not a size: use bytes, \
+                             or a K or M suffix (64K, 1M)"
+                        )
+                    })?;
+                    p.chunk_size = Some(size);
+                }
                 "--ro" => p.ro = true,
                 "--allow-other" => p.allow_other = true,
                 "--debug" => p.debug = true,
@@ -182,6 +197,9 @@ impl Parsed {
         p.mountpoint = mountpoint.ok_or("no mountpoint given")?;
         if p.create && p.volume.is_none() {
             return Err("--create needs an explicit -v NAME".to_owned());
+        }
+        if p.chunk_size.is_some() && !p.create {
+            return Err("--chunk-size only applies with --create".to_owned());
         }
         Ok(Outcome::Run(p))
     }
@@ -273,6 +291,41 @@ mod tests {
         assert_eq!(p.volume.as_deref(), Some("data"));
         assert!(p.create && p.ro && p.allow_other);
         assert_eq!(p.pin_env.as_deref(), Some("P"));
+    }
+
+    #[test]
+    fn chunk_size_parses_and_needs_create() {
+        let p = parse(&[
+            "-f",
+            "v.fs",
+            "-v",
+            "db",
+            "--create",
+            "--chunk-size",
+            "64K",
+            "/m",
+        ]);
+        assert_eq!(p.unwrap().chunk_size, Some(65536));
+        let p = parse(&["-f", "v.fs", "-v", "db", "--create", "/m"]).unwrap();
+        assert_eq!(p.chunk_size, None, "absent means the default");
+        assert!(
+            parse(&["-f", "v.fs", "--chunk-size", "64K", "/m"]).is_err(),
+            "CV-1: only a created volume takes a chunk size"
+        );
+        assert!(
+            parse(&[
+                "-f",
+                "v.fs",
+                "-v",
+                "db",
+                "--create",
+                "--chunk-size",
+                "64KB",
+                "/m"
+            ])
+            .is_err(),
+            "not a size"
+        );
     }
 
     #[test]

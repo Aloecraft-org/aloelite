@@ -9,7 +9,7 @@
 //! | `O_RDONLY` | ranged stream reader | straight from the engine, one chunk at a time; other handles' pending state is settled first |
 //! | `O_WRONLY \| O_TRUNC` | sequential stream writer | straight to the engine; a non-sequential write is `ENOTSUP`, and `flush` commits and converts the handle to random access |
 //! | `O_WRONLY \| O_APPEND` | append batcher | buffered, committed per 1 MiB batch and on flush |
-//! | `O_RDWR`, or plain `O_WRONLY` | dirty-extent overlay, ONE per inode shared by every such handle | buffered as sorted extents, flushed as atomic `write_range`s; reads overlay them on committed content |
+//! | `O_RDWR`, or plain `O_WRONLY` | dirty-extent overlay, ONE per inode shared by every such handle | buffered as sorted extents, flushed as one atomic `write_ranges` (one version per flush); reads overlay them on committed content |
 //!
 //! Memory is bounded by dirty bytes, never by file size. Sizes reported by
 //! `getattr` are overlaid with unflushed state so `fstat` agrees with what a

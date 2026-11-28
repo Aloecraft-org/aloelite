@@ -23,6 +23,7 @@ globals:
   volume:   {flags: [-v, --volume], value: NAME_OR_ID}
   in:       {flags: [-i, --in], value: PATH}
   append:   {flags: [-a, --append], value: PATH}
+  chunk_size: {flags: [--chunk-size], value: SIZE}
   pin:      {flags: [--pin], value: SECRET, optional_value: true}
   pin_file: {flags: [--pin-file], value: PATH}
   pin_env:  {flags: [--pin-env], value: VAR}
@@ -46,6 +47,14 @@ verbs:
   mounts:  {scope: file, flags: {all: [--all]}}
   prune:   {scope: file, flags: {vacuum: [--vacuum]}}
   pin:     {scope: file, sub: {check: {}}}
+
+chunk_size:
+  note: |
+    --chunk-size sets CV-1's chunk size on a volume the command creates:
+    `volume create`, or the default volume of a new file. SIZE is bytes, or
+    a count with a binary K or M suffix (65536, 64K, 1M), case-insensitive.
+    Default 1M. With any command that creates no volume it is refused with
+    exit 1, because a chunk size cannot be changed afterwards.
 
 no_verb:
   note: |

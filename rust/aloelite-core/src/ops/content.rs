@@ -1,5 +1,7 @@
 //! Whole-content and ranged writes: one new version per call, committed
 //! pointer swapped atomically, unchanged chunks carried by reference.
+//! `write_ranges` lands many ranges in that one version; `write_range` is
+//! its one-range case.
 
 use rusqlite::named_params;
 
@@ -64,9 +66,10 @@ pub fn append(db: &mut Db, mount: &MountId, path: &str, data: &[u8]) -> Result<u
 }
 
 /// Atomically overwrite `[offset, offset+len)`, zero-filling any gap past
-/// EOF; returns the new size. Chunk alignment is preserved (an overwrite
-/// never shifts bytes), so full chunks either side of the window carry by
-/// reference and only the window is read, patched, re-chunked and staged.
+/// EOF; returns the new size. The one-range case of [`write_ranges`], which
+/// documents the chunk accounting. Each call is one commit and one new
+/// version; a caller with several ranges to land together (a FUSE flush)
+/// passes them to [`write_ranges`] instead.
 pub fn write_range(
     db: &mut Db,
     mount: &MountId,
@@ -74,7 +77,33 @@ pub fn write_range(
     offset: u64,
     data: &[u8],
 ) -> Result<u64> {
-    if data.is_empty() {
+    write_ranges(db, mount, path, &[(offset, data)])
+}
+
+/// Atomically overwrite several byte ranges as ONE new content version, as
+/// if [`write_range`] had been applied to each in order (later ranges win
+/// where they overlap); returns the new size. Empty ranges contribute
+/// nothing, and with nothing to write the entry is left untouched.
+///
+/// A chunk is rebuilt only if a range touches it, or if it lies between the
+/// prior EOF chunk and the new end (a short final chunk is rebuilt, a gap
+/// zero-fills). Every other chunk carries into the new version BY
+/// REFERENCE, in contiguous runs. Rebuilt chunks are read, patched and
+/// staged one at a time, so memory is one chunk plus the ranges, however
+/// far apart they are. Chunk alignment is preserved, which keeps the
+/// uniform-chunks-except-last invariant the ranged reader depends on.
+pub fn write_ranges(
+    db: &mut Db,
+    mount: &MountId,
+    path: &str,
+    ranges: &[(u64, &[u8])],
+) -> Result<u64> {
+    let pairs: Vec<(i64, &[u8])> = ranges
+        .iter()
+        .filter(|(_, d)| !d.is_empty())
+        .map(|(o, d)| (*o as i64, *d))
+        .collect();
+    if pairs.is_empty() {
         let m = require_mount(db, mount, true)?;
         let node = leaf(db, &m.mount_point, path)?;
         return Ok(db
@@ -86,46 +115,84 @@ pub fn write_range(
         let node = writable_leaf(db, &m.mount_point, path, mount)?;
         let cs = db.chunk_size_of(&m.volume)? as i64;
         let (src_version, size) = db.read_content_meta(&node)?.unwrap_or((0, 0));
-        let offset = offset as i64;
-        let end = offset + data.len() as i64;
+        let end = pairs
+            .iter()
+            .map(|(o, d)| o + d.len() as i64)
+            .max()
+            .unwrap_or(0);
         let new_size = size.max(end);
         let new_version = db.alloc_version(&node)?;
-
-        let lo = offset / cs;
-        let hi = (end - 1) / cs;
-        // The window reaches down to the chunk containing the prior EOF when
-        // writing at/past it (rebuild a short final chunk; zero-fill a gap).
-        let window_lo = lo.min(size / cs);
         let src_last = if size > 0 { (size - 1) / cs } else { -1 };
 
-        if window_lo > 0 {
-            carry(db, &node, new_version, src_version, 0, window_lo - 1)?;
+        // depth: which chunks are rebuilt, as merged [lo, hi] index runs
+        let mut spans: Vec<(i64, i64)> = pairs
+            .iter()
+            .map(|(o, d)| (o / cs, (o + d.len() as i64 - 1) / cs))
+            .collect();
+        if new_size > size {
+            // rebuild from the chunk holding the prior EOF to the new end
+            spans.push((size / cs, (new_size - 1) / cs));
         }
-        if src_last > hi {
-            carry(db, &node, new_version, src_version, hi + 1, src_last)?;
+        let rebuild = merge_spans(spans);
+
+        // depth: carry every untouched run of the source by reference
+        let mut next = 0;
+        for &(lo, hi) in &rebuild {
+            if lo > next && next <= src_last {
+                carry(
+                    db,
+                    &node,
+                    new_version,
+                    src_version,
+                    next,
+                    (lo - 1).min(src_last),
+                )?;
+            }
+            next = hi + 1;
+        }
+        if next <= src_last {
+            carry(db, &node, new_version, src_version, next, src_last)?;
         }
 
-        let base = window_lo * cs;
-        let mut buf: Vec<u8> = Vec::new();
-        let win_src_hi = hi.min(src_last);
-        if win_src_hi >= window_lo {
-            for (_, chunk) in db.read_chunk_range(&node, src_version, window_lo, win_src_hi)? {
-                buf.extend_from_slice(&chunk);
+        // depth: rebuild touched chunks one at a time
+        for &(lo, hi) in &rebuild {
+            for index in lo..=hi {
+                let start = index * cs;
+                let length = cs.min(new_size - start) as usize;
+                let mut buf = vec![0u8; length];
+                if index <= src_last {
+                    let old = first_chunk(db, &node, src_version, index)?;
+                    let n = old.len().min(length);
+                    buf[..n].copy_from_slice(&old[..n]);
+                }
+                let stop = start + length as i64;
+                for &(o, d) in &pairs {
+                    let s = o.max(start);
+                    let e = (o + d.len() as i64).min(stop);
+                    if s < e {
+                        buf[(s - start) as usize..(e - start) as usize]
+                            .copy_from_slice(&d[(s - o) as usize..(e - o) as usize]);
+                    }
+                }
+                db.stage_chunk(&node, new_version, index, &buf)?;
             }
         }
-        let start = (offset - base) as usize;
-        let stop = (end - base) as usize;
-        if start > buf.len() {
-            buf.resize(start, 0);
-        }
-        if stop > buf.len() {
-            buf.resize(stop, 0);
-        }
-        buf[start..stop].copy_from_slice(data);
-        stage_from(db, &node, new_version, window_lo, &buf, cs as usize)?;
         swap_pointer(db, &node, new_version, new_size)?;
         Ok(new_size as u64)
     })
+}
+
+/// Sorted, merged chunk-index runs; touching runs fold into one.
+fn merge_spans(mut spans: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    spans.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for (lo, hi) in spans {
+        match out.last_mut() {
+            Some(last) if lo <= last.1 + 1 => last.1 = last.1.max(hi),
+            _ => out.push((lo, hi)),
+        }
+    }
+    out
 }
 
 /// Atomically set a leaf's size. Shrink carries full leading chunks by

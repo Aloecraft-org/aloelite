@@ -194,6 +194,36 @@ def test_prune(fsfile, capsys):
     assert "pruned:" in out and "vacuumed" in out
 
 
+def _chunk_size_of(path, name):
+    with Aloelite(path) as fs:
+        return fs.db.chunk_size_of(fs.resolve_volume_name(name))
+
+
+def test_chunk_size_sets_a_created_volumes_chunk_size(fsfile, tmp_path, capsys):
+    # on `volume create`, in each spelling
+    assert run("-f", fsfile, "--chunk-size", "64K", "volume", "create", "db") == 0
+    assert run("-f", fsfile, "--chunk-size", "16384", "volume", "create", "raw") == 0
+    assert _chunk_size_of(fsfile, "db") == 65536
+    assert _chunk_size_of(fsfile, "raw") == 16384
+    assert _chunk_size_of(fsfile, "vol") == 1 << 20  # the default is unchanged
+    # and on the default volume of a new file
+    fresh = str(tmp_path / "fresh.fs")
+    assert run("-f", fresh, "--chunk-size", "2m") == 0
+    assert _chunk_size_of(fresh, "main") == 2 << 20
+
+
+def test_chunk_size_is_refused_where_no_volume_is_created(fsfile, capsys):
+    # CV-1: fixed at creation. Accepting the flag elsewhere would look like
+    # it had changed something.
+    assert run("-f", fsfile, "--chunk-size", "64K", "ls") == 1
+    assert run("-f", fsfile, "--chunk-size", "64K") == 1  # status of an existing file
+    assert "only applies where a volume is created" in capsys.readouterr().err
+    for bad in ("64KB", "0", "-1", "1.5M", "K", ""):
+        assert run("-f", fsfile, f"--chunk-size={bad}", "volume", "create", "x") == 1
+    with Aloelite(fsfile) as fs:
+        assert fs.resolve_volume_name("x") is None
+
+
 def test_volumes_and_mounts(fsfile, capsys):
     assert run("-f", fsfile, "ls") == 0  # mints a mount row
     assert run("-f", fsfile, "volumes") == 0

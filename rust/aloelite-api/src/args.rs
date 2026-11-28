@@ -154,6 +154,26 @@ impl<V: Value> Args<V> {
         Ok(out)
     }
 
+    /// `write_ranges`' `list[{offset: int, data: Bytes}]`. Each element is
+    /// read with the same strictness as a top-level argument: an unknown
+    /// field is refused, and a missing one is named by its index.
+    pub fn ranges(&self, name: &str) -> Result<Vec<(u64, Vec<u8>)>> {
+        let v = self.get(name).ok_or_else(|| self.missing(name))?;
+        let items = v
+            .items()
+            .ok_or_else(|| self.wrong(name, V::WANTED_LIST, v))?;
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let field = format!("{name}[{i}]");
+                let el = Args::read(&format!("{}: {field}", self.op), item)?;
+                el.allow(&["offset", "data"])?;
+                Ok((el.uint("offset")?, el.bytes("data")?))
+            })
+            .collect()
+    }
+
     // -- the spec's scalars and enums ------------------------------------
 
     pub fn mount(&self) -> Result<MountId> {

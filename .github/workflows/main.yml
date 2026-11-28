@@ -349,7 +349,12 @@ jobs:
     # read as a wasm-bindgen problem rather than a missing browser. Installing
     # them here also makes the job runnable on an image that never had them.
     - uses: browser-actions/setup-firefox@latest
+    # The token is not optional in practice: without it this action asks the
+    # GitHub API for the latest release anonymously, and a shared runner IP
+    # is over the anonymous rate limit often enough to fail the job.
     - uses: browser-actions/setup-geckodriver@latest
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
     - name: Browser and driver, as installed
       run: |
         firefox --version

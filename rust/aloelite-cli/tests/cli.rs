@@ -468,6 +468,67 @@ fn stdin_shortcuts_and_put_from_stdin() {
     );
 }
 
+fn chunk_size_of(file: &str, name: &str) -> usize {
+    let mut db = aloelite_store::file::open(Path::new(file)).unwrap();
+    let vol = ops::list_volumes(&mut db)
+        .unwrap()
+        .into_iter()
+        .find(|v| v.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("no volume {name}"));
+    let cs = db.chunk_size_of(&vol.id).unwrap();
+    db.close().unwrap();
+    cs
+}
+
+#[test]
+fn chunk_size_sets_a_created_volumes_chunk_size() {
+    let dir = scratch("chunk-size");
+    let f = fsfile(&dir);
+    let create = |size: &str, name: &str| {
+        run(&["-f", &f, "--chunk-size", size, "volume", "create", name]).code
+    };
+    assert_eq!(create("64K", "db"), 0);
+    assert_eq!(create("16384", "raw"), 0);
+    assert_eq!(chunk_size_of(&f, "db"), 65536);
+    assert_eq!(chunk_size_of(&f, "raw"), 16384);
+    assert_eq!(
+        chunk_size_of(&f, "vol"),
+        1 << 20,
+        "the default is unchanged"
+    );
+    // and on the default volume of a new file
+    let fresh = dir.join("fresh.fs").to_string_lossy().into_owned();
+    assert_eq!(run(&["-f", &fresh, "--chunk-size", "2m"]).code, 0);
+    assert_eq!(chunk_size_of(&fresh, "main"), 2 << 20);
+}
+
+#[test]
+fn chunk_size_is_refused_where_no_volume_is_created() {
+    // CV-1: fixed at creation. Accepting the flag elsewhere would look like
+    // it had changed something.
+    let dir = scratch("chunk-size-scope");
+    let f = fsfile(&dir);
+    assert_eq!(run(&["-f", &f, "--chunk-size", "64K", "ls"]).code, 1);
+    let status = run(&["-f", &f, "--chunk-size", "64K"]);
+    assert_eq!(status.code, 1);
+    assert!(
+        status
+            .err
+            .contains("only applies where a volume is created"),
+        "{}",
+        status.err
+    );
+    for bad in ["64KB", "0", "-1", "1.5M", "K", ""] {
+        let flag = format!("--chunk-size={bad}");
+        let out = run(&["-f", &f, &flag, "volume", "create", "x"]);
+        assert_eq!(out.code, 1, "{bad:?}: {}", out.err);
+    }
+    let mut db = aloelite_store::file::open(Path::new(&f)).unwrap();
+    let names: Vec<_> = ops::list_volumes(&mut db).unwrap();
+    assert!(names.iter().all(|v| v.name.as_deref() != Some("x")));
+    db.close().unwrap();
+}
+
 #[test]
 fn usage_errors_exit_2_and_help_exits_0() {
     let dir = scratch("usage");

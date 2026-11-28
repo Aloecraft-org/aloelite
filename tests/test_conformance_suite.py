@@ -97,15 +97,27 @@ def _deref(value: Any, binds: dict[str, Any]) -> Any:
     return getattr(target, field)
 
 
+def _resolve_value(value: Any, binds: dict[str, Any]) -> Any:
+    if _is_bytes_literal(value):
+        return _decode(value)
+    if isinstance(value, dict) and "ref" in value:
+        return _deref(value, binds)
+    if isinstance(value, list):
+        # a list of records (write_ranges' ranges): resolve each field
+        return [
+            {k: _resolve_value(v, binds) for k, v in item.items()}
+            if isinstance(item, dict)
+            else _resolve_value(item, binds)
+            for item in value
+        ]
+    return value
+
+
 def _resolve_args(args: dict[str, Any], binds: dict[str, Any]) -> dict[str, Any]:
-    out = {}
-    for key, value in args.items():
-        if _is_bytes_literal(value):
-            value = _decode(value)
-        elif isinstance(value, dict) and "ref" in value:
-            value = _deref(value, binds)
-        out[_ARG_ALIASES.get(key, key)] = value
-    return out
+    return {
+        _ARG_ALIASES.get(key, key): _resolve_value(value, binds)
+        for key, value in args.items()
+    }
 
 
 # ---------------------------------------------------------------------------
