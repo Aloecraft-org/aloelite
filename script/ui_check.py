@@ -111,16 +111,16 @@ def ensure_fixtures():
 # ---------------------------------------------------------------------------
 def names(page):
     """Visible entry names in the listing (the cell also holds an emoji)."""
-    return page.evaluate("""() => [...document.querySelectorAll('#expModal tbody tr')]
+    return page.evaluate("""() => [...document.querySelectorAll('#explorer tbody tr')]
         .filter(tr => tr.offsetParent !== null)
-        .map(tr => { const s = tr.querySelector('td span'); return s ? s.innerText.trim() : ''; })
+        .map(tr => { const s = tr.querySelector('.exp-name'); return s ? s.innerText.trim() : ''; })
         .filter(Boolean)""")
 
 
 def sizes(page):
-    return page.evaluate("""() => [...document.querySelectorAll('#expModal tbody tr')]
+    return page.evaluate("""() => [...document.querySelectorAll('#explorer tbody tr')]
         .filter(tr => tr.offsetParent !== null)
-        .map(tr => tr.children[1] && tr.children[1].innerText.trim())
+        .map(tr => { const c = tr.querySelector('.exp-size'); return c && c.innerText.trim(); })
         .filter(Boolean).map(s => parseInt(s))""")
 
 
@@ -144,7 +144,7 @@ def run(page):
     # -- x-show vs bootstrap's !important -----------------------------------
     check("no stray stat row before Stat is clicked",
           not page.locator("div.stat-row").first.is_visible())
-    card = page.locator("div.border.rounded", has_text=VOL_NAME).first
+    card = page.locator(".rail-vol", has_text=VOL_NAME).first
     card.locator("button[data-bs-toggle=dropdown]").click()
     page.wait_for_timeout(400)
     page.get_by_role("link", name="Stat").first.click()
@@ -155,7 +155,7 @@ def run(page):
           len(stat.inner_text().strip()) > len("Size: Modified:"))
 
     # -- explorer ------------------------------------------------------------
-    card.get_by_role("button", name="Open").click()
+    card.locator(".rail-vol-open").click()
     page.wait_for_timeout(1600)
     check("listing is not empty", len(names(page)) > 0)
     page.get_by_role("link", name=FOLDER).first.click()
@@ -184,11 +184,11 @@ def run(page):
     page.wait_for_timeout(600)
     check("filter narrows the listing", names(page) == ["item-1.txt"])
     check("summary reports filtered vs total",
-          f"(of {N_FILES})" in page.locator("#expModal").inner_text())
+          f"(of {N_FILES})" in page.locator("#explorer").inner_text())
     page.locator("#expFilter").fill("no-such-thing")
     page.wait_for_timeout(500)
     check("empty filter result explains itself",
-          "Nothing matches" in page.locator("#expModal tbody").inner_text())
+          "Nothing matches" in page.locator("#explorer tbody").inner_text())
     page.locator("#expFilter").fill("")
     page.wait_for_timeout(500)
 
@@ -207,7 +207,7 @@ def run(page):
     page.wait_for_timeout(1000)
     check("cancelling leaves the file alone", "item-3.txt" in names(page))
     check("explorer still usable after cancelling",
-          page.locator("#expModal").is_visible() and len(names(page)) == N_FILES)
+          page.locator("#explorer").is_visible() and len(names(page)) == N_FILES)
 
     row = page.get_by_role("row", name="item-3.txt")
     row.locator("button[data-bs-toggle=dropdown]").click()
@@ -220,7 +220,9 @@ def run(page):
     check("confirming deletes", "item-3.txt" not in names(page))
 
     # -- create / edit / round-trip ------------------------------------------
-    page.get_by_role("button", name="New file").click()
+    page.get_by_role("button", name="+ New").click()
+    page.wait_for_timeout(300)
+    page.get_by_role("link", name="New text file").click()
     answer_ask(page, "written-by-ui-check.txt")
     ta = page.locator("#edModal textarea")
     ta.wait_for(state="visible", timeout=5000)
@@ -254,7 +256,7 @@ def run(page):
     page.wait_for_timeout(1200)
     check("'Discard' returns to the explorer",
           not page.locator("#edModal textarea").is_visible()
-          and page.locator("#expModal").is_visible())
+          and page.locator("#explorer").is_visible())
 
     # -- rename, then clean up ----------------------------------------------
     page.get_by_role("row", name="written-by-ui-check.txt") \
@@ -280,19 +282,19 @@ def run_phone(page):
     """The columns fold away below md; the data must not go with them."""
     page.goto(f"{BASE}/admin")
     page.wait_for_timeout(1500)
-    page.locator("div.border.rounded", has_text=VOL_NAME).first \
-        .get_by_role("button", name="Open").click()
+    page.locator(".rail-vol", has_text=VOL_NAME).first \
+        .locator(".rail-vol-open").click()
     page.wait_for_timeout(1600)
     page.get_by_role("link", name=FOLDER).first.click()
     page.wait_for_timeout(1300)
     check("phone: Size column is hidden",
-          not page.locator("#expModal thead th", has_text="Size").first.is_visible())
+          not page.locator("#explorer thead th", has_text="Size").first.is_visible())
     check("phone: size/date still shown under the name",
-          page.locator("#expModal .exp-sub").first.is_visible())
+          page.locator("#explorer .exp-sub").first.is_visible())
     # every row's action menu must be reachable inside the viewport
     w = page.viewport_size["width"]
     boxes = page.evaluate("""() => [...document.querySelectorAll(
-        "#expModal tbody tr button[data-bs-toggle='dropdown']")]
+        "#explorer tbody tr button[data-bs-toggle='dropdown']")]
         .map(b => b.getBoundingClientRect().right)""")
     check("phone: every row's action menu is on-screen",
           bool(boxes) and max(boxes) <= w)

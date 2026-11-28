@@ -18,16 +18,65 @@
   <script src="{{ url_for('static', filename='prism.js') }}"></script>
   <script src="{{ url_for('static', filename='signature_pad.js') }}"></script>
   <style>
-    body { background: #f8f9fa; }
-    .vol-card { transition: box-shadow .15s; }
-    .vol-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+    /* --- shell: top bar, then rail | explorer | details -------------------
+       The explorer IS the page. Volumes sit in the rail, the open folder
+       fills the middle, and the details column appears for one selected
+       entry. Each column scrolls on its own, so the rail and the top bar
+       stay put under a long listing. */
+    html, body { height: 100%; }
+    body { background: #f8f9fa; display: flex; flex-direction: column; }
+    .app-top { flex: 0 0 auto; display: flex; align-items: center; gap: .75rem;
+               padding: .5rem 1rem; background: #fff; border-bottom: 1px solid #dee2e6; }
+    .app-brand { display: flex; align-items: center; gap: .5rem; flex: 0 0 15rem;
+                 font-weight: 600; }
+    .app-body { flex: 1 1 auto; display: flex; min-height: 0; }
+    .app-rail { flex: 0 0 17rem; overflow-y: auto; padding: .75rem;
+                background: #fff; border-right: 1px solid #dee2e6; }
+    .app-main { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 1rem 1.25rem; }
+    .app-main.drop-hover { outline: 2px dashed #0d6efd; outline-offset: -8px; }
+    .app-details { flex: 0 0 18rem; overflow-y: auto; padding: 1rem;
+                   background: #fff; border-left: 1px solid #dee2e6; }
+    .only-phone { display: none; }
+    @media (max-width: 991.98px) { .app-details { display: none; } }
+    /* Phone: one column at a time. The rail is the page until a volume is
+       open, then the explorer is, with a way back in the top bar. */
+    @media (max-width: 767.98px) {
+      .app-brand { flex-basis: auto; }
+      .app-rail { flex-basis: 100%; border-right: 0; }
+      body.has-vol .app-rail { display: none; }
+      body:not(.has-vol) .app-main { display: none; }
+      body:not(.has-vol) .app-filter { display: none; }
+      body.has-vol .only-phone { display: inline-block; }
+      body.has-vol .app-brand-name { display: none; }
+    }
+
+    /* --- rail ------------------------------------------------------------ */
+    .rail-fs { display: flex; align-items: center; gap: .25rem; margin: 1rem 0 .25rem;
+               font-size: .78rem; color: #6c757d; }
+    .rail-fs-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+                    white-space: nowrap; }
+    .rail-vol { border-radius: .5rem; padding: .15rem .25rem; }
+    .rail-vol.active { background: #e7f1ff; }
+    .rail-vol-row { display: flex; align-items: center; gap: .35rem; }
+    .rail-vol-open { flex: 1 1 auto; min-width: 0; display: flex; align-items: center;
+                     gap: .5rem; border: 0; background: none; text-align: left;
+                     padding: .3rem .35rem; border-radius: .375rem; color: inherit; }
+    .rail-vol-open:hover { background: rgba(0,0,0,.05); }
+    .rail-vol.active .rail-vol-open { font-weight: 600; }
+    .rail-vol-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rail-locked { font-size: .72rem; color: #6c757d; }
+    .rail-menu { border: 0; background: none; color: #6c757d; padding: 0 .35rem;
+                 border-radius: .375rem; line-height: 1.6; }
+    .rail-menu:hover { background: rgba(0,0,0,.08); color: #212529; }
+    .rail-extra { padding: 0 .35rem .25rem 1.9rem; }
+
     .mono { font-family: monospace; font-size: .78rem; color: #6c757d; word-break: break-all; }
-    .log-box { background: #212529; color: #adb5bd; font-family: monospace; font-size: .78rem;
-               border-radius: .375rem; padding: .75rem; max-height: 130px; overflow-y: auto; }
+    .log-box { background: #212529; color: #adb5bd; font-family: monospace; font-size: .72rem;
+               border-radius: .375rem; padding: .5rem; max-height: 130px; overflow-y: auto; }
     .log-box div { line-height: 1.6; }
     .stat-mini { font-size: .78rem; color: #495057; }
     [x-cloak] { display: none !important; }
-    /* askModal/confirmModal stack over an open explorer/editor modal (same
+    /* askModal/confirmModal stack over an open editor/preview modal (same
        bootstrap z-index otherwise, and DOM order would paint it underneath) */
     #askModal, #confirmModal { z-index: 1080; }
 
@@ -37,14 +86,45 @@
        stray empty "Size:/Modified:" row on every volume. Give x-show'd
        elements their layout from a plain class like .stat-row, or make the
        condition an x-if (which removes the node) when a d-* class is needed. */
-    .stat-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .stat-row { display: flex; gap: .75rem; flex-wrap: wrap; }
 
+    /* --- explorer -------------------------------------------------------- */
+    /* plain class, NOT d-flex: x-show controls .sel-bar (see above) */
+    .exp-bar, .sel-bar { display: flex; align-items: center; gap: .5rem;
+                         flex-wrap: wrap; min-height: 2.4rem; margin-bottom: .5rem; }
+    .sel-bar { background: #e7f1ff; border: 1px solid #b6d4fe; border-radius: 2rem;
+               padding: .2rem .75rem; }
     .exp-name { word-break: break-word; }
     .exp-sub { font-size: .72rem; color: #6c757d; }
+    .exp-check { width: 1.75rem; }
+    tr.exp-row { cursor: default; }
+    tr.exp-row.selected > td { background: #e7f1ff; }
     th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
     th.sortable:hover { color: #0d6efd; }
     .spin { animation: spin .8s linear infinite; display: inline-block; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .exp-grid { display: grid; gap: .75rem;
+                grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); }
+    .exp-tile { position: relative; background: #fff; border: 1px solid #dee2e6;
+                border-radius: .5rem; padding: .5rem; text-align: center;
+                font-size: .8rem; cursor: default; }
+    .exp-tile.selected { border-color: #0d6efd; background: #e7f1ff; }
+    .exp-tile .form-check-input { position: absolute; top: .4rem; left: .4rem; }
+    .exp-thumb { height: 6rem; display: flex; align-items: center; justify-content: center;
+                 font-size: 2.5rem; margin-bottom: .35rem; overflow: hidden;
+                 border-radius: .375rem; background: #f1f3f5; }
+    .exp-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .unlock-pane { max-width: 20rem; margin: 12vh auto 0; text-align: center; }
+    .det-thumb { height: 9rem; display: flex; align-items: center; justify-content: center;
+                 font-size: 3rem; background: #f1f3f5; border-radius: .5rem;
+                 overflow: hidden; margin-bottom: .75rem; }
+    .det-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .det-list { font-size: .82rem; margin-bottom: .75rem; }
+    .det-list dt { color: #6c757d; font-weight: 400; }
+    .det-list dd { margin-bottom: .4rem; word-break: break-word; }
+    .upload-tray { background: #fff; border: 1px solid #dee2e6; border-radius: .5rem;
+                   padding: .5rem .75rem; margin-bottom: .5rem; width: 18rem;
+                   font-size: .78rem; }
 
     /* --- editor: highlighted <pre> UNDER a transparent <textarea> ---------
        The two layers must agree on every metric that affects line wrapping
@@ -97,33 +177,181 @@
     .sk-sw[aria-pressed="true"] { box-shadow: 0 0 0 2px #0d6efd; }
   </style>
 </head>
-<body x-data="app()" x-init="init()">
+<!-- No x-init: Alpine calls a component's init() itself, and naming it here
+     as well ran it twice -- two refreshes on every load, and two listeners on
+     everything init() subscribes to. -->
+<body x-data="app()" :class="expVol ? 'has-vol' : ''"
+      @keydown.escape.window="selEscape()">
 
-<header class="container py-3 mb-2 border-bottom d-flex align-items-center justify-content-between">
-  <div class="d-flex align-items-center gap-2">
+<header class="app-top">
+  <div class="app-brand">
+    <!-- phone only: the rail is hidden while a volume is open -->
+    <button type="button" class="btn btn-sm btn-outline-secondary only-phone"
+            @click="closeExplorer()" aria-label="Back to volumes">&#8249; Volumes</button>
     <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6"
          viewBox="0 0 24 24" aria-hidden="true">
       <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/>
       <path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/>
     </svg>
-    <span class="fw-semibold">Volume manager</span>
-    <span class="badge bg-secondary fw-normal" x-text="apiBase"></span>
+    <span class="app-brand-name">Aloelite</span>
   </div>
-  <div class="d-flex gap-2">
-    <label class="btn btn-sm btn-outline-secondary mb-0">
-      Import
-      <input type="file" hidden accept=".sqlite,.fs,.aloe,application/octet-stream"
-             @change="importFs($event)">
-    </label>
-    <button class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1"
-            @click="refresh()" :disabled="loading">
-      <span :class="loading ? 'spin' : ''">&#8635;</span>
-      Refresh
-    </button>
+  <!-- Filter, not search: client-side over the folder already loaded, so it
+       costs no request. A volume-wide search needs a route that does not
+       exist yet. -->
+  <div class="app-filter flex-grow-1" style="max-width:28rem;">
+    <input id="expFilter" class="form-control form-control-sm" type="search"
+           placeholder="Filter this folder…" x-model="expQuery"
+           :disabled="!expVol || expNeedPin"
+           autocapitalize="off" autocomplete="off" spellcheck="false"
+           aria-label="Filter files in this folder">
   </div>
+  <button class="btn btn-sm btn-outline-secondary ms-auto" @click="refresh()"
+          :disabled="loading" aria-label="Refresh volumes" title="Refresh volumes">
+    <span :class="loading ? 'spin' : ''">&#8635;</span>
+  </button>
 </header>
 
-<main class="container pb-5">
+<div class="app-body">
+
+<!-- ======================= rail: create + volumes ======================= -->
+<aside class="app-rail" aria-label="Volumes">
+  <!-- One menu for everything that can be created. The file entries act on
+       the open folder, so they are disabled until a volume is open. -->
+  <div class="dropdown">
+    <button class="btn btn-primary rounded-pill px-3" data-bs-toggle="dropdown"
+            id="newMenu" aria-expanded="false">+ New</button>
+    <ul class="dropdown-menu" aria-labelledby="newMenu" style="font-size:.9rem;">
+      <li>
+        <label class="dropdown-item mb-0" :class="expReady ? '' : 'disabled'">
+          Upload files
+          <input type="file" hidden multiple :disabled="!expReady" @change="expUpload($event)">
+        </label>
+      </li>
+      <li><a class="dropdown-item" href="#" :class="expReady ? '' : 'disabled'"
+             @click.prevent="expMkdir()">New folder</a></li>
+      <li><a class="dropdown-item" href="#" :class="expReady ? '' : 'disabled'"
+             @click.prevent="edNew()">New text file</a></li>
+      <li><a class="dropdown-item" href="#" :class="expReady ? '' : 'disabled'"
+             @click.prevent="skOpen()">New sketch</a></li>
+      <li><a class="dropdown-item" href="#" :class="expReady ? '' : 'disabled'"
+             @click.prevent="openPastes()">Pastes</a></li>
+      <li><hr class="dropdown-divider"></li>
+      <li><a class="dropdown-item" href="#" @click.prevent="showCreate = true">New volume</a></li>
+      <li>
+        <label class="dropdown-item mb-0">
+          Import a filesystem
+          <input type="file" hidden accept=".sqlite,.fs,.aloe,application/octet-stream"
+                 @change="importFs($event)">
+        </label>
+      </li>
+    </ul>
+  </div>
+
+  <!-- empty state -->
+  <div x-show="fss.length === 0 && apiOk" x-cloak class="text-center text-muted py-4">
+    <div class="fs-4 mb-1">&#128190;</div>
+    <div class="mb-2">Nothing here yet.</div>
+    <button class="btn btn-sm btn-primary" @click="showCreate = true">Create your first volume</button>
+    <div class="small mt-2">…or import an aloelite file you already have.</div>
+  </div>
+
+  <!-- filesystems, each with its volumes -->
+  <template x-for="f in fss" :key="f.id">
+    <div>
+      <div class="rail-fs">
+        <span class="rail-fs-name" x-text="f.display_name" :title="f.display_name"></span>
+        <span class="text-nowrap" x-text="f.size_bytes != null ? fmtBytes(f.size_bytes) : ''"></span>
+        <div class="dropdown ms-auto">
+          <button class="rail-menu" data-bs-toggle="dropdown"
+                  :aria-label="'Actions for ' + f.display_name">&#8943;</button>
+          <ul class="dropdown-menu dropdown-menu-end" style="font-size:.85rem;">
+            <li><a class="dropdown-item" href="#" @click.prevent="addVolume(f)">Add a volume</a></li>
+            <li><a class="dropdown-item" href="#" @click.prevent="renameFs(f)">Rename</a></li>
+            <li><a class="dropdown-item" href="#" @click.prevent="downloadFs(f)"
+                   title="Download the file — take it with you">Download the file</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <template x-for="v in f.volumes" :key="v.id">
+        <div class="rail-vol" :class="expVol && expVol.id === v.id ? 'active' : ''">
+          <div class="rail-vol-row">
+            <button type="button" class="rail-vol-open" @click="openVol(v)" :disabled="v._busy"
+                    :aria-current="expVol && expVol.id === v.id ? 'page' : false">
+              <span aria-hidden="true" x-text="v.encrypted ? '🔒' : '📁'"></span>
+              <span class="rail-vol-name" x-text="v.name"></span>
+            </button>
+            <span x-show="v.encrypted && !v.mounted" class="rail-locked">locked</span>
+            <span x-show="v.mounted" class="badge"
+                  :class="v.frontend === 'fuse' ? 'bg-info text-dark'
+                         : (attachedFor(v) ? 'bg-success' : 'bg-secondary')"
+                  x-text="v.frontend === 'fuse' ? 'FUSE'
+                         : (attachedFor(v) ? 'open' : 'open elsewhere')"></span>
+            <span x-show="v.auto_mount" class="badge bg-info text-dark">auto</span>
+            <div class="dropdown">
+              <button class="rail-menu" data-bs-toggle="dropdown"
+                      :aria-label="'More actions for ' + v.name">&#8942;</button>
+              <ul class="dropdown-menu dropdown-menu-end" style="font-size:.85rem;">
+                <li x-show="v.mounted && v.frontend === 'direct' && attachedFor(v)">
+                  <a class="dropdown-item" href="#" @click.prevent="lockVol(v)">Lock</a></li>
+                <li><a class="dropdown-item" href="#" @click.prevent="mountVol(v)">FUSE mount…</a></li>
+                <li x-show="v.mounted && v.frontend === 'fuse'">
+                  <a class="dropdown-item" href="#" @click.prevent="lockVol(v)">Unmount</a></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item" href="#" @click.prevent="doStat(v)">Stat</a></li>
+                <li><a class="dropdown-item" href="#" @click.prevent="doCheckpoint(v)">Checkpoint</a></li>
+                <li><a class="dropdown-item" href="#" @click.prevent="doMounts(v)">Engine mounts</a></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item text-danger" href="#"
+                       @click.prevent="confirmDelete(v)">Delete volume</a></li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="rail-extra">
+            <div x-show="v.mountpoint" class="mono" x-text="'&#8594; ' + v.mountpoint"></div>
+            <!-- .stat-row, not d-flex: see the note in <style> -->
+            <div x-show="v._stat" x-cloak class="stat-mini stat-row">
+              <span><strong>Size:</strong> <span x-text="v._stat ? fmtBytes(v._stat.size_bytes) : ''"></span></span>
+              <span><strong>Modified:</strong> <span x-text="v._stat ? fmtTimeFull(v._stat.mtime) : ''"></span></span>
+            </div>
+            <div x-show="v._mounts" x-cloak class="stat-mini">
+              <!-- `|| []` is load-bearing: x-for over the initial null threw
+                   an uncaught TypeError on every page load -->
+              <template x-for="mt in (v._mounts || [])" :key="mt.id">
+                <div>
+                  <span class="badge bg-light text-dark border" x-text="mt.state"></span>
+                  <span x-text="mt.label"></span>
+                  <span class="mono" x-text="(mt.id || '').slice(0,8) + '…'"></span>
+                </div>
+              </template>
+              <div x-show="v._mounts && !v._mounts.length" class="text-muted">No mounts</div>
+            </div>
+            <div x-show="v._log" x-cloak class="stat-mini text-muted" x-text="v._log"></div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- activity log -->
+  <template x-if="log.length">
+    <details class="mt-4">
+      <summary class="text-muted" style="font-size:.78rem;">Activity</summary>
+      <div class="log-box mt-1">
+        <template x-for="(line, i) in log" :key="i">
+          <div x-text="line"></div>
+        </template>
+      </div>
+    </details>
+  </template>
+</aside>
+
+<!-- ======================= main: the open folder ======================== -->
+<main class="app-main" :class="expDropHover ? 'drop-hover' : ''"
+      @dragover.prevent="expDropHover = expReady"
+      @dragleave.prevent="expDropHover = false"
+      @drop.prevent="expDropHover = false; if (expReady) expDrop($event)">
 
   <!-- preflight warnings banner -->
   <template x-for="w in preflightWarnings" :key="w.name">
@@ -134,131 +362,242 @@
 
   <!-- api status banner -->
   <div x-show="!apiOk" x-cloak class="alert alert-danger py-2 mb-3" role="alert">
-    Cannot reach API at <strong x-text="apiBase"></strong>. Check that the manager is running.
+    Cannot reach API at <strong x-text="apiBase || location.origin"></strong>.
+    Check that the manager is running.
   </div>
 
-  <!-- header row -->
-  <div class="d-flex align-items-center justify-content-between mb-3">
-    <h6 class="mb-0 text-muted text-uppercase" style="letter-spacing:.05em; font-size:.75rem;">
-      Your filesystems
-    </h6>
-    <button class="btn btn-sm btn-primary" @click="showCreate = true">+ New volume</button>
+  <!-- nothing open -->
+  <div x-show="!expVol && apiOk" x-cloak class="text-center text-muted" style="margin-top:18vh;">
+    <div class="fs-1 mb-2">&#128193;</div>
+    <div>Choose a volume on the left, or create one with <strong>+ New</strong>.</div>
   </div>
 
-  <!-- empty state -->
-  <div x-show="fss.length === 0 && apiOk" x-cloak
-       class="text-center text-muted py-5 border rounded bg-white">
-    <div class="fs-4 mb-1">&#128190;</div>
-    <div class="mb-2">Nothing here yet.</div>
-    <button class="btn btn-sm btn-primary" @click="showCreate = true">Create your first volume</button>
-    <div class="small mt-2">…or Import an aloelite file you already have.</div>
+  <!-- locked: the PIN is asked for where the files will be -->
+  <div id="unlockPane" class="unlock-pane" x-show="expVol && expNeedPin" x-cloak>
+    <div class="fs-1 mb-2">&#128274;</div>
+    <h6 class="mb-3"><span x-text="expVol?.name"></span> is locked</h6>
+    <input type="password" class="form-control mb-2" x-model="unlockPin"
+           placeholder="PIN" aria-label="PIN" @keydown.enter="doUnlock()">
+    <div x-show="unlockErr" x-cloak class="alert alert-danger py-1 px-2 small"
+         x-text="unlockErr"></div>
+    <button type="button" class="btn btn-primary w-100" @click="doUnlock()"
+            :disabled="unlocking || !unlockPin">
+      <span x-text="unlocking ? 'Unlocking…' : 'Unlock'"></span>
+    </button>
+    <div class="form-text mt-2">The PIN is used to unlock and is never stored.</div>
   </div>
 
-  <!-- filesystem cards -->
-  <div class="d-flex flex-column gap-3">
-    <template x-for="f in fss" :key="f.id">
-      <div class="card vol-card">
-        <div class="card-body">
+  <!-- the explorer -->
+  <section id="explorer" x-show="expReady" x-cloak aria-label="Files">
 
-          <!-- file title row -->
-          <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-            <div class="d-flex align-items-center gap-2 flex-wrap">
-              <span class="fw-semibold" x-text="f.display_name"></span>
-              <a href="#" class="text-decoration-none small text-muted"
-                 :aria-label="'Rename ' + f.display_name" title="Rename"
-                 @click.prevent="renameFs(f)">&#9998;</a>
-              <span class="text-muted small" x-text="f.size_bytes != null ? fmtBytes(f.size_bytes) : ''"></span>
-            </div>
-            <div class="d-flex gap-2 flex-shrink-0">
-              <button class="btn btn-sm btn-outline-secondary" @click="downloadFs(f)"
-                      title="Download the file — take it with you">&#8595; Download</button>
-              <button class="btn btn-sm btn-outline-secondary" @click="addVolume(f)"
-                      title="Add another volume to this file">+ Volume</button>
-            </div>
-          </div>
-
-          <!-- volume rows -->
-          <template x-for="v in f.volumes" :key="v.id">
-            <div class="border rounded p-2 mb-2">
-              <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-                <div class="d-flex align-items-center gap-2">
-                  <span x-text="v.encrypted ? '\uD83D\uDD12' : '\uD83D\uDCC1'"></span>
-                  <span class="fw-semibold" x-text="v.name"></span>
-                  <span x-show="v.mounted" class="badge"
-                        :class="v.frontend === 'fuse' ? 'bg-info text-dark'
-                               : (attachedFor(v) ? 'bg-success' : 'bg-secondary')"
-                        x-text="v.frontend === 'fuse' ? 'FUSE'
-                               : (attachedFor(v) ? 'open' : 'open elsewhere')"></span>
-                  <span x-show="v.auto_mount" class="badge bg-info text-dark">auto</span>
-                </div>
-                <div class="d-flex gap-2 align-items-center">
-                  <button class="btn btn-sm btn-primary" @click="openVol(v)" :disabled="v._busy">
-                    <span x-text="v._busy ? '…' : 'Open'"></span>
-                  </button>
-                  <button x-show="v.mounted && v.frontend === 'direct' && attachedFor(v)"
-                          class="btn btn-sm btn-outline-warning" @click="lockVol(v)"
-                          :disabled="v._busy">Lock</button>
-                  <div class="dropdown">
-                    <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="dropdown"
-                            :aria-label="'More actions for ' + v.name">&#8942;</button>
-                    <ul class="dropdown-menu dropdown-menu-end" style="font-size:.85rem;">
-                      <li><a class="dropdown-item" href="#" @click.prevent="mountVol(v)">FUSE mount…</a></li>
-                      <li x-show="v.mounted && v.frontend === 'fuse'">
-                        <a class="dropdown-item" href="#" @click.prevent="lockVol(v)">Unmount</a></li>
-                      <li><hr class="dropdown-divider"></li>
-                      <li><a class="dropdown-item" href="#" @click.prevent="doStat(v)">Stat</a></li>
-                      <li><a class="dropdown-item" href="#" @click.prevent="doCheckpoint(v)">Checkpoint</a></li>
-                      <li><a class="dropdown-item" href="#" @click.prevent="doMounts(v)">Engine mounts</a></li>
-                      <li><hr class="dropdown-divider"></li>
-                      <li><a class="dropdown-item text-danger" href="#"
-                             @click.prevent="confirmDelete(v)">Delete volume</a></li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
-
-              <div x-show="v.mountpoint" class="mono mt-1" x-text="'&#8594; ' + v.mountpoint"></div>
-              <!-- .stat-row, not d-flex: see the note in <style> -->
-              <div x-show="v._stat" x-cloak class="mt-1 stat-mini stat-row">
-                <span><strong>Size:</strong> <span x-text="v._stat ? fmtBytes(v._stat.size_bytes) : ''"></span></span>
-                <span><strong>Modified:</strong> <span x-text="v._stat ? fmtTimeFull(v._stat.mtime) : ''"></span></span>
-              </div>
-              <div x-show="v._mounts" x-cloak class="mt-1 stat-mini">
-                <!-- `|| []` is load-bearing: x-for over the initial null threw
-                     an uncaught TypeError on every page load -->
-                <template x-for="mt in (v._mounts || [])" :key="mt.id">
-                  <div>
-                    <span class="badge bg-light text-dark border" x-text="mt.state"></span>
-                    <span x-text="mt.label"></span>
-                    <span class="mono" x-text="(mt.id || '').slice(0,8) + '…'"></span>
-                  </div>
-                </template>
-                <div x-show="v._mounts && !v._mounts.length" class="text-muted">No mounts</div>
-              </div>
-              <div x-show="v._log" x-cloak class="mt-1">
-                <div class="alert alert-secondary py-1 px-2 mb-0" style="font-size:.78rem;" x-text="v._log"></div>
-              </div>
-            </div>
+    <!-- where you are, and how you are looking at it -->
+    <div class="exp-bar">
+      <nav aria-label="breadcrumb" class="me-auto">
+        <ol class="breadcrumb mb-0">
+          <template x-for="(c, i) in expCrumbs()" :key="i">
+            <li class="breadcrumb-item">
+              <a href="#" @click.prevent="navTo(c.path)" x-text="c.name"></a>
+            </li>
           </template>
-
-        </div>
-      </div>
-    </template>
-  </div>
-
-  <!-- activity log -->
-  <template x-if="log.length">
-    <div class="mt-4">
-      <h6 class="text-muted text-uppercase mb-2" style="letter-spacing:.05em; font-size:.75rem;">Activity log</h6>
-      <div class="log-box">
-        <template x-for="(line, i) in log" :key="i">
-          <div x-text="line"></div>
+        </ol>
+      </nav>
+      <span class="text-muted text-nowrap" style="font-size:.78rem;" x-text="expSummary()"></span>
+      <div class="btn-group btn-group-sm" role="group" aria-label="View">
+        <template x-for="m in ['list', 'grid']" :key="m">
+          <button type="button" class="btn btn-outline-secondary text-capitalize"
+                  :class="expView === m ? 'active' : ''" :aria-pressed="expView === m"
+                  @click="setView(m)" x-text="m"></button>
         </template>
+      </div>
+      <button class="btn btn-sm btn-outline-secondary" @click="loadFiles()"
+              :disabled="expBusy" aria-label="Reload this folder" title="Reload">
+        <span :class="expBusy ? 'spin' : ''">&#8635;</span>
+      </button>
+    </div>
+
+    <!-- something selected: what can be done to all of it at once. It sits
+         under the breadcrumb rather than replacing it, so selecting one
+         entry for its details does not take the way out of the folder. -->
+    <div class="sel-bar" x-show="expSel.length" x-cloak role="toolbar" aria-label="Selection">
+      <button type="button" class="btn-close btn-sm" @click="expSel = []"
+              aria-label="Clear selection"></button>
+      <strong class="me-auto" x-text="expSel.length + ' selected'"></strong>
+      <button class="btn btn-sm btn-link text-decoration-none" @click="selDownload()"
+              :disabled="!selEntries().some(e => e.type === 'file')">Download</button>
+      <button class="btn btn-sm btn-link text-decoration-none" @click="selMove()">Move…</button>
+      <button class="btn btn-sm btn-link text-decoration-none text-danger"
+              @click="selDelete()">Delete</button>
+    </div>
+
+    <div x-show="expErr" x-cloak class="alert alert-danger py-1 px-2 small" x-text="expErr"></div>
+
+    <!-- list view. x-if, not x-show, for both views: a hidden grid would
+         still fetch every thumbnail. -->
+    <template x-if="expView === 'list'">
+    <table class="table table-sm table-hover align-middle mb-0 bg-white"
+           style="font-size:.9rem;">
+      <thead>
+        <tr>
+          <th class="exp-check" scope="col">
+            <input type="checkbox" class="form-check-input" aria-label="Select everything shown"
+                   :checked="selAll()" @change="selToggleAll($event.target.checked)">
+          </th>
+          <th class="sortable" @click="expSortBy('name')"
+              scope="col" aria-sort="none">Name<span x-text="expCaret('name')"></span></th>
+          <!-- Size/Modified fold away below md; they reappear under the
+               name (.exp-sub) so a phone loses the columns, not the data. -->
+          <th class="sortable text-end d-none d-md-table-cell" scope="col"
+              @click="expSortBy('size')">Size<span x-text="expCaret('size')"></span></th>
+          <th class="sortable d-none d-md-table-cell" scope="col"
+              @click="expSortBy('mtime')">Modified<span x-text="expCaret('mtime')"></span></th>
+          <th class="text-end" scope="col"><span class="visually-hidden">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="e in expRows()" :key="e.name">
+          <!-- A click on the row itself selects just that entry (which opens
+               its details); links, buttons and the checkbox keep their own
+               meaning, so the name still opens and the box still adds. -->
+          <tr class="exp-row" :class="isSel(e) ? 'selected' : ''" @click="rowClick($event, e)">
+            <td class="exp-check">
+              <input type="checkbox" class="form-check-input" :aria-label="'Select ' + e.name"
+                     :checked="isSel(e)" @change="selToggle(e)">
+            </td>
+            <td>
+              <a x-show="e.type === 'dir'" href="#" class="text-decoration-none"
+                 @click.prevent="navTo(expJoin(e.name))">&#128193; <span class="exp-name" x-text="e.name"></span></a>
+              <a x-show="e.type === 'file' && canPreview(e.name)" href="#"
+                 class="text-decoration-none text-body"
+                 @click.prevent="expPreview(e)">&#128196; <span class="exp-name" x-text="e.name"></span></a>
+              <span x-show="e.type === 'file' && !canPreview(e.name)">&#128196; <span class="exp-name" x-text="e.name"></span></span>
+              <div class="exp-sub d-md-none" x-text="expSub(e)"></div>
+            </td>
+            <td class="exp-size text-end d-none d-md-table-cell"
+                x-text="e.type === 'file' ? fmtBytes(e.size) : ''"></td>
+            <td class="d-none d-md-table-cell" :title="fmtTimeFull(e.mtime)"
+                x-text="fmtTime(e.mtime)"></td>
+            <td class="text-end text-nowrap">
+              <!-- x-if, not x-show: these carry d-* classes, which would
+                   override x-show's display:none (see the <style> note). -->
+              <template x-if="e.type === 'file' && canEdit(e.name)">
+                <button class="btn btn-sm btn-outline-primary py-0 d-none d-md-inline-block"
+                        :aria-label="'Edit ' + e.name" @click="edOpen(e)">Edit</button>
+              </template>
+              <template x-if="e.type === 'file'">
+                <button class="btn btn-sm btn-outline-secondary py-0 d-none d-md-inline-block"
+                        :aria-label="'Download ' + e.name" @click="expDownload(e)">&#8595;</button>
+              </template>
+              <!-- The rest live in a menu: six buttons per row overflowed
+                   the screen on a phone (delete was unreachable) and were
+                   just noise on a desktop. -->
+              <div class="dropdown d-inline-block">
+                <button class="btn btn-sm btn-outline-secondary py-0" data-bs-toggle="dropdown"
+                        :aria-label="'Actions for ' + e.name">&#8942;</button>
+                <ul class="dropdown-menu dropdown-menu-end" style="font-size:.85rem;">
+                  <template x-if="e.type === 'file' && canEdit(e.name)">
+                    <li><a class="dropdown-item" href="#" @click.prevent="edOpen(e)">Edit</a></li>
+                  </template>
+                  <template x-if="e.type === 'file'">
+                    <li><a class="dropdown-item" href="#" @click.prevent="expDownload(e)">Download</a></li>
+                  </template>
+                  <li><a class="dropdown-item" href="#" @click.prevent="expRename(e)">Rename…</a></li>
+                  <li><a class="dropdown-item" href="#" @click.prevent="expMove(e)">Move…</a></li>
+                  <li><a class="dropdown-item" href="#" @click.prevent="expCopy(e)">Copy…</a></li>
+                  <li><hr class="dropdown-divider"></li>
+                  <li><a class="dropdown-item text-danger" href="#"
+                         @click.prevent="expDelete(e)">Delete</a></li>
+                </ul>
+              </div>
+            </td>
+          </tr>
+        </template>
+        <tr x-show="!expRows().length && !expBusy">
+          <td colspan="5" class="text-muted text-center py-4"
+              x-text="expQuery ? 'Nothing matches “' + expQuery + '”'
+                               : 'Empty folder — drop files anywhere to upload'"></td>
+        </tr>
+      </tbody>
+    </table>
+    </template>
+
+    <!-- grid view: the same entries and the same selection, as tiles. A
+         double click opens, because a single click has to mean "select". -->
+    <template x-if="expView === 'grid'">
+    <div>
+      <div class="exp-grid">
+        <template x-for="e in expRows()" :key="e.name">
+          <div class="exp-tile" :class="isSel(e) ? 'selected' : ''" :title="e.name"
+               @click="rowClick($event, e)" @dblclick="expOpen(e)">
+            <input type="checkbox" class="form-check-input" :aria-label="'Select ' + e.name"
+                   :checked="isSel(e)" @change="selToggle(e)">
+            <div class="exp-thumb">
+              <template x-if="thumbUrl(e)">
+                <img :src="thumbUrl(e)" alt="" loading="lazy">
+              </template>
+              <template x-if="!thumbUrl(e)">
+                <span aria-hidden="true" x-text="e.type === 'dir' ? '📁' : '📄'"></span>
+              </template>
+            </div>
+            <div class="exp-name text-truncate" x-text="e.name"></div>
+            <div class="exp-sub" x-text="expSub(e)"></div>
+          </div>
+        </template>
+      </div>
+      <div x-show="!expRows().length && !expBusy" class="text-muted text-center py-4"
+           x-text="expQuery ? 'Nothing matches “' + expQuery + '”'
+                            : 'Empty folder — drop files anywhere to upload'"></div>
+    </div>
+    </template>
+  </section>
+</main>
+
+<!-- ======================= details: one selected entry ================== -->
+<!-- Only what the listing already returns. Versions and dedup belong here
+     too, once a route exposes them. -->
+<aside class="app-details" x-show="expReady && expDetail" x-cloak aria-label="Details">
+  <template x-if="expDetail">
+    <div>
+      <div class="d-flex align-items-start gap-2 mb-2">
+        <h6 class="mb-0 me-auto exp-name" x-text="expDetail.name"></h6>
+        <button type="button" class="btn-close btn-sm" @click="expSel = []"
+                aria-label="Close details"></button>
+      </div>
+      <div class="det-thumb">
+        <template x-if="thumbUrl(expDetail)">
+          <img :src="thumbUrl(expDetail)" alt="">
+        </template>
+        <template x-if="!thumbUrl(expDetail)">
+          <span aria-hidden="true" x-text="expDetail.type === 'dir' ? '📁' : '📄'"></span>
+        </template>
+      </div>
+      <dl class="det-list">
+        <dt>Kind</dt>
+        <dd x-text="expDetail.type === 'dir' ? 'Folder' : 'File'"></dd>
+        <template x-if="expDetail.type === 'file'">
+          <div><dt>Size</dt><dd x-text="fmtBytes(expDetail.size)"></dd></div>
+        </template>
+        <dt>Modified</dt>
+        <dd x-text="fmtTimeFull(expDetail.mtime)"></dd>
+        <dt>Location</dt>
+        <dd x-text="expJoin(expDetail.name)"></dd>
+      </dl>
+      <div class="d-grid gap-2">
+        <button class="btn btn-sm btn-primary" @click="expOpen(expDetail)"
+                x-show="expDetail.type === 'dir' || canPreview(expDetail.name)">Open</button>
+        <button class="btn btn-sm btn-outline-secondary" @click="edOpen(expDetail)"
+                x-show="expDetail.type === 'file' && canEdit(expDetail.name)">Edit</button>
+        <button class="btn btn-sm btn-outline-secondary" @click="expDownload(expDetail)"
+                x-show="expDetail.type === 'file'">Download</button>
+        <button class="btn btn-sm btn-outline-secondary" @click="expRename(expDetail)">Rename…</button>
+        <button class="btn btn-sm btn-outline-secondary" @click="expMove(expDetail)">Move…</button>
+        <button class="btn btn-sm btn-outline-secondary" @click="expCopy(expDetail)">Copy…</button>
+        <button class="btn btn-sm btn-outline-danger" @click="expDelete(expDetail)">Delete</button>
       </div>
     </div>
   </template>
+</aside>
 
-</main>
+</div><!-- /.app-body -->
 
 <!-- create volume modal -->
 <div class="modal fade" id="createModal" tabindex="-1" aria-labelledby="createModalLabel" aria-hidden="true">
@@ -350,32 +689,6 @@
   </div>
 </div>
 
-<!-- unlock (open encrypted volume) modal -->
-<div class="modal fade" id="unlockModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-sm">
-    <div class="modal-content">
-      <div class="modal-header py-2">
-        <h6 class="modal-title">Unlock volume</h6>
-        <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body">
-        <p class="small text-muted mb-3" x-text="unlockTarget?.name"></p>
-        <label class="form-label small">PIN</label>
-        <input type="password" class="form-control form-control-sm" x-model="unlockPin"
-               @keydown.enter="doUnlock()">
-        <div x-show="unlockErr" class="alert alert-danger py-1 px-2 small mt-2" x-text="unlockErr"></div>
-      </div>
-      <div class="modal-footer py-2">
-        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal"
-                @click="unlockPin=''; unlockErr=''">Cancel</button>
-        <button type="button" class="btn btn-sm btn-primary" @click="doUnlock()" :disabled="unlocking">
-          <span x-text="unlocking ? 'Unlocking…' : 'Unlock & open'"></span>
-        </button>
-      </div>
-    </div>
-  </div>
-</div>
-
 <!-- input modal (replaces browser prompt(): styled, autofocused, phone-friendly) -->
 <div class="modal fade" id="askModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-sm modal-dialog-centered">
@@ -442,147 +755,25 @@
   </div>
 </div>
 
-<!-- file explorer modal -->
-<div class="modal fade" id="expModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable modal-fullscreen-sm-down">
-    <div class="modal-content">
-      <div class="modal-header py-2">
-        <h6 class="modal-title">Files — <span x-text="expVol?.name"></span></h6>
-        <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body">
-        <div class="d-flex align-items-center justify-content-between mb-2 gap-2 flex-wrap">
-          <nav aria-label="breadcrumb">
-            <ol class="breadcrumb mb-0" style="font-size:.85rem;">
-              <template x-for="(c, i) in expCrumbs()" :key="i">
-                <li class="breadcrumb-item">
-                  <a href="#" @click.prevent="navTo(c.path)" x-text="c.name"></a>
-                </li>
-              </template>
-            </ol>
-          </nav>
-          <div class="d-flex gap-2 flex-shrink-0">
-            <label class="btn btn-sm btn-outline-primary mb-0">
-              Upload<input type="file" hidden multiple @change="expUpload($event)">
-            </label>
-            <button class="btn btn-sm btn-outline-primary" @click="openPastes()">Pastes</button>
-            <button class="btn btn-sm btn-outline-secondary" @click="edNew()">New file</button>
-            <button class="btn btn-sm btn-outline-secondary" @click="skOpen()">Sketch</button>
-            <button class="btn btn-sm btn-outline-secondary" @click="expMkdir()">New folder</button>
-            <button class="btn btn-sm btn-outline-secondary" @click="loadFiles()"
-                    :disabled="expBusy" aria-label="Reload this folder" title="Reload">
-              <span :class="expBusy ? 'spin' : ''">&#8635;</span>
-            </button>
-          </div>
-        </div>
-        <div x-show="expErr" x-cloak class="alert alert-danger py-1 px-2 small" x-text="expErr"></div>
-        <template x-for="u in expUploads" :key="u.id">
-          <div class="d-flex align-items-center gap-2 mb-1" style="font-size:.78rem;">
-            <span class="text-truncate" style="max-width:40%;" x-text="u.name"></span>
-            <div class="progress flex-grow-1" style="height:6px;">
-              <div class="progress-bar" :style="`width:${u.pct}%`"></div>
-            </div>
-            <span style="min-width:2.5em;" class="text-end" x-text="u.pct + '%'"></span>
-          </div>
-        </template>
-        <!-- Filter + summary. Client-side over the folder already loaded, so
-             it costs no request; the summary doubles as "how much is in here",
-             which the listing alone never said. -->
-        <div class="d-flex align-items-center gap-2 mb-2">
-          <input id="expFilter" class="form-control form-control-sm" style="max-width:16rem;"
-                 placeholder="Filter this folder…" x-model="expQuery"
-                 autocapitalize="off" autocomplete="off" spellcheck="false"
-                 aria-label="Filter files in this folder">
-          <button x-show="expQuery" class="btn btn-sm btn-link px-1 text-decoration-none"
-                  @click="expQuery = ''" aria-label="Clear filter">&times;</button>
-          <span class="ms-auto text-muted text-nowrap" style="font-size:.78rem;"
-                x-text="expSummary()"></span>
-        </div>
-        <div :class="expDropHover ? 'border border-primary rounded' : ''"
-             @dragover.prevent="expDropHover = true"
-             @dragleave.prevent="expDropHover = false"
-             @drop.prevent="expDropHover = false; expDrop($event)">
-        <table class="table table-sm table-hover align-middle mb-0" style="font-size:.85rem;">
-          <thead>
-            <tr>
-              <th class="sortable" @click="expSortBy('name')"
-                  scope="col" aria-sort="none">Name<span x-text="expCaret('name')"></span></th>
-              <!-- Size/Modified fold away below md; they reappear under the
-                   name (.exp-sub) so a phone loses the columns, not the data. -->
-              <th class="sortable text-end d-none d-md-table-cell" scope="col"
-                  @click="expSortBy('size')">Size<span x-text="expCaret('size')"></span></th>
-              <th class="sortable d-none d-md-table-cell" scope="col"
-                  @click="expSortBy('mtime')">Modified<span x-text="expCaret('mtime')"></span></th>
-              <th class="text-end" scope="col"><span class="visually-hidden">Actions</span></th>
-            </tr>
-          </thead>
-          <tbody>
-            <template x-for="e in expRows()" :key="e.name">
-              <tr>
-                <td>
-                  <a x-show="e.type === 'dir'" href="#" class="text-decoration-none"
-                     @click.prevent="navTo(expJoin(e.name))">&#128193; <span class="exp-name" x-text="e.name"></span></a>
-                  <a x-show="e.type === 'file' && canPreview(e.name)" href="#"
-                     class="text-decoration-none text-body"
-                     @click.prevent="expPreview(e)">&#128196; <span class="exp-name" x-text="e.name"></span></a>
-                  <span x-show="e.type === 'file' && !canPreview(e.name)">&#128196; <span class="exp-name" x-text="e.name"></span></span>
-                  <div class="exp-sub d-md-none" x-text="expSub(e)"></div>
-                </td>
-                <td class="text-end d-none d-md-table-cell"
-                    x-text="e.type === 'file' ? fmtBytes(e.size) : ''"></td>
-                <td class="d-none d-md-table-cell" :title="fmtTimeFull(e.mtime)"
-                    x-text="fmtTime(e.mtime)"></td>
-                <td class="text-end text-nowrap">
-                  <!-- x-if, not x-show: these carry d-* classes, which would
-                       override x-show's display:none (see the <style> note). -->
-                  <template x-if="e.type === 'file' && canEdit(e.name)">
-                    <button class="btn btn-sm btn-outline-primary py-0 d-none d-md-inline-block"
-                            :aria-label="'Edit ' + e.name" @click="edOpen(e)">Edit</button>
-                  </template>
-                  <template x-if="e.type === 'file'">
-                    <button class="btn btn-sm btn-outline-secondary py-0 d-none d-md-inline-block"
-                            :aria-label="'Download ' + e.name" @click="expDownload(e)">&#8595;</button>
-                  </template>
-                  <!-- The rest live in a menu: six buttons per row overflowed
-                       the screen on a phone (delete was unreachable) and were
-                       just noise on a desktop. -->
-                  <div class="dropdown d-inline-block">
-                    <button class="btn btn-sm btn-outline-secondary py-0" data-bs-toggle="dropdown"
-                            :aria-label="'Actions for ' + e.name">&#8942;</button>
-                    <ul class="dropdown-menu dropdown-menu-end" style="font-size:.85rem;">
-                      <template x-if="e.type === 'file' && canEdit(e.name)">
-                        <li><a class="dropdown-item" href="#" @click.prevent="edOpen(e)">Edit</a></li>
-                      </template>
-                      <template x-if="e.type === 'file'">
-                        <li><a class="dropdown-item" href="#" @click.prevent="expDownload(e)">Download</a></li>
-                      </template>
-                      <li><a class="dropdown-item" href="#" @click.prevent="expRename(e)">Rename…</a></li>
-                      <li><a class="dropdown-item" href="#" @click.prevent="expMove(e)">Move…</a></li>
-                      <li><a class="dropdown-item" href="#" @click.prevent="expCopy(e)">Copy…</a></li>
-                      <li><hr class="dropdown-divider"></li>
-                      <li><a class="dropdown-item text-danger" href="#"
-                             @click.prevent="expDelete(e)">Delete</a></li>
-                    </ul>
-                  </div>
-                </td>
-              </tr>
-            </template>
-            <tr x-show="!expRows().length && !expBusy">
-              <td colspan="4" class="text-muted text-center py-3"
-                  x-text="expQuery ? 'Nothing matches “' + expQuery + '”'
-                                   : 'Empty folder — drag files here'"></td>
-            </tr>
-          </tbody>
-        </table>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- aria-live so a screen reader hears the result of an action it cannot see -->
+<!-- Bottom right: uploads in progress, then toasts. aria-live so a screen
+     reader hears the result of an action it cannot see. -->
 <div class="position-fixed bottom-0 end-0 p-3" style="z-index:1080;" x-data
      aria-live="polite" aria-atomic="false">
+  <template x-if="expUploads.length">
+    <div class="upload-tray shadow-sm">
+      <div class="fw-semibold mb-1"
+           x-text="'Uploading ' + expUploads.length + (expUploads.length === 1 ? ' file' : ' files')"></div>
+      <template x-for="u in expUploads" :key="u.id">
+        <div class="d-flex align-items-center gap-2 mb-1">
+          <span class="text-truncate" style="max-width:45%;" x-text="u.name"></span>
+          <div class="progress flex-grow-1" style="height:6px;">
+            <div class="progress-bar" :style="`width:${u.pct}%`"></div>
+          </div>
+          <span style="min-width:2.5em;" class="text-end" x-text="u.pct + '%'"></span>
+        </div>
+      </template>
+    </div>
+  </template>
   <template x-for="t in toasts" :key="t.id">
     <div class="alert py-2 px-3 mb-2 shadow-sm" style="font-size:.85rem;" role="status"
          :class="t.ok ? 'alert-success' : 'alert-danger'" x-text="t.msg"></div>

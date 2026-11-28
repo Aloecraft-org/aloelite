@@ -293,3 +293,46 @@ daemon showed it as a 2 s stall per prune in the bench, so rebuild
 Next: PR targets claude/project-thread-9x8lfm until that merges. Not run
 here: WASI and browser targets. Requirements text the owner may want to
 look at is in the PR body.
+
+## 2026-11-28 manager UI: explorer as the page (prototype)
+
+Plan: the owner asked in the project thread for three things after a
+survey of comparable web file managers: an issue for the mount 500, a
+design doc, and a prototype of the left-rail layout on a branch. Outside
+I0 Seed; the owner's direct ask is the authority. Nothing touches
+lockstep.
+1. Issue for `POST /volumes/<id>/mount` answering 500 without
+   `mode: direct` where FUSE is unavailable.
+2. Design doc as a Claude Doc outside the repo (the owner reads it
+   there; no documentation file is created here).
+3. One draft pull request on claude/project-thread-wwekkv: rework
+   `manager/ui/templates/admin.html` and `manager/ui/static/admin.js` in
+   place so the explorer is the page, with volumes in a left rail. No
+   new routes. Scope: folder in the URL hash, one "+ New" menu, PIN
+   prompt in place of the unlock modal, multi-select with a bulk
+   toolbar, a details panel from the listing's fields, grid view.
+   `script/browser_check.py` and `script/ui_check.py` follow the new
+   markup and are run locally in Chromium.
+
+Done: issue #20; the design doc (Claude Doc, linked in the project
+thread); the prototype on claude/project-thread-wwekkv, in place in
+admin.html and admin.js, scope as planned, plus an upload tray. Both
+browser checks follow the new markup and pass locally in Chromium
+(browser_check.py 8 of 8, ui_check.py 26 of 26), `pytest manager` passes
+(176), and a scratch Playwright script covered the new behaviour: deep
+link, reload, back, row and multi selection, bulk move, download and
+delete, grid thumbnails (direct and blob), the PIN pane, the phone
+layout. A 0.5.0 `changed` entry.
+
+Learned: Alpine calls a component's `init()` itself, so `x-init="init()"`
+on the same element ran it twice; harmless until init() subscribed to
+`hashchange`, then every deep link mounted twice and one answered 500.
+Flask caches templates outside debug, so a template edit needs a manager
+restart to show. The Mount API has no verb that lists an entry's
+versions, reads an older one, or lists or restores deleted entries, so
+version history and Trash in the UI need engine work in both engines
+first. `ruff format --check .` flags the same five files as main.
+
+Next: the owner reviews the draft pull request and the doc's open
+questions. The scratch Playwright script is not committed; folding its
+checks into script/ui_check.py is the follow-up if the layout is kept.

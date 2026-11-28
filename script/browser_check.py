@@ -20,12 +20,12 @@ file.
 Exit status is 0 only if every check passes.
 
 Scenario (requires ALOELITE_AUTH=cookie):
-  A1. Browser A: unlock encrypted volume via the PIN modal -> file explorer
+  A1. Browser A: unlock encrypted volume via the PIN prompt -> file explorer
       works; badge is green 'open' (NOT 'open elsewhere').
-  A2. Close the explorer, click Open again -> NO PIN prompt (session held).
+  A2. Leave the volume, open it again -> NO PIN prompt (session held).
   A3. Create a file through the editor and save -> appears in the listing.
-  B1. Browser B (separate profile): badge shows 'open elsewhere'; Open ->
-      PIN modal directly.
+  B1. Browser B (separate profile): badge shows 'open elsewhere'; opening
+      it -> PIN prompt directly.
   B2. After PIN: the listing is NOT empty (shows A's file).
   B3. B creates its own file -> save succeeds (no 'unlock required').
 """
@@ -48,34 +48,36 @@ def check(name, cond):
 
 
 def open_vault(page):
-    row = page.locator("div.border.rounded", has_text="vault").first
-    row.get_by_role("button", name="Open").click()
+    page.locator(".rail-vol", has_text="vault").first.locator(".rail-vol-open").click()
 
 
 def unlock(page):
-    modal = page.locator("#unlockModal")
-    modal.wait_for(state="visible", timeout=5000)
-    modal.locator("input").first.fill(PIN)
-    modal.get_by_role("button", name="Unlock & open").click()
+    pane = page.locator("#unlockPane")
+    pane.wait_for(state="visible", timeout=5000)
+    pane.locator("input").first.fill(PIN)
+    pane.get_by_role("button", name="Unlock").click()
 
 
 def explorer_visible(page):
-    page.locator("#expModal").wait_for(state="visible", timeout=5000)
+    page.locator("#explorer").wait_for(state="visible", timeout=5000)
 
 
 def close_explorer(page):
-    page.locator("#expModal .btn-close").click()
-    page.locator("#expModal").wait_for(state="hidden", timeout=5000)
+    """The explorer is the page, so leaving it is leaving the volume's URL."""
+    page.goto(f"{BASE}/admin")
+    page.wait_for_selector("text=vault", timeout=8000)
+    page.locator("#explorer").wait_for(state="hidden", timeout=5000)
 
 
 def listed_files(page):
     page.wait_for_timeout(400)
-    rows = page.locator("#expModal tbody tr td:first-child span")
+    rows = page.locator("#explorer tbody tr .exp-name")
     return [t for t in rows.all_inner_texts() if t.strip()]
 
 
 def new_file(page, name, text):
-    page.locator("#expModal").get_by_role("button", name="New file").click()
+    page.get_by_role("button", name="+ New").click()
+    page.get_by_role("link", name="New text file").click()
     ask = page.locator("#askModal")
     ask.wait_for(state="visible", timeout=5000)
     ask.locator("input").fill(name)
@@ -109,14 +111,14 @@ with sync_playwright() as pw:
     close_explorer(a)
     a.reload()
     a.wait_for_selector("text=vault", timeout=8000)
-    badge = a.locator("div.border.rounded", has_text="vault").locator(".badge").first
+    badge = a.locator(".rail-vol", has_text="vault").locator(".badge").first
     check("A1: badge is green 'open' for the unlocking browser",
           badge.inner_text().strip() == "open")
 
     open_vault(a)
     pin_visible = False
     try:
-        a.locator("#unlockModal").wait_for(state="visible", timeout=1500)
+        a.locator("#unlockPane").wait_for(state="visible", timeout=1500)
         pin_visible = True
     except Exception:
         pass
@@ -132,12 +134,12 @@ with sync_playwright() as pw:
     b = B.new_page()
     b.goto(f"{BASE}/admin")
     b.wait_for_selector("text=vault", timeout=8000)
-    badge_b = b.locator("div.border.rounded", has_text="vault").locator(".badge").first
+    badge_b = b.locator(".rail-vol", has_text="vault").locator(".badge").first
     check("B1: other browser sees grey 'open elsewhere'",
           badge_b.inner_text().strip() == "open elsewhere")
 
     open_vault(b)
-    unlock(b)  # attach path: PIN modal directly
+    unlock(b)  # attach path: PIN prompt directly
     explorer_visible(b)
     names = listed_files(b)
     check("B2: listing after attach is NOT empty (sees A's file)",

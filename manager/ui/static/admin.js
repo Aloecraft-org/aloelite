@@ -21,19 +21,31 @@ function app() {
     mountTarget: null,
     mountPin: '', mountPath: '', mountErr: '', mounting: false,
 
-    unlockTarget: null, unlockPin: '', unlockErr: '', unlocking: false,
+    // The PIN prompt lives in the page, where the files will be: expNeedPin
+    // says the open volume (expVol) is waiting for its PIN.
+    unlockPin: '', unlockErr: '', unlocking: false,
 
     delTarget: null,
 
     expVol: null, expPath: '/', expEntries: [], expErr: '', expBusy: false,
+    expNeedPin: false,
     expDropHover: false,
+    // selection: entry names in the open folder. Exactly one selected entry
+    // is what the details column shows.
+    expSel: [],
+    // 'list' | 'grid', remembered per browser
+    expView: 'list',
+    // grid/details thumbnails for volumes that need the session header:
+    // path -> blob: URL ('' while loading or when not worth fetching)
+    _thumbs: {},
+    _THUMB_CAP: 4 * 1024 * 1024,
     // listing view state: filter text, sort column, sort direction (1 | -1)
     expQuery: '', expSort: 'name', expDir: 1,
     expUploads: [],
     toasts: [],
     pvName: '', pvUrl: '', pvKind: '', pvDoc: '', pvErr: '',
     preflightWarnings: [],
-    _autoAttached: false,
+    _reopened: false,
     askTitle: '', askValue: '', askBtn: 'OK', askHint: '', _askResolve: null,
     cfTitle: '', cfBody: '', cfYes: 'OK', cfNo: 'Cancel', cfDanger: false, _cfResolve: null,
 
@@ -114,13 +126,10 @@ function app() {
     },
 
     async init() {
-      for (const [id, sel] of [['askModal', '#askModal input'],
-                               ['unlockModal', '#unlockModal input']]) {
-        document.getElementById(id).addEventListener('shown.bs.modal', () => {
-          const i = document.querySelector(sel);
-          if (i) { i.focus(); if (i.select) i.select(); }
-        });
-      }
+      document.getElementById('askModal').addEventListener('shown.bs.modal', () => {
+        const i = document.querySelector('#askModal input');
+        if (i) { i.focus(); if (i.select) i.select(); }
+      });
       document.getElementById('askModal').addEventListener('hidden.bs.modal', () => {
         const r = this._askResolve; this._askResolve = null;
         const v = this._askOut ?? null; this._askOut = null;
@@ -146,7 +155,12 @@ function app() {
       // animating in; see skOpen.
       document.getElementById('skModal').addEventListener('shown.bs.modal',
         () => this._skInit());
+      try { this.expView = localStorage.getItem('aloe_view') === 'grid' ? 'grid' : 'list'; } catch {}
       await this.refresh();
+      // The open folder is in the URL, so reload, back/forward and bookmarks
+      // all land where the user was.
+      window.addEventListener('hashchange', () => this._applyHash());
+      this._applyHash();
       try {
         const h = await this.api('GET', '/health');
         if (h.ok) this.preflightWarnings = h.data.warnings || [];
@@ -201,6 +215,12 @@ function app() {
               _busy: false,
             })),
           }));
+          // the records above are new objects: re-point the open volume at
+          // its fresh one, or close the explorer if the volume is gone
+          if (this.expVol) {
+            this.expVol = this._vol(this.expVol.id);
+            if (!this.expVol) this.closeExplorer();
+          }
         }
       } catch { this.apiOk = false; }
       this.loading = false;
@@ -229,6 +249,9 @@ function app() {
         if (m.ok) {
           const v = this._vol(vid);
           if (v) this.openExplorer(v);
+        } else if (this.newEnc) {
+          const v = this._vol(vid);
+          if (v) this._askPin(v);
         } else {
           this.addLog(`Unlock after create failed: ${m.data?.error}`);
         }
@@ -237,43 +260,46 @@ function app() {
     },
 
     // -- Open / Lock (the simple path) -------------------------------------
-    async openVol(v) {
-      if (v.mounted) {
-        if (!this.attachedFor(v)) {
-          // "open elsewhere": this browser has no session -- the way in is
-          // the PIN, straight to the modal, no explorer flash
-          this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
-          this._modal('unlockModal').show();
-          return;
-        }
-        this.openExplorer(v); return;
-      }
-      if (v.encrypted) {
-        this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
-        this._modal('unlockModal').show();
-        return;
-      }
+    // `path` is where to land inside the volume (the URL hash supplies it on
+    // a reload or a bookmark).
+    async openVol(v, path = '/') {
+      this._reopened = false;  // a user-initiated open gets one fresh retry
+      // Encrypted and not usable by THIS browser (locked, or "open
+      // elsewhere"): the way in is the PIN, asked for in the page.
+      if (v.encrypted && !this.attachedFor(v)) { this._askPin(v, path); return; }
+      if (v.mounted) { this.openExplorer(v, path); return; }
       v._busy = true;
       const r = await this.api('POST', `/volumes/${v.id}/mount`, { mode: 'direct' });
       v._busy = false;
-      if (r.ok) { await this.refresh(); const nv = this._vol(v.id); if (nv) this.openExplorer(nv); }
-      else this.addLog(`Open "${v.name}" failed: ${r.data?.error}`);
+      if (r.ok) { await this.refresh(); const nv = this._vol(v.id); if (nv) this.openExplorer(nv, path); }
+      else {
+        this.addLog(`Open "${v.name}" failed: ${r.data?.error}`);
+        this.toast(`Could not open ${v.name}: ${r.data?.error || r.status}`, false);
+      }
+    },
+
+    _askPin(v, path = '/') {
+      this.expVol = v; this.expPath = path || '/'; this.expEntries = [];
+      this.expSel = []; this.expErr = '';
+      this.expNeedPin = true; this.unlockPin = ''; this.unlockErr = '';
+      this._syncHash();
+      this.$nextTick(() => document.querySelector('#unlockPane input')?.focus());
     },
 
     async doUnlock() {
-      const v = this.unlockTarget;
-      if (!v) return;
+      const v = this.expVol;
+      if (!v || !this.unlockPin) return;
       this.unlocking = true; this.unlockErr = '';
       const r = await this.api('POST', `/volumes/${v.id}/mount`,
         { mode: 'direct', pin: this.unlockPin });
       this.unlocking = false;
       if (r.ok) {
         if (r.data?.token) this._setTok(v.id, r.data.token);
-        this._modal('unlockModal').hide();
         this.unlockPin = '';
+        const path = this.expPath;
         await this.refresh();
         const nv = this._vol(v.id);
-        if (nv) this.openExplorer(nv);
+        if (nv) this.openExplorer(nv, path);
       } else {
         this.unlockErr = r.data?.error || 'Unlock failed.';
       }
@@ -283,7 +309,11 @@ function app() {
       v._busy = true;
       const r = await this.api('DELETE', `/volumes/${v.id}/mount`);
       v._busy = false;
-      if (r.ok) { this._clearTok(v.id); this.addLog(`Locked "${v.name}"`); await this.refresh(); }
+      if (r.ok) {
+        this._clearTok(v.id); this.addLog(`Locked "${v.name}"`);
+        if (this.expVol?.id === v.id) this.closeExplorer();
+        await this.refresh();
+      }
       else this.addLog(`Lock "${v.name}" failed: ${r.data?.error}`);
     },
 
@@ -410,28 +440,57 @@ function app() {
     },
 
     // -- file explorer ------------------------------------------------------
-    openExplorer(v) {
-      this.expVol = v; this.expPath = '/'; this.expEntries = []; this.expErr = '';
-      this.expQuery = '';
-      this._autoAttached = false;  // one auto-attach attempt per open
-      this._modal('expModal').show();
+    openExplorer(v, path = '/') {
+      this.expVol = v; this.expPath = path || '/'; this.expEntries = []; this.expErr = '';
+      this.expQuery = ''; this.expSel = []; this.expNeedPin = false;
+      this._dropThumbs();
+      this._syncHash();
       this.loadFiles();
     },
 
-    // Cookie mode, encrypted volume: unlocked server-side, but THIS browser
-    // has no session -- attaching means proving the PIN. Close the explorer
-    // FULLY before raising the PIN modal (bootstrap hide is async; showing
-    // during the transition stacks an empty explorer over the PIN field).
-    // Plain volumes never 401, so no silent-attach path is needed.
-    attachVol(v) {
-      this.unlockTarget = v; this.unlockPin = ''; this.unlockErr = '';
-      const el = document.getElementById('expModal');
-      el.addEventListener(
-        'hidden.bs.modal',
-        () => this._modal('unlockModal').show(),
-        { once: true },
-      );
-      this._modal('expModal').hide();
+    closeExplorer() {
+      this.expVol = null; this.expPath = '/'; this.expEntries = []; this.expErr = '';
+      this.expQuery = ''; this.expSel = []; this.expNeedPin = false;
+      this._dropThumbs();
+      this._syncHash();
+    },
+
+    // A volume is open AND this browser may use it: the file actions are live.
+    get expReady() { return !!this.expVol && !this.expNeedPin; },
+
+    // -- the open folder, in the URL: #/v/<volume id>/<path> ----------------
+    _hash() {
+      if (!this.expVol) return '';
+      const segs = this.expPath.split('/').filter(Boolean).map(encodeURIComponent);
+      return '#/v/' + this.expVol.id + (segs.length ? '/' + segs.join('/') : '');
+    },
+
+    _syncHash() {
+      const h = this._hash();
+      if ((location.hash || '') === h) return;
+      if (h) location.hash = h;
+      // clearing: drop the fragment without leaving a bare '#' behind
+      else history.pushState(null, '', location.pathname + location.search);
+    },
+
+    // The hash changed under us (back/forward, a pasted link, first load):
+    // make the page agree with it. Our own _syncHash writes land here too and
+    // fall through as "already there".
+    _applyHash() {
+      const m = (location.hash || '').match(/^#\/v\/([^/]+)(\/.*)?$/);
+      if (!m) { if (this.expVol) this.closeExplorer(); return; }
+      let path = '/';
+      try {
+        path = '/' + (m[2] || '').split('/').filter(Boolean).map(decodeURIComponent).join('/');
+      } catch { /* malformed escape: land at the root */ }
+      const v = this._vol(m[1]);
+      if (!v) { this.closeExplorer(); return; }
+      if (this.expVol?.id === v.id) {
+        if (this.expPath !== path) { this.expPath = path; this.expQuery = ''; this.expSel = [];
+                                     if (this.expReady) this.loadFiles(); }
+        return;
+      }
+      this.openVol(v, path);
     },
 
     expJoin(name) {
@@ -446,7 +505,128 @@ function app() {
       return out;
     },
 
-    navTo(p) { this.expPath = p || '/'; this.expQuery = ''; this.loadFiles(); },
+    navTo(p) {
+      this.expPath = p || '/'; this.expQuery = ''; this.expSel = [];
+      this._dropThumbs();
+      this._syncHash();
+      this.loadFiles();
+    },
+
+    setView(m) {
+      this.expView = m;
+      try { localStorage.setItem('aloe_view', m); } catch {}
+    },
+
+    // Open an entry the way its name link does: into a folder, or a preview.
+    expOpen(e) {
+      if (e.type === 'dir') this.navTo(this.expJoin(e.name));
+      else if (this.canPreview(e.name)) this.expPreview(e);
+    },
+
+    // -- selection -----------------------------------------------------------
+    isSel(e) { return this.expSel.includes(e.name); },
+    selToggle(e) {
+      this.expSel = this.isSel(e) ? this.expSel.filter(n => n !== e.name)
+                                  : [...this.expSel, e.name];
+    },
+    selEntries() { return this.expEntries.filter(e => this.expSel.includes(e.name)); },
+    selAll() {
+      const rows = this.expRows();
+      return rows.length > 0 && rows.every(e => this.expSel.includes(e.name));
+    },
+    selToggleAll(on) { this.expSel = on ? this.expRows().map(e => e.name) : []; },
+    // Escape clears the selection -- unless a modal is up, whose Escape it is.
+    selEscape() {
+      if (this.expSel.length && !document.querySelector('.modal.show')) this.expSel = [];
+    },
+    // A click on the row itself (not on a link, button, menu or checkbox)
+    // selects just that entry; clicking the only selected entry clears it.
+    rowClick(ev, e) {
+      if (ev.target.closest('a, button, input, label, .dropdown-menu')) return;
+      this.expSel = (this.expSel.length === 1 && this.isSel(e)) ? [] : [e.name];
+    },
+    get expDetail() {
+      if (this.expSel.length !== 1) return null;
+      return this.expEntries.find(e => e.name === this.expSel[0]) || null;
+    },
+
+    async selDelete() {
+      const sel = this.selEntries();
+      if (!sel.length) return;
+      const what = sel.length === 1 ? sel[0].name : `${sel.length} items`;
+      const ok = await this.confirm('Delete?',
+        `${what}${sel.some(e => e.type === 'dir') ? ', and everything inside any folder,' : ''} ` +
+        'will be removed. This cannot be undone.', 'Delete', true);
+      if (!ok) return;
+      let failed = 0;
+      for (const e of sel) {
+        const r = await this.api('DELETE',
+          `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expJoin(e.name))}`);
+        if (!r.ok) failed++;
+      }
+      if (failed) this.toast(`${failed} of ${sel.length} could not be deleted`, false);
+      else this.toast(`Deleted ${what}`);
+      this.expSel = [];
+      this.loadFiles();
+    },
+
+    // One request per file: there is no route that bundles several.
+    async selDownload() {
+      for (const e of this.selEntries()) if (e.type === 'file') await this.expDownload(e);
+    },
+
+    async selMove() {
+      const sel = this.selEntries();
+      if (!sel.length) return;
+      const dir = await this.ask(`Move ${sel.length === 1 ? sel[0].name : sel.length + ' items'} to folder`,
+        this.expPath, 'Move',
+        'Absolute path of a folder inside this volume, e.g. /reports/2026. It must already exist.');
+      if (!dir) return;
+      const base = dir === '/' ? '' : dir.replace(/\/+$/, '');
+      if ((base || '/') === this.expPath) return;
+      let failed = 0;
+      for (const e of sel) {
+        const r = await this.api('POST', `/volumes/${this.expVol.id}/files/transfer`,
+          { op: 'move', src: this.expJoin(e.name), dst: base + '/' + e.name });
+        if (!r.ok) failed++;
+      }
+      if (failed) this.toast(`${failed} of ${sel.length} could not be moved`, false);
+      else this.toast(`Moved to ${base || '/'}`);
+      this.expSel = [];
+      this.loadFiles();
+    },
+
+    // -- thumbnails ----------------------------------------------------------
+    // An <img> cannot send the session header. Without a token the inline
+    // download URL is the thumbnail; with one, the image is fetched once and
+    // shown from a blob: URL, and only below _THUMB_CAP so a folder of large
+    // photos does not pull itself into memory.
+    thumbUrl(e) {
+      if (!e || e.type !== 'file' || !this._RE_IMG.test(e.name) || !this.expVol) return '';
+      if (!this._tok(this.expVol.id)) return this._fileUrl(this.expPath, e.name, true);
+      const key = this.expJoin(e.name);
+      if (key in this._thumbs) return this._thumbs[key];
+      this._thumbs[key] = '';
+      if ((e.size || 0) <= this._THUMB_CAP) {
+        const vid = this.expVol.id;
+        fetch(this._fileUrl(this.expPath, e.name, true), { headers: this._authHeaders(vid) })
+          .then(r => r.ok ? r.blob() : null)
+          .then(b => {
+            if (!b) return;
+            const url = URL.createObjectURL(b);
+            // the folder may have changed while this was in flight
+            if (this.expVol?.id === vid && key in this._thumbs) this._thumbs[key] = url;
+            else URL.revokeObjectURL(url);
+          })
+          .catch(() => {});
+      }
+      return '';
+    },
+
+    _dropThumbs() {
+      for (const u of Object.values(this._thumbs)) if (u) URL.revokeObjectURL(u);
+      this._thumbs = {};
+    },
 
     // -- listing view: filter + sort applied over the loaded folder ----------
     expSortBy(k) {
@@ -501,32 +681,35 @@ function app() {
       try {
         const r = await this.api('GET',
           `/volumes/${this.expVol.id}/files?path=${encodeURIComponent(this.expPath)}`);
-        if (r.ok) this.expEntries = r.data.slice();  // expRows() filters + sorts
+        if (r.ok) {
+          this.expEntries = r.data.slice();  // expRows() filters + sorts
+          // keep the selection across a reload, minus anything that is gone
+          const have = new Set(this.expEntries.map(e => e.name));
+          this.expSel = this.expSel.filter(n => have.has(n));
+        }
         else if (r.status === 401) {
-          // Unlocked (encrypted) volume, but this browser holds no session:
-          // route to the PIN modal once. The guard flag stops a failed
-          // attach from looping through here forever.
-          this.expEntries = [];
-          this._clearTok(this.expVol.id);  // token is stale or absent
-          if (!this._autoAttached) {
-            this._autoAttached = true;
-            this.expBusy = false;
-            this.attachVol(this.expVol);
-            return;
-          }
-          this.expErr = 'This browser has no session for this volume — unlock it.';
+          // Unlocked (encrypted) volume, but this browser holds no session,
+          // or the token it holds is stale: ask for the PIN in place.
+          this._clearTok(this.expVol.id);
+          this.expBusy = false;
+          this._askPin(this.expVol, this.expPath);
+          return;
         }
         else if (r.status === 409) {
-          // Session gone (e.g. manager restarted): route back into Open.
+          // Session gone (e.g. manager restarted): route back into Open, once.
           this.expEntries = [];
-          this._modal('expModal').hide();
-          await this.refresh();
-          const v = this._vol(this.expVol.id);
-          if (v) this.openVol(v);
+          if (this._reopened) this.expErr = r.data?.error || 'Volume is not mounted.';
+          else {
+            const id = this.expVol.id, path = this.expPath;
+            await this.refresh();
+            const v = this._vol(id);
+            if (v) { await this.openVol(v, path); this._reopened = true; }
+            return;
+          }
         }
         else { this.expEntries = []; this.expErr = r.data?.error || 'Failed to list files.'; }
       } catch { this.expErr = 'Could not reach API.'; }
-      this.expBusy = false;
+      finally { this.expBusy = false; }
     },
 
     async expMkdir() {

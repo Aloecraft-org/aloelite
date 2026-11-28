@@ -251,6 +251,20 @@ releases:
         per-triple tarballs, so `latest` works while 0.4.0 is latest.
     changed:
       - |
+        **The manager's file explorer is the page, not a modal.** Volumes
+        sit in a left rail, grouped under the filesystem file they live in,
+        and the open folder fills the page. The folder is in the URL
+        (`/admin#/v/<volume id>/<path>`), so reload, back and forward, and
+        bookmarks land where you were. One "+ New" menu holds upload, new
+        folder, new text file, new sketch, pastes, new volume and import.
+        An encrypted volume asks for its PIN where its files will be,
+        instead of in a modal. Entries can be selected, by checkbox or by
+        clicking a row, and a selection can be downloaded, moved or deleted
+        together; one selected entry opens a details column. A grid view
+        shows image thumbnails. Dropping files anywhere on the page
+        uploads them to the open folder. No route changed. The page also
+        ran its start-up twice on every load, which is fixed.
+      - |
         **A version records only the chunks it changes. Schema era 5.**
         Every commit used to write a manifest row for every chunk of the
         file, changed or not, so the cost of a small write grew with the
