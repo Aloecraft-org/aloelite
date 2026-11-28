@@ -70,7 +70,7 @@ releases:
     date: null
     status: unreleased
     stable: false
-    api_version: 3
+    api_version: 4
     summary: |
       **The Mount API dispatch is a crate of its own.** `aloelite-wasm` held
       the only copy of the table that maps the spec's operation names onto
@@ -84,6 +84,38 @@ releases:
       callable from any language with an Extism SDK, with the volume on a
       host path the manifest grants.
     added:
+      - |
+        **A volume has a default retention policy, and a setting for what
+        it keeps of a deleted entry. Schema era 4.** Retention was per entry
+        only, so a volume of files nobody had configured kept every version
+        of all of them. `set_default_retention(volume, keep)` gives entries
+        with no policy of their own a keep-last-N default; an entry's own
+        `set_retention` still wins, and with neither every version is kept,
+        as before. `set_retention_on_delete(volume, keep)` decides what a
+        prune leaves of an entry with no placement left: its last N
+        versions, `0` for nothing (the node itself is then swept), `-1` for
+        everything. Both are enforced only by pruning, and both are on
+        `VolumeInfo`. On the command line they are `--retention KEEP` and
+        `--retention-on-delete KEEP` (`KEEP` a count or `all`): with
+        `aloelite volume create`, the new `aloelite volume set`, a new
+        file's default volume, and on both `aloelite-fuse` daemons, which
+        set them before mounting. `aloelite volumes` shows them. Opening a
+        file migrates it to era 4 in place, and 0.4.x then refuses it.
+      - |
+        **`purge`: remove an entry and destroy it at once.** `remove` only
+        detaches; what survives is the volume's business at the next prune.
+        `purge(path)` takes what `remove` takes, refuses what it refuses,
+        and leaves no node, version or xattr behind whatever the volume
+        retains. `purge_by_id(node)` reaches an entry that is already
+        deleted and so has no path. A hardlinked file only loses the one
+        name, because it is still a file. On the command line it is
+        `aloelite rm --purge`. Pool chunks go at the next `prune_content`,
+        since a chunk may be shared.
+      - |
+        **`--prune-every SECONDS` on both `aloelite-fuse` daemons.** Retention
+        acts only at a prune, and nothing pruned a mounted volume. With this
+        flag the daemon sweeps its volume on a timer. The default is 0,
+        which never prunes.
       - |
         **`--chunk-size SIZE` on `aloelite` and both `aloelite-fuse`
         daemons.** It sets the chunk size (CV-1) of a volume the command
@@ -218,6 +250,15 @@ releases:
         shipped with. Releases before 0.5.0 install too, from their
         per-triple tarballs, so `latest` works while 0.4.0 is latest.
     changed:
+      - |
+        **A prune now trims the history of deleted entries.** A volume's
+        `retention_on_delete` defaults to 1, on volumes that already exist
+        too. So the first `prune_content` after upgrading keeps the last
+        committed version of every removed entry and drops the versions
+        beneath it; before, a removed entry kept whatever its own policy
+        said, which by default was everything. Set `--retention-on-delete
+        all` before pruning to keep the old behaviour. Entries that are
+        still placed are unaffected.
       - |
         **A flush or fsync on a mount commits one version, not one per dirty
         range.** Both FUSE daemons now hand every dirty extent of a file to a

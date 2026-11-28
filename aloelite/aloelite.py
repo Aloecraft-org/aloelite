@@ -129,6 +129,16 @@ class Aloelite:
     def change_pin(self, volume: VolumeId, old_pin: bytes, new_pin: bytes) -> None:
         ops.change_pin(self._db, volume, old_pin, new_pin)
 
+    def set_default_retention(self, volume: VolumeId, keep: int | None) -> None:
+        """Keep-last-N for every entry of the volume with no policy of its
+        own; None clears it. Takes effect at the next prune_content."""
+        ops.set_default_retention(self._db, volume, keep)
+
+    def set_retention_on_delete(self, volume: VolumeId, keep: int) -> None:
+        """What a prune keeps of a deleted entry: -1 everything, 0 nothing,
+        N its last N versions (1, a recycle bin, is the default)."""
+        ops.set_retention_on_delete(self._db, volume, keep)
+
     def resolve_volume_name(self, name: str) -> VolumeId | None:
         """VolumeId for `name`, or None. On duplicates the most recently
         CREATED volume wins: greatest created_at, then greatest id as the
@@ -403,6 +413,15 @@ class Mount:
 
     def remove_recursive(self, path: str) -> None:
         ops.remove_recursive(self._db, self.id, path)
+
+    def purge(self, path: str) -> None:
+        """remove, and destroy the node and its content now, whatever the
+        volume's retention_on_delete says."""
+        ops.purge(self._db, self.id, path)
+
+    def purge_by_id(self, node: NodeId) -> None:
+        """purge by node id: the way to destroy an already-deleted entry."""
+        ops.purge_by_id(self._db, self.id, node)
 
     def copy(self, src: str, dst: str) -> NodeId:
         return ops.copy(self._db, self.id, src, dst)

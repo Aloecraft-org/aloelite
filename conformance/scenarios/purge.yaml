@@ -1,0 +1,97 @@
+# Purge — remove, then destroy. Where remove only archives a placement and
+# leaves the node to the volume's retention_on_delete setting, purge takes
+# the node and its content out of the file at once. The settings themselves
+# are volume-level and act at prune, which a mount cannot run, so they are
+# covered by each engine's own tests.
+scenarios:
+  - scenario: purge-destroys-the-node
+    requirements: [OP-5, CV-6r1]
+    description: >
+      After remove the node is still addressable by id; after purge it is
+      not.
+    steps:
+      - op: create_entry
+        args: {path: /secret.txt, data: {utf8: "gone for good"}}
+        bind: node
+      - op: purge
+        args: {path: /secret.txt}
+      - op: exists
+        args: {path: /secret.txt}
+        expect: false
+      - op: stat_by_id
+        args: {node: {ref: node}}
+        raises: not_found
+
+  - scenario: purge-by-id-destroys-an-already-removed-node
+    requirements: [OP-5, CV-6r1]
+    description: >
+      A removed node has no path. The id form is how it is destroyed.
+    steps:
+      - op: create_entry
+        args: {path: /old.txt, data: {utf8: "x"}}
+        bind: node
+      - op: remove
+        args: {path: /old.txt}
+      - op: stat_by_id
+        args: {node: {ref: node}}
+        expect: {name: old.txt}
+      - op: purge_by_id
+        args: {node: {ref: node}}
+      - op: stat_by_id
+        args: {node: {ref: node}}
+        raises: not_found
+
+  - scenario: purge-refuses-a-non-empty-container
+    requirements: [OP-5]
+    steps:
+      - op: create_container
+        args: {path: /full}
+      - op: create_entry
+        args: {path: /full/child.txt, data: {utf8: "x"}}
+      - op: purge
+        args: {path: /full}
+        raises: not_empty
+      - op: exists
+        args: {path: /full/child.txt}
+        expect: true
+
+  - scenario: purge-accepts-an-empty-container
+    requirements: [OP-5]
+    steps:
+      - op: create_container
+        args: {path: /empty}
+        bind: dir
+      - op: purge
+        args: {path: /empty}
+      - op: stat_by_id
+        args: {node: {ref: dir}}
+        raises: not_found
+
+  - scenario: purging-one-hardlink-keeps-the-file
+    requirements: [OP-5, PI-1, EXT-1]
+    description: >
+      A node that is still placed elsewhere is not deleted, so purge of one
+      path is only a remove of that path.
+    steps:
+      - op: create_entry
+        args: {path: /a, data: {utf8: "payload"}}
+      - op: link
+        args: {"from": /a, to: /b}
+      - op: purge
+        args: {path: /a}
+      - op: exists
+        args: {path: /a}
+        expect: false
+      - op: read_all
+        args: {path: /b}
+        expect: {utf8: "payload"}
+
+  - scenario: purge-by-id-refuses-the-volume-root
+    requirements: [OP-5]
+    steps:
+      - op: stat
+        args: {path: /}
+        bind: root
+      - op: purge_by_id
+        args: {node: {ref: root.id}}
+        raises: unsupported

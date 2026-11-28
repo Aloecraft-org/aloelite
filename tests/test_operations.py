@@ -1271,6 +1271,213 @@ def test_read_handle_does_not_serve_a_superseded_version(db, mount):
         assert r.read(-1) == b"B" * 100
 
 
+# --------------------------------------------------------------------------
+# Volume retention settings (CV-6r1), retention on delete, purge
+# --------------------------------------------------------------------------
+def _versions(db, nid):
+    return [
+        r[0]
+        for r in db.connection.execute(
+            "SELECT DISTINCT version FROM content_version WHERE content_id=? "
+            "ORDER BY version",
+            (nid,),
+        )
+    ]
+
+
+def _node_exists(db, nid):
+    return bool(
+        db.connection.execute(
+            "SELECT count(*) FROM node WHERE node_id=?", (nid,)
+        ).fetchone()[0]
+    )
+
+
+def _vol(db, mount):
+    return ops.mount_info(db, mount).volume
+
+
+def _rewrite(db, mount, path, times):
+    for i in range(times):
+        ops.write_all(db, mount, path, bytes([65 + i]) * 4)
+
+
+def test_volume_default_retention_governs_entries_without_their_own(db, chunky):
+    vol = _vol(db, chunky)
+    ops.create_entry(db, chunky, "/plain", b"0000")
+    ops.create_entry(db, chunky, "/own", b"0000")
+    ops.set_retention(db, chunky, "/own", 3)
+    _rewrite(db, chunky, "/plain", 5)
+    _rewrite(db, chunky, "/own", 5)
+    plain, own = _nid(db, chunky, "/plain"), _nid(db, chunky, "/own")
+
+    # no default: an entry without a policy keeps everything, as before
+    ops.prune_content(db)
+    assert _versions(db, plain) == [1, 2, 3, 4, 5, 6]
+    assert _versions(db, own) == [4, 5, 6]
+
+    # with one, it applies to the entry that has none and not to the other
+    ops.set_default_retention(db, vol, 1)
+    info = next(v for v in ops.list_volumes(db) if v.id == vol)
+    assert (info.retention, info.retention_on_delete) == (1, 1)
+    ops.prune_content(db)
+    assert _versions(db, plain) == [6]
+    assert _versions(db, own) == [4, 5, 6]
+    assert ops.read_all(db, chunky, "/plain") == b"EEEE"
+
+    # cleared, history accumulates again
+    ops.set_default_retention(db, vol, None)
+    _rewrite(db, chunky, "/plain", 2)
+    ops.prune_content(db)
+    assert _versions(db, plain) == [6, 7, 8]
+
+
+def test_no_policy_removes_current_content(db, chunky):
+    # keep-0 on a placed entry is floored at the committed version: no policy
+    # may be read as permission to delete what the file holds now.
+    ops.create_entry(db, chunky, "/f", b"0000")
+    _rewrite(db, chunky, "/f", 2)
+    ops.set_retention(db, chunky, "/f", 0)
+    ops.prune_content(db)
+    assert _versions(db, _nid(db, chunky, "/f")) == [3]
+    assert ops.read_all(db, chunky, "/f") == b"BBBB"
+
+
+def test_volume_retention_settings_validate(db, chunky):
+    vol = _vol(db, chunky)
+    with pytest.raises(ValueError):
+        ops.set_default_retention(db, vol, 0)
+    with pytest.raises(ValueError):
+        ops.set_retention_on_delete(db, vol, -2)
+    with pytest.raises(errors.NotFound):
+        ops.set_default_retention(db, "no-such-volume", 1)
+    with pytest.raises(errors.NotFound):
+        ops.set_retention_on_delete(db, "no-such-volume", 0)
+
+
+@pytest.mark.parametrize(
+    "setting, kept",
+    [(None, [6]), (1, [6]), (3, [4, 5, 6]), (-1, [1, 2, 3, 4, 5, 6])],
+)
+def test_retention_on_delete_decides_what_a_deleted_entry_keeps(
+    db, chunky, setting, kept
+):
+    """None is a volume nobody configured: the default is 1, a recycle bin.
+    The entry's own keep-everything policy stops applying once it is deleted."""
+    vol = _vol(db, chunky)
+    if setting is not None:
+        ops.set_retention_on_delete(db, vol, setting)
+    ops.create_entry(db, chunky, "/f", b"0000")
+    _rewrite(db, chunky, "/f", 5)
+    nid = _nid(db, chunky, "/f")
+    ops.remove(db, chunky, "/f")
+    assert _versions(db, nid) == [1, 2, 3, 4, 5, 6]  # remove destroys nothing
+    ops.prune(db)
+    ops.prune_content(db)
+    assert _versions(db, nid) == kept
+    assert _node_exists(db, nid)  # still in the graveyard, recoverable
+
+
+def test_retention_on_delete_zero_purges_deleted_nodes_at_prune(db, chunky):
+    vol = _vol(db, chunky)
+    ops.set_retention_on_delete(db, vol, 0)
+    ops.create_entry(db, chunky, "/gone", b"0000")
+    ops.create_entry(db, chunky, "/stays", b"1111")
+    ops.create_container(db, chunky, "/d")
+    ops.create_container(db, chunky, "/d/sub")
+    ops.create_entry(db, chunky, "/d/sub/deep", b"2222")
+    ops.link(db, chunky, "/stays", "/alias")
+    gone, deep = _nid(db, chunky, "/gone"), _nid(db, chunky, "/d/sub/deep")
+    d, stays = _nid(db, chunky, "/d"), _nid(db, chunky, "/stays")
+
+    ops.remove(db, chunky, "/gone")
+    ops.remove_recursive(db, chunky, "/d")
+    ops.remove(db, chunky, "/alias")  # one of two placements: not a delete
+    assert _node_exists(db, gone)  # until a prune, remove destroyed nothing
+
+    report = ops.prune(db, vol)
+    assert report.nodes_pruned == 4  # /gone, /d, /d/sub, /d/sub/deep
+    assert not any(_node_exists(db, n) for n in (gone, deep, d))
+    assert _node_exists(db, stays)
+    assert ops.read_all(db, chunky, "/stays") == b"1111"
+    assert ops.prune_content(db, vol).chunks_pruned == 2
+    assert ops.health_check(db) == []
+
+
+def test_retention_on_delete_zero_spares_a_node_another_mount_holds_open(db, chunky):
+    vol = _vol(db, chunky)
+    ops.set_retention_on_delete(db, vol, 0)
+    ops.create_entry(db, chunky, "/f", b"0000")
+    nid = _nid(db, chunky, "/f")
+    lock = ops.lock(db, chunky, "/f")
+    ops.remove(db, chunky, "/f")  # the holder may unlink its own open file
+    ops.prune(db, vol)
+    assert _node_exists(db, nid)
+    ops.unlock(db, chunky, lock.id)
+    ops.prune(db, vol)
+    assert not _node_exists(db, nid)
+
+
+def test_purge_destroys_now_whatever_the_volume_keeps(db, chunky):
+    vol = _vol(db, chunky)
+    ops.set_retention_on_delete(db, vol, -1)
+    ops.create_entry(db, chunky, "/f", b"0000")
+    _rewrite(db, chunky, "/f", 3)
+    nid = _nid(db, chunky, "/f")
+    ops.purge(db, chunky, "/f")
+    assert not ops.exists(db, chunky, "/f")
+    assert not _node_exists(db, nid) and _versions(db, nid) == []
+    assert ops.prune_content(db, vol).chunks_pruned == 4  # CV-7 reclaims the pool
+    assert ops.health_check(db) == []
+
+
+def test_purge_refuses_what_remove_refuses_and_keeps_a_hardlinked_file(db, chunky):
+    ops.create_container(db, chunky, "/d")
+    ops.create_entry(db, chunky, "/d/f", b"0000")
+    with pytest.raises(errors.NotEmpty):
+        ops.purge(db, chunky, "/d")
+    with pytest.raises(errors.NotFound):
+        ops.purge(db, chunky, "/nope")
+    ops.link(db, chunky, "/d/f", "/alias")
+    nid = _nid(db, chunky, "/d/f")
+    ops.purge(db, chunky, "/d/f")  # one placement of two: only a remove
+    assert _node_exists(db, nid)
+    assert ops.read_all(db, chunky, "/alias") == b"0000"
+    ops.purge(db, chunky, "/alias")  # the last one: gone
+    assert not _node_exists(db, nid)
+    ops.purge(db, chunky, "/d")  # empty now
+    assert not ops.exists(db, chunky, "/d")
+
+
+def test_purge_by_id_reaches_an_entry_that_is_already_deleted(db, chunky):
+    vol = _vol(db, chunky)
+    ops.set_retention_on_delete(db, vol, -1)
+    ops.create_entry(db, chunky, "/f", b"0000")
+    nid = _nid(db, chunky, "/f")
+    ops.remove(db, chunky, "/f")
+    ops.prune(db)
+    assert _node_exists(db, nid)  # the graveyard: no path leads here
+    ops.purge_by_id(db, chunky, nid)
+    assert not _node_exists(db, nid)
+    with pytest.raises(errors.NotFound):
+        ops.purge_by_id(db, chunky, nid)
+
+    # a placed node loses every placement; a root and a foreign node are refused
+    ops.create_entry(db, chunky, "/g", b"1111")
+    ops.link(db, chunky, "/g", "/g2")
+    gid = _nid(db, chunky, "/g")
+    ops.purge_by_id(db, chunky, gid)
+    assert not ops.exists(db, chunky, "/g") and not ops.exists(db, chunky, "/g2")
+    root = next(v for v in ops.list_volumes(db) if v.id == vol).root
+    with pytest.raises(errors.Unsupported):
+        ops.purge_by_id(db, chunky, root)
+    other = ops.create_volume(db, "other")
+    om = ops.mount(db, other.id, "/", ttl_ms=60_000)
+    ops.create_entry(db, om, "/theirs", b"x")
+    with pytest.raises(errors.VolumeMismatch):
+        ops.purge_by_id(db, chunky, _nid(db, om, "/theirs"))
+
+
 # Copyright Michael Godfrey 2026 | aloecraft.org <michael@aloecraft.org>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

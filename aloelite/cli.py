@@ -39,7 +39,7 @@ import sys
 from . import errors
 from .aloelite import Aloelite, Mount
 from .pin import PinError, add_pin_arguments, read_pin
-from .sizes import parse_size
+from .sizes import parse_keep, parse_size
 from .types import VolumeId
 
 
@@ -342,7 +342,11 @@ def _cmd_mkdir(m: Mount, args) -> int:
 
 
 def _cmd_rm(m: Mount, args) -> int:
-    if args.recursive:
+    if args.purge:
+        if args.recursive:
+            return _fail("--purge takes one entry or empty container, not -r")
+        m.purge(args.path)
+    elif args.recursive:
         m.remove_recursive(args.path)
     else:
         m.remove(args.path)
@@ -430,6 +434,46 @@ def _chunk_size(args) -> int:
     return parse_size(args.chunk_size)
 
 
+_RETENTION_SCOPE = (
+    "--retention and --retention-on-delete only apply to a volume command: "
+    "'volume create', 'volume set', or 'aloelite -f FILE' on a new file"
+)
+
+
+def _retention_flags(args) -> tuple[int | None, int | None]:
+    """(--retention, --retention-on-delete) as counts, -1 for `all`, None for
+    a flag that was not given. Exits on a bad spelling."""
+    out = []
+    for flag, text, least in [
+        ("--retention", args.retention, 1),
+        ("--retention-on-delete", args.retention_on_delete, 0),
+    ]:
+        if text is None:
+            out.append(None)
+            continue
+        try:
+            keep = parse_keep(text)
+        except ValueError as e:
+            raise SystemExit(_fail(f"{flag}: {e}"))
+        if -1 < keep < least:
+            raise SystemExit(_fail(f"{flag}: must be at least {least}, or 'all'"))
+        out.append(keep)
+    return out[0], out[1]
+
+
+def _apply_retention(fs: Aloelite, vol, args) -> None:
+    """Set whichever of the two volume retention settings the flags name."""
+    keep, on_delete = _retention_flags(args)
+    if keep is not None:
+        fs.set_default_retention(vol, None if keep == -1 else keep)
+    if on_delete is not None:
+        fs.set_retention_on_delete(vol, on_delete)
+
+
+def _keep_label(keep: int | None) -> str:
+    return "all" if keep is None or keep == -1 else str(keep)
+
+
 def _cmd_status(fs: Aloelite, args) -> int:
     vols = fs.list_volumes()
     fresh = not vols
@@ -438,7 +482,8 @@ def _cmd_status(fs: Aloelite, args) -> int:
             pin = read_pin(args.pin, args.pin_file, args.pin_env, confirm=True)
         except PinError as e:
             raise SystemExit(_fail(str(e)))
-        fs.create_volume("main", _chunk_size(args), pin=pin)
+        v = fs.create_volume("main", _chunk_size(args), pin=pin)
+        _apply_retention(fs, v.id, args)
         vols = fs.list_volumes()
         enc = "encrypted" if pin is not None else "unencrypted"
         print(f"{args.file}: created")
@@ -497,8 +542,20 @@ def _cmd_volume(fs: Aloelite, args) -> int:
             )
         except errors.FsError as e:
             return _fail(str(e))
+        _apply_retention(fs, v.id, args)
         enc = "encrypted" if pin is not None else "unencrypted"
         print(f"created volume '{v.name}' ({enc})  {v.id}")
+        return 0
+    if args.volume_cmd == "set":
+        if args.retention is None and args.retention_on_delete is None:
+            return _fail("volume set: pass --retention and/or --retention-on-delete")
+        vol = _select_volume(fs, args.volume)
+        _apply_retention(fs, vol, args)
+        v = next(v for v in fs.list_volumes() if v.id == vol)
+        print(
+            f"volume '{v.name or v.id}': retention {_keep_label(v.retention)}, "
+            f"on delete {_keep_label(v.retention_on_delete)}"
+        )
         return 0
     return _fail("unknown volume command")
 
@@ -520,6 +577,8 @@ def _volume_line(fs: Aloelite, v) -> str:
     return (
         f"{v.id}  {_enc_label(fs, v.id):<9}  "
         f"{_ts(getattr(v, 'created_at', None))}  {v.name or '(unnamed)'}"
+        f"  retention={_keep_label(v.retention)}"
+        f" on-delete={_keep_label(v.retention_on_delete)}"
     )
 
 
@@ -586,6 +645,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="chunk size of a volume this command creates: bytes, or with a "
         "K or M suffix (64K). Default 1M; fixed for the life of the volume",
     )
+    ap.add_argument(
+        "--retention",
+        metavar="KEEP",
+        help="with 'volume create' or 'volume set': the volume's default "
+        "content retention, the last KEEP versions of each entry, or 'all' "
+        "(the default). An entry's own policy wins. Applied by 'prune'",
+    )
+    ap.add_argument(
+        "--retention-on-delete",
+        metavar="KEEP",
+        help="with 'volume create' or 'volume set': what 'prune' keeps of a "
+        "deleted entry: its last KEEP versions (default 1), 0 for nothing, "
+        "or 'all'",
+    )
     add_pin_arguments(ap)
     sub = ap.add_subparsers(dest="cmd", required=False)
 
@@ -628,6 +701,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("rm", help="remove an entry or empty container")
     p.add_argument("path")
     p.add_argument("-r", "--recursive", action="store_true")
+    p.add_argument(
+        "--purge",
+        action="store_true",
+        help="destroy it now, with its history, whatever the volume retains",
+    )
 
     p = sub.add_parser("mv", help="move/rename")
     p.add_argument("src")
@@ -663,6 +741,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="create a volume (encrypted iff a --pin* flag is given)",
     )
     vc.add_argument("name")
+    vsub.add_parser(
+        "set",
+        help="change the -v volume's --retention / --retention-on-delete",
+    )
 
     p = sub.add_parser("volumes", help="list volumes in the file")
 
@@ -725,6 +807,14 @@ def main(argv: list[str] | None = None) -> int:
         creates = args.cmd == "volume" and args.volume_cmd == "create"
         if not (bare or creates):
             return _fail(_CHUNK_SIZE_SCOPE)
+    if args.retention is not None or args.retention_on_delete is not None:
+        try:
+            _retention_flags(args)
+        except SystemExit as e:
+            return int(e.code or 0)
+        volume_cmd = args.cmd == "volume" and args.volume_cmd in ("create", "set")
+        if not (bare or volume_cmd):
+            return _fail(_RETENTION_SCOPE)
     if not bare and not os.path.exists(args.file):
         return _fail(
             f"{args.file}: no such file (run 'aloelite -f {args.file}' to create it)"
@@ -744,6 +834,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.cmd is None:
                 if fs.list_volumes() and args.chunk_size is not None:
                     return _fail(_CHUNK_SIZE_SCOPE)
+                if fs.list_volumes() and (
+                    args.retention is not None or args.retention_on_delete is not None
+                ):
+                    return _fail(_RETENTION_SCOPE)
                 if fs.list_volumes() and (
                     args.pin is not None or args.pin_file or args.pin_env
                 ):

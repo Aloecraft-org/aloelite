@@ -928,6 +928,36 @@ _MOUNT_TTL_MS = 300_000
 _RENEW_EVERY_S = 60.0
 
 
+def _apply_retention(fs, vol_id, retention, retention_on_delete) -> None:
+    """Set the volume's retention settings a mount asked for. Each is a
+    count, -1 for "all", or None to leave the setting as it is."""
+    if retention is not None:
+        fs.set_default_retention(vol_id, None if retention == -1 else retention)
+    if retention_on_delete is not None:
+        fs.set_retention_on_delete(vol_id, retention_on_delete)
+
+
+def _prune_once(fs, vol_id) -> None:
+    """One retention sweep of the mounted volume: nodes, then content. An
+    entry being written is skipped by the engine (its lock), and so is a
+    deleted one somebody still holds a lock on."""
+    fs.prune(vol_id)
+    fs.prune_content(vol_id)
+
+
+async def _prune_periodically(fs, vol_id, interval: float) -> None:
+    while True:
+        await trio.sleep(interval)
+        try:
+            _prune_once(fs, vol_id)
+        except Exception:
+            import logging
+
+            logging.getLogger("aloelite.fuse").exception(
+                "periodic prune failed; the next tick retries"
+            )
+
+
 async def _renew_mount(mount, interval: float = _RENEW_EVERY_S) -> None:
     while True:
         await trio.sleep(interval)
@@ -949,6 +979,9 @@ async def fuse_main(
     create: bool = False,
     access: str = "rw",
     chunk_size: int | None = None,
+    retention: int | None = None,
+    retention_on_delete: int | None = None,
+    prune_every: float = 0,
 ) -> None:
     """Mount one Aloelite volume at `mountpoint` and serve FUSE until the mount
     is torn down (external `fusermount3 -uz`, or `stop_event` being set).
@@ -960,12 +993,18 @@ async def fuse_main(
 
     The spec's `trio.run(fuse_main, sqlite_path, volume_name, mountpoint, pin)`
     works directly; pass stop_event/allow_other/debug via functools.partial.
+
+    `retention` and `retention_on_delete` set the volume's two retention
+    settings before mounting (a count, -1 for "all", None to leave it), and
+    `prune_every` > 0 enforces them every that many seconds while mounted.
+    Nothing prunes otherwise: retention acts only at a prune.
     """
     fs = Aloelite(sqlite_path)
     try:
         vol_id = _find_or_create_volume(
             fs, volume_name, pin=pin, create=create, chunk_size=chunk_size
         )
+        _apply_retention(fs, vol_id, retention, retention_on_delete)
         mount = fs.mount(
             vol_id, pin=pin, access=access, ttl_ms=_MOUNT_TTL_MS
         ).__enter__()
@@ -987,6 +1026,8 @@ async def fuse_main(
             try:
                 async with trio.open_nursery() as nursery:
                     nursery.start_soon(_renew_mount, mount)
+                    if prune_every > 0:
+                        nursery.start_soon(_prune_periodically, fs, vol_id, prune_every)
                     if stop_event is not None:
                         nursery.start_soon(_watch_stop, stop_event)
                     await pyfuse3.main()
@@ -1054,6 +1095,26 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         "M suffix (64K). Default 1M. Fixed for the life of the volume; "
         "smaller suits files rewritten in place, such as databases",
     )
+    ap.add_argument(
+        "--retention",
+        metavar="KEEP",
+        help="set the volume's default content retention before mounting: "
+        "the last KEEP versions of each file, or 'all'. Enforced by a prune",
+    )
+    ap.add_argument(
+        "--retention-on-delete",
+        metavar="KEEP",
+        help="set what a prune keeps of a deleted file before mounting: its "
+        "last KEEP versions, 0 for nothing, or 'all'",
+    )
+    ap.add_argument(
+        "--prune-every",
+        metavar="SECONDS",
+        type=int,
+        default=0,
+        help="prune the volume every SECONDS while mounted, which is what "
+        "enforces retention. Default 0: never",
+    )
     ap.add_argument("--debug", action="store_true")
     ap.add_argument(
         "--ro",
@@ -1094,6 +1155,41 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         except ValueError as e:
             print(f"aloefuse: --chunk-size: {e}", file=sys.stderr)
             sys.exit(1)
+    retention = retention_on_delete = None
+    for flag, text, least in [
+        ("--retention", args.retention, 1),
+        ("--retention-on-delete", args.retention_on_delete, 0),
+    ]:
+        if text is None:
+            continue
+        from aloelite.sizes import parse_keep
+
+        try:
+            keep = parse_keep(text)
+        except ValueError as e:
+            print(f"aloefuse: {flag}: {e}", file=sys.stderr)
+            sys.exit(1)
+        if -1 < keep < least:
+            print(
+                f"aloefuse: {flag}: must be at least {least}, or 'all'", file=sys.stderr
+            )
+            sys.exit(1)
+        if flag == "--retention":
+            retention = keep
+        else:
+            retention_on_delete = keep
+    if args.prune_every < 0:
+        print("aloefuse: --prune-every: must not be negative", file=sys.stderr)
+        sys.exit(1)
+    if args.ro and (
+        retention is not None or retention_on_delete is not None or args.prune_every
+    ):
+        print(
+            "aloefuse: --retention, --retention-on-delete and --prune-every "
+            "change the volume and cannot be used with --ro",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if args.volume is None:
         if args.create:
             print("aloefuse: --create requires an explicit -v NAME", file=sys.stderr)
@@ -1138,6 +1234,9 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
         create=args.create,
         access="ro" if args.ro else "rw",
         chunk_size=chunk_size,
+        retention=retention,
+        retention_on_delete=retention_on_delete,
+        prune_every=args.prune_every,
     )
     try:
         trio.run(runner)

@@ -24,13 +24,13 @@ use crate::pack::{self as packfmt, Bin, PackNode};
 use crate::records::NodeInfo;
 use crate::resolve::{resolve, resolve_parent};
 use crate::templates::mutation::{
-    ARCHIVE_EDGE, ARCHIVE_PLACEMENT, COPY_CHUNK_REFS, CREATE_CONTENT, SET_OWNER,
-    SET_RETENTION_KEEP, XATTR_GET, XATTR_LIST, XATTR_SET,
+    ARCHIVE_EDGE, ARCHIVE_PLACEMENT, ARCHIVE_PLACEMENTS_OF, COPY_CHUNK_REFS, CREATE_CONTENT,
+    PURGE_EDGES_OF, PURGE_NODE, SET_OWNER, SET_RETENTION_KEEP, XATTR_GET, XATTR_LIST, XATTR_SET,
 };
 use crate::templates::recursive::{ARCHIVE_SUBTREE, ENUMERATE_SUBTREE};
-use crate::templates::resolution::{GET_ACTIVE_PARENT, GET_CONTENT_META, GET_NODE};
-use crate::templates::validation::{CHECK_EMPTY, CHECK_LOCK_HELD_SUBTREE};
-use crate::types::{EdgeId, MountId, NodeId, NodeType};
+use crate::templates::resolution::{GET_ACTIVE_PARENT, GET_CONTENT_META, GET_NODE, LIST_VOLUMES};
+use crate::templates::validation::{CHECK_EMPTY, CHECK_LOCK_HELD_SUBTREE, HAS_ACTIVE_PLACEMENT};
+use crate::types::{EdgeId, MountId, NodeId, NodeType, VolumeId};
 
 use super::{link_child, lock_held, new_node, put_initial_content, require_mount, require_name};
 
@@ -66,6 +66,70 @@ pub fn remove(db: &mut Db, mount: &MountId, path: &str) -> Result<()> {
             return Err(FsError::not_found(format!("node {} has no active placement", found.node)));
         }
         Ok(())
+    })
+}
+
+/// `remove`, then destroy: the node and all of its content are gone when
+/// this returns, whatever `retention_on_delete` says. Takes what `remove`
+/// takes and refuses what it refuses (a lock held elsewhere, a non-empty
+/// container). A node still reachable through another placement (a hardlink)
+/// only loses this one, exactly as with `remove`: there is still a file.
+/// Pool chunks are reclaimed by the next `prune_content` (CV-7).
+pub fn purge(db: &mut Db, mount: &MountId, path: &str) -> Result<()> {
+    db.txn(|db| {
+        let m = require_mount(db, mount, true)?;
+        let found = resolve(db, &m.mount_point, path)?;
+        if lock_held(db, &found.node, mount)? {
+            return Err(FsError::LockHeld { node: found.node.0 });
+        }
+        refuse_occupied(db, &found.node, found.kind)?;
+        let parent = resolve_parent(db, &m.mount_point, path)?;
+        let removed = db.run(
+            ARCHIVE_PLACEMENT,
+            named_params! { ":parent": parent.container, ":node": found.node, ":name": parent.name },
+        )?;
+        if removed == 0 {
+            return Err(FsError::not_found(format!("node {} has no active placement", found.node)));
+        }
+        let placed: Option<i64> =
+            db.scalar(HAS_ACTIVE_PLACEMENT, named_params! { ":node": found.node })?;
+        if placed.unwrap_or(0) == 0 {
+            destroy(db, &found.node)?;
+        }
+        Ok(())
+    })
+}
+
+/// `purge`, naming the node itself: the way to destroy an entry that is
+/// already deleted and so has no path. On a node that is still placed it
+/// detaches every placement first. The node must belong to the mount's
+/// volume, and a volume root is refused.
+pub fn purge_by_id(db: &mut Db, mount: &MountId, node: &NodeId) -> Result<()> {
+    db.txn(|db| {
+        let m = require_mount(db, mount, true)?;
+        let row: Option<(Option<VolumeId>, NodeType)> =
+            db.one(GET_NODE, named_params! { ":node": node }, |r| {
+                Ok((r.get("volume_id")?, r.get("type")?))
+            })?;
+        let Some((volume, kind)) = row else {
+            return Err(FsError::not_found(format!("node {node} does not exist")));
+        };
+        if volume.as_ref() != Some(&m.volume) {
+            return Err(FsError::VolumeMismatch);
+        }
+        let roots: Vec<Option<NodeId>> =
+            db.all(LIST_VOLUMES, &[], |r| Ok(r.get("root_node_id")?))?;
+        if roots.iter().any(|r| r.as_ref() == Some(node)) {
+            return Err(FsError::unsupported("a volume root cannot be purged"));
+        }
+        if lock_held(db, node, mount)? {
+            return Err(FsError::LockHeld {
+                node: node.0.clone(),
+            });
+        }
+        refuse_occupied(db, node, kind)?;
+        db.run(ARCHIVE_PLACEMENTS_OF, named_params! { ":node": node })?;
+        destroy(db, node)
     })
 }
 
@@ -370,4 +434,26 @@ fn subtree_unlocked(db: &mut Db, root: &NodeId, mount: &MountId) -> Result<()> {
         Some(node) => Err(FsError::LockHeld { node: node.0 }),
         None => Ok(()),
     }
+}
+
+/// `not_empty` for a container that still has an active child.
+fn refuse_occupied(db: &mut Db, node: &NodeId, kind: NodeType) -> Result<()> {
+    if kind == NodeType::Container {
+        let has_children: Option<i64> =
+            db.scalar(CHECK_EMPTY, named_params! { ":container": node })?;
+        if has_children.unwrap_or(0) != 0 {
+            return Err(FsError::NotEmpty {
+                node: node.0.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Hard removal of a node with no active placement (inside the caller's
+/// transaction): its placement records, then the row; content cascades.
+fn destroy(db: &mut Db, node: &NodeId) -> Result<()> {
+    db.run(PURGE_EDGES_OF, named_params! { ":node": node })?;
+    db.run(PURGE_NODE, named_params! { ":node": node })?;
+    Ok(())
 }

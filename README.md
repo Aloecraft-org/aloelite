@@ -643,8 +643,8 @@ binary reads correctly in the other, plain and encrypted. The Rust CLI starts
 in 1.6 ms against Python's 173 ms, which is most of the difference for
 one-shot commands.
 
-Opening a file written by an older build migrates it to schema era 3 in
-place; a file it has touched is not readable by an era-2 build.
+Opening a file written by an older build migrates it to schema era 4 in
+place; a file it has touched is not readable by an era-3 build.
 
 ## Design Background
 

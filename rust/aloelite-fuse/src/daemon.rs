@@ -74,6 +74,15 @@ pub struct Options<'a> {
     pub chunk_size: Option<usize>,
     /// Let other UIDs reach the mount (consumer containers).
     pub allow_other: bool,
+    /// Set the volume's default content retention before mounting: a count,
+    /// or -1 for "all". `None` leaves the setting as it is.
+    pub retention: Option<i64>,
+    /// Set what a prune keeps of a deleted entry before mounting: a count,
+    /// 0 for nothing, -1 for everything. `None` leaves it as it is.
+    pub retention_on_delete: Option<i64>,
+    /// Prune the volume this often while mounted, which is what enforces
+    /// retention. `None` never prunes.
+    pub prune_every: Option<Duration>,
 }
 
 /// A running mount. Dropping it unmounts; [`Mount::unmount`] does the same
@@ -98,6 +107,7 @@ impl Mount {
         let mut db = aloelite_store::file::open(opts.file)?;
         let volume =
             find_or_create_volume(&mut db, opts.volume, opts.pin, opts.create, opts.chunk_size)?;
+        apply_retention(&mut db, &volume, opts.retention, opts.retention_on_delete)?;
         let mount = ops::mount(
             &mut db,
             &volume,
@@ -114,7 +124,7 @@ impl Mount {
         let inner = fs.inner.clone();
 
         let renew_stop = Arc::new(AtomicBool::new(false));
-        let renew = spawn_renew(inner.clone(), renew_stop.clone());
+        let renew = spawn_renew(inner.clone(), renew_stop.clone(), opts.prune_every);
 
         let mut cfg = fuser::Config::default();
         cfg.mount_options = vec![fuser::MountOption::FSName("aloefuse".to_owned())];
@@ -234,20 +244,51 @@ fn find_or_create_volume(
     Ok(ops::create_volume(db, Some(name), chunk_size, pin, EncMode::Convergent)?.id)
 }
 
-fn spawn_renew(inner: Arc<Mutex<Inner>>, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+/// Set the volume's retention settings a mount asked for. Each is a count,
+/// -1 for "all", or `None` to leave the setting as it is.
+fn apply_retention(
+    db: &mut aloelite_core::Db,
+    volume: &VolumeId,
+    retention: Option<i64>,
+    retention_on_delete: Option<i64>,
+) -> Result<(), DaemonError> {
+    if let Some(keep) = retention {
+        ops::set_default_retention(db, volume, (keep != -1).then_some(keep))?;
+    }
+    if let Some(keep) = retention_on_delete {
+        ops::set_retention_on_delete(db, volume, keep)?;
+    }
+    Ok(())
+}
+
+/// The daemon's housekeeping thread: renew the lease every [`RENEW_EVERY`]
+/// and, when asked, prune every `prune_every`. Both take the engine through
+/// the handlers' mutex, so neither runs inside a FUSE operation.
+fn spawn_renew(
+    inner: Arc<Mutex<Inner>>,
+    stop: Arc<AtomicBool>,
+    prune_every: Option<Duration>,
+) -> JoinHandle<()> {
+    const TICK: Duration = Duration::from_millis(200);
     thread::spawn(move || {
-        let mut waited = Duration::ZERO;
+        let mut since_renew = Duration::ZERO;
+        let mut since_prune = Duration::ZERO;
         while !stop.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(200));
-            waited += Duration::from_millis(200);
-            if waited < RENEW_EVERY {
-                continue;
+            thread::sleep(TICK);
+            since_renew += TICK;
+            since_prune += TICK;
+            if since_renew >= RENEW_EVERY {
+                since_renew = Duration::ZERO;
+                let _ = inner
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .renew(MOUNT_TTL_MS);
             }
-            waited = Duration::ZERO;
-            let _ = inner
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .renew(MOUNT_TTL_MS);
+            if prune_every.is_some_and(|every| since_prune >= every) {
+                since_prune = Duration::ZERO;
+                // a failed sweep (the file busy elsewhere) is retried next time
+                let _ = inner.lock().unwrap_or_else(|p| p.into_inner()).prune();
+            }
         }
     })
 }
@@ -304,6 +345,28 @@ mod tests {
         // and absent means the spec default
         let plain = find_or_create_volume(&mut db, "plain", None, true, None).unwrap();
         assert_eq!(db.chunk_size_of(&plain).unwrap(), DEFAULT_CHUNK_SIZE);
+
+        db.close().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mount_retention_settings_reach_the_volume() {
+        let dir = std::env::temp_dir().join(format!("aloelite-fuse-ret-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut db = aloelite_store::file::open(dir.join("r.fs")).unwrap();
+        let vid = find_or_create_volume(&mut db, "db", None, true, None).unwrap();
+        let settings = |db: &mut aloelite_core::Db| {
+            let v = ops::list_volumes(db).unwrap().remove(0);
+            (v.retention, v.retention_on_delete)
+        };
+
+        apply_retention(&mut db, &vid, None, None).unwrap();
+        assert_eq!(settings(&mut db), (None, 1), "not asked: left alone");
+        apply_retention(&mut db, &vid, Some(1), Some(0)).unwrap();
+        assert_eq!(settings(&mut db), (Some(1), 0));
+        apply_retention(&mut db, &vid, Some(-1), Some(-1)).unwrap();
+        assert_eq!(settings(&mut db), (None, -1), "\"all\" clears the default");
 
         db.close().unwrap();
         std::fs::remove_dir_all(&dir).ok();

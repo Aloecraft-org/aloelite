@@ -45,6 +45,16 @@ struct Mounted {
 
 impl Mounted {
     fn start(label: &str) -> Option<Mounted> {
+        Self::start_with(label, None, None, None)
+    }
+
+    /// `start`, with the volume's retention settings and a prune interval.
+    fn start_with(
+        label: &str,
+        retention: Option<i64>,
+        retention_on_delete: Option<i64>,
+        prune_every: Option<Duration>,
+    ) -> Option<Mounted> {
         if !Path::new("/dev/fuse").exists() {
             eprintln!("skip {label}: /dev/fuse not available");
             return None;
@@ -62,6 +72,9 @@ impl Mounted {
             create: true,
             chunk_size: None,
             allow_other: false,
+            retention,
+            retention_on_delete,
+            prune_every,
         };
         match Mount::spawn(&opts) {
             Ok(mount) => {
@@ -479,4 +492,40 @@ fn ts(ns: i64) -> libc::timespec {
         tv_sec: (ns / 1_000_000_000) as libc::time_t,
         tv_nsec: (ns % 1_000_000_000) as _,
     }
+}
+
+#[test]
+fn a_mount_that_prunes_enforces_the_volumes_retention() {
+    let Some(m) = Mounted::start_with("prune", Some(1), Some(0), Some(Duration::from_millis(400)))
+    else {
+        return;
+    };
+    for round in 0..4u8 {
+        std::fs::write(m.path("kept"), [b'a' + round; 16]).unwrap();
+    }
+    std::fs::write(m.path("gone"), b"deleted").unwrap();
+    std::fs::remove_file(m.path("gone")).unwrap();
+
+    // a second connection, as any other reader of the file would be
+    let file = m.root.join("test.fs");
+    let counts = || -> (i64, i64) {
+        let db = aloelite_store::file::open(&file).unwrap();
+        let got = db
+            .connection()
+            .query_row(
+                "SELECT (SELECT count(DISTINCT version) FROM content_version), \
+                        (SELECT count(*) FROM node WHERE type = 'entry')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        db.close().unwrap();
+        got
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && counts() != (1, 1) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(counts(), (1, 1), "(versions, entries) after a prune");
+    assert_eq!(std::fs::read(m.path("kept")).unwrap(), [b'd'; 16]);
 }

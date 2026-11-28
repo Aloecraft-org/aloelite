@@ -45,6 +45,7 @@ from .errors import (
     NotFound,
     ReadOnlyMount,
     Unsupported,
+    VolumeMismatch,
     WouldCycle,
 )
 from .models import (
@@ -304,6 +305,37 @@ def change_pin(db: Db, volume: VolumeId, old_pin: bytes, new_pin: bytes) -> None
 
 def list_volumes(db: Db) -> list[VolumeInfo]:
     return [VolumeInfo.from_row(r) for r in db.all("resolution.list_volumes")]
+
+
+def set_default_retention(db: Db, volume: VolumeId, keep: int | None) -> None:
+    """Set the volume's default content-retention policy (CV-6r1): keep the
+    last `keep` versions of every entry that has no policy of its own, the
+    committed one counted first. None clears the default, and such entries
+    keep every version again. An entry's own set_retention always wins.
+    Like every retention setting it changes nothing until the next
+    prune_content."""
+    if keep is not None and keep < 1:
+        raise ValueError("keep must be at least 1, or None for no default")
+    with db.txn():
+        if not db.rowcount(
+            "mutation.set_volume_retention_keep", {"volume": volume, "keep": keep}
+        ):
+            raise NotFound("no such volume", volume=volume)
+
+
+def set_retention_on_delete(db: Db, volume: VolumeId, keep: int) -> None:
+    """Set what a prune keeps of a DELETED entry (one with no active
+    placement left): -1 everything, 0 nothing, N its last N versions. The
+    default, 1, keeps the bytes it had when it was deleted. With 0 the next
+    prune removes the node itself, so nothing of it is recoverable; remove
+    still destroys nothing by itself, and purge is the immediate form."""
+    if keep < -1:
+        raise ValueError("keep must be -1 (everything), 0 (nothing) or a count")
+    with db.txn():
+        if not db.rowcount(
+            "mutation.set_volume_retention_on_delete", {"volume": volume, "keep": keep}
+        ):
+            raise NotFound("no such volume", volume=volume)
 
 
 def mount(
@@ -1104,6 +1136,66 @@ def remove(db: Db, mount: MountId, path: str) -> None:
             raise NotFound("node has no active placement", node=found.node)
 
 
+def purge(db: Db, mount: MountId, path: str) -> None:
+    """remove, then destroy: the node and all of its content are gone when
+    this returns, whatever retention_on_delete says. Takes what remove takes
+    and refuses what it refuses (a lock held elsewhere, a non-empty
+    container). A node still reachable through another placement (a
+    hardlink) only loses this one, exactly as with remove: there is still a
+    file. Pool chunks are reclaimed by the next prune_content (CV-7)."""
+    with db.txn():
+        m = _require_mount(db, mount, write=True)
+        found = resolve(db, m.mount_point, path)
+        if db.scalar(
+            "validation.check_lock_held", {"node": found.node, "mount": mount}
+        ):
+            raise LockHeld(node=found.node)
+        _refuse_occupied(db, found.node, found.type)
+        parent, name = resolve_parent(db, m.mount_point, path)
+        removed = db.rowcount(
+            "mutation.archive_placement",
+            {"parent": parent, "node": found.node, "name": name},
+        )
+        if not removed:
+            raise NotFound("node has no active placement", node=found.node)
+        if not db.scalar("validation.has_active_placement", {"node": found.node}):
+            _destroy(db, found.node)
+
+
+def purge_by_id(db: Db, mount: MountId, node: NodeId) -> None:
+    """purge, naming the node itself: the way to destroy an entry that is
+    already deleted and so has no path. On a node that is still placed it
+    detaches every placement first. The node must belong to the mount's
+    volume, and a volume root is refused."""
+    with db.txn():
+        m = _require_mount(db, mount, write=True)
+        row = db.one("resolution.get_node", {"node": node})
+        if row is None:
+            raise NotFound(node=node)
+        if row["volume_id"] != m.volume:
+            raise VolumeMismatch(node=node)
+        if any(v.root == node for v in list_volumes(db)):
+            raise Unsupported("a volume root cannot be purged", node=node)
+        if db.scalar("validation.check_lock_held", {"node": node, "mount": mount}):
+            raise LockHeld(node=node)
+        _refuse_occupied(db, node, NodeType(row["type"]))
+        db.rowcount("mutation.archive_placements_of", {"node": node})
+        _destroy(db, node)
+
+
+def _refuse_occupied(db: Db, node: NodeId, type_: NodeType) -> None:
+    if type_ is NodeType.CONTAINER:
+        if db.scalar("validation.check_empty", {"container": node}):
+            raise NotEmpty(node=node)
+
+
+def _destroy(db: Db, node: NodeId) -> None:
+    """Hard removal of a node with no active placement (inside the caller's
+    transaction): its placement records, then the row; content cascades."""
+    db.rowcount("mutation.purge_edges_of", {"node": node})
+    db.rowcount("mutation.purge_node", {"node": node})
+
+
 def remove_recursive(db: Db, mount: MountId, path: str) -> None:
     """Archive a whole active subtree in one statement (set-based)."""
     with db.txn():
@@ -1557,6 +1649,9 @@ def open_write(
 def prune(db: Db, volume: VolumeId | None = None) -> PruneReport:
     with db.txn():
         locks = db.rowcount("maintenance.prune_locks")
+        # retention_on_delete = 0: deleted nodes lose their placement records
+        # here, which makes them volatile for the sweep on the next line
+        db.rowcount("maintenance.prune_deleted_edges", {"volume": volume})
         nodes = db.rowcount("maintenance.prune_nodes", {"volume": volume})
     return PruneReport(nodes_pruned=nodes, locks_pruned=locks)
 
@@ -1659,6 +1754,8 @@ __all__ = [
     "create_volume",
     "change_pin",
     "list_volumes",
+    "set_default_retention",
+    "set_retention_on_delete",
     "mount",
     "unmount",
     "renew_mount",
@@ -1681,6 +1778,8 @@ __all__ = [
     "set_mtime",
     "move",
     "remove",
+    "purge",
+    "purge_by_id",
     "remove_recursive",
     "copy",
     "pack",

@@ -30,6 +30,12 @@ OPTIONS:
         --chunk-size SIZE  chunk size of the volume --create makes: bytes,
                         or with a K or M suffix (64K). Default 1M. Fixed for
                         the life of the volume
+        --retention KEEP  set the volume's default retention before mounting:
+                        the last KEEP versions of each file, or all
+        --retention-on-delete KEEP  set what a prune keeps of a deleted file:
+                        its last KEEP versions, 0 for nothing, or all
+        --prune-every SECONDS  prune the volume this often while mounted,
+                        which is what enforces retention. Default 0: never
         --ro            mount read-only
         --allow-other   let other UIDs reach the mount
         --pin SECRET    PIN for an encrypted volume (prefer --pin-file/-env)
@@ -46,7 +52,7 @@ pub fn main() -> i32 {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let parsed = match Parsed::from_args(&args) {
-        Ok(Outcome::Run(p)) => p,
+        Ok(Outcome::Run(p)) => *p,
         Ok(Outcome::Help) => {
             print!("{USAGE}");
             return 0;
@@ -90,6 +96,12 @@ pub fn main() -> i32 {
         create: parsed.create,
         chunk_size: parsed.chunk_size,
         allow_other: parsed.allow_other,
+        retention: parsed.retention,
+        retention_on_delete: parsed.retention_on_delete,
+        prune_every: parsed
+            .prune_every
+            .filter(|s| *s > 0)
+            .map(std::time::Duration::from_secs),
     };
 
     if parsed.debug {
@@ -123,7 +135,7 @@ pub fn main() -> i32 {
 
 /// What parsing produced.
 pub enum Outcome {
-    Run(Parsed),
+    Run(Box<Parsed>),
     Help,
     Version,
 }
@@ -136,6 +148,11 @@ pub struct Parsed {
     pub mountpoint: String,
     pub create: bool,
     pub chunk_size: Option<usize>,
+    /// `--retention` / `--retention-on-delete`: a count, -1 for `all`.
+    pub retention: Option<i64>,
+    pub retention_on_delete: Option<i64>,
+    /// `--prune-every`, in seconds; absent or 0 never prunes.
+    pub prune_every: Option<u64>,
     pub ro: bool,
     pub allow_other: bool,
     pub debug: bool,
@@ -175,6 +192,20 @@ impl Parsed {
                     })?;
                     p.chunk_size = Some(size);
                 }
+                "--retention" => {
+                    p.retention = Some(keep_flag("--retention", &value("--retention")?, 1)?);
+                }
+                "--retention-on-delete" => {
+                    let text = value("--retention-on-delete")?;
+                    p.retention_on_delete = Some(keep_flag("--retention-on-delete", &text, 0)?);
+                }
+                "--prune-every" => {
+                    let text = value("--prune-every")?;
+                    let secs = text.parse::<u64>().map_err(|_| {
+                        format!("--prune-every: {text:?} is not a number of seconds")
+                    })?;
+                    p.prune_every = Some(secs);
+                }
                 "--ro" => p.ro = true,
                 "--allow-other" => p.allow_other = true,
                 "--debug" => p.debug = true,
@@ -201,7 +232,17 @@ impl Parsed {
         if p.chunk_size.is_some() && !p.create {
             return Err("--chunk-size only applies with --create".to_owned());
         }
-        Ok(Outcome::Run(p))
+        let changes_volume = p.retention.is_some()
+            || p.retention_on_delete.is_some()
+            || p.prune_every.is_some_and(|s| s > 0);
+        if p.ro && changes_volume {
+            return Err(
+                "--retention, --retention-on-delete and --prune-every change the volume \
+                 and cannot be used with --ro"
+                    .to_owned(),
+            );
+        }
+        Ok(Outcome::Run(Box::new(p)))
     }
 
     /// The PIN bytes, from the three sources in precedence order.
@@ -254,13 +295,26 @@ impl Parsed {
     }
 }
 
+/// A `--retention*` value: a count no smaller than `least`, or `all` as -1.
+fn keep_flag(flag: &str, text: &str, least: i64) -> Result<i64, String> {
+    match aloelite_core::types::parse_keep(text) {
+        None => Err(format!(
+            "{flag}: {text:?} is not a count: use a number, or 'all'"
+        )),
+        Some(keep) if keep > -1 && keep < least => {
+            Err(format!("{flag}: must be at least {least}, or 'all'"))
+        }
+        Some(keep) => Ok(keep),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Parsed, String> {
         match Parsed::from_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())? {
-            Outcome::Run(p) => Ok(p),
+            Outcome::Run(p) => Ok(*p),
             _ => Err("not a run".to_owned()),
         }
     }
@@ -291,6 +345,42 @@ mod tests {
         assert_eq!(p.volume.as_deref(), Some("data"));
         assert!(p.create && p.ro && p.allow_other);
         assert_eq!(p.pin_env.as_deref(), Some("P"));
+    }
+
+    #[test]
+    fn retention_flags_parse_and_refuse_a_read_only_mount() {
+        let p = parse(&[
+            "-f",
+            "v.fs",
+            "--retention",
+            "1",
+            "--retention-on-delete",
+            "0",
+            "--prune-every",
+            "30",
+            "/m",
+        ])
+        .unwrap();
+        assert_eq!(
+            (p.retention, p.retention_on_delete, p.prune_every),
+            (Some(1), Some(0), Some(30))
+        );
+        let p = parse(&["-f", "v.fs", "--retention", "ALL", "/m"]).unwrap();
+        assert_eq!(p.retention, Some(-1));
+        for bad in [
+            &["--retention", "0"][..],
+            &["--retention", "x"],
+            &["--retention-on-delete", "-1"],
+            &["--prune-every", "soon"],
+            &["--ro", "--retention", "1"],
+            &["--ro", "--prune-every", "5"],
+        ] {
+            let mut args = vec!["-f", "v.fs"];
+            args.extend_from_slice(bad);
+            args.push("/m");
+            assert!(parse(&args).is_err(), "{bad:?}");
+        }
+        assert!(parse(&["-f", "v.fs", "--ro", "--prune-every", "0", "/m"]).is_ok());
     }
 
     #[test]

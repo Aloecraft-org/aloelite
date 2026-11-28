@@ -133,7 +133,14 @@ CREATE TABLE IF NOT EXISTS volume (
   enc_mode     TEXT    NOT NULL DEFAULT 'none'
                        CHECK (enc_mode IN ('none', 'convergent', 'random')),  -- ENC-3
   wrapped_key  BLOB,                                                    -- ENC-2: K_v sealed under K_u (NULL if enc_mode='none')
-  wrap_nonce   BLOB                                                     -- ENC-2: AEAD nonce for wrapped_key
+  wrap_nonce   BLOB,                                                    -- ENC-2: AEAD nonce for wrapped_key
+  -- era 4. CV-6r1: the volume's DEFAULT keep-last-N, used by every entry whose
+  -- own content.retention_keep is NULL. NULL here = no default (keep all).
+  retention_keep      INTEGER CHECK (retention_keep IS NULL OR retention_keep >= 1),
+  -- era 4. What a prune keeps of an entry with NO active placement (deleted):
+  --   -1 = everything, 0 = nothing (the node itself is purged), N = the last N
+  --   versions counting the committed one. 1, the default, is a recycle bin.
+  retention_on_delete INTEGER NOT NULL DEFAULT 1 CHECK (retention_on_delete >= -1)
 ) STRICT;
 
 -- Placement. EDGE-1..6. volume_id is kept on the edge as an authoritative copy
@@ -474,39 +481,71 @@ CREATE VIEW IF NOT EXISTS detached_node AS
     AND NOT EXISTS (SELECT 1 FROM active_edge ae WHERE ae.to_id = n.node_id)
     AND NOT EXISTS (SELECT 1 FROM volume v WHERE v.root_node_id = n.node_id);
 
+-- CV-6r1: the keep-last-N in force for each node that has content, counting
+-- the committed version as the first. NULL = keep every version.
+--   * a PLACED node (an active placement, or a volume root): its own
+--     content.retention_keep, else its volume's default, else NULL;
+--   * a DELETED node (no active placement): the volume's retention_on_delete,
+--     whatever the node's own policy was. -1 reads as NULL; 0 keeps nothing,
+--     the committed version included, and `purgeable_node` then names the node
+--     itself for the node sweep.
+CREATE VIEW IF NOT EXISTS effective_retention AS
+  SELECT
+    c.node_id,
+    c.version AS committed,
+    CASE
+      WHEN EXISTS (SELECT 1 FROM active_edge ae WHERE ae.to_id = c.node_id)
+        OR EXISTS (SELECT 1 FROM volume r WHERE r.root_node_id = c.node_id)
+        THEN max(coalesce(c.retention_keep, v.retention_keep), 1)  -- NULL stays NULL
+      ELSE nullif(v.retention_on_delete, -1)
+    END AS keep
+  FROM content c
+  JOIN node   n ON n.node_id   = c.node_id
+  JOIN volume v ON v.volume_id = n.volume_id;
+
 -- CV-7: which (content_id, version) pairs survive a content prune. Resolved
--- BEFORE any chunk is collected. Rules:
---   * the committed version is ALWAYS retained;
---   * superseded versions BELOW committed are retained per the node's policy:
---       retention_keep IS NULL  -> keep all of them;
---       retention_keep = N      -> keep the (N-1) highest below committed
---                                  (committed itself is the Nth);
+-- BEFORE any chunk is collected. With `keep` from effective_retention:
+--   * keep IS NULL -> every version at or below committed is retained;
+--   * keep = N     -> the N highest at or below committed (committed is the
+--                     first), so N = 1 is the current bytes alone;
+--   * keep = 0     -> nothing: only a deleted node on a volume whose
+--                     retention_on_delete is 0 gets here;
+--   * a PLACED node's committed version is retained whatever its policy says
+--     (effective_retention floors its keep at 1): a policy never removes
+--     current content;
 --   * versions ABOVE committed are NEVER retained — they are incomplete/aborted
 --     writes (staged chunks whose pointer swap never happened), so this view is
 --     also what makes crash-orphans collectable.
 CREATE VIEW IF NOT EXISTS retained_version AS
-  WITH below AS (
+  SELECT content_id, version
+  FROM (
     SELECT
       cv.content_id,
       cv.version,
-      c.retention_keep AS keep,
+      er.keep,
       row_number() OVER (
         PARTITION BY cv.content_id ORDER BY cv.version DESC
       ) AS rnk
     FROM (SELECT DISTINCT content_id, version FROM content_version) cv
-    JOIN content c ON c.node_id = cv.content_id
-    WHERE cv.version < c.version          -- superseded history, below committed
+    JOIN effective_retention er ON er.node_id = cv.content_id
+    WHERE cv.version <= er.committed
   )
-  -- committed version is ALWAYS retained
-  SELECT DISTINCT cv2.content_id, cv2.version
-  FROM content_version cv2
-  JOIN content c2 ON c2.node_id = cv2.content_id
-  WHERE cv2.version = c2.version
-  UNION
-  -- superseded versions kept per the node's policy (NULL = keep all)
-  SELECT content_id, version
-  FROM below
-  WHERE keep IS NULL OR rnk <= max(keep - 1, 0);
+  WHERE keep IS NULL OR rnk <= keep;
+
+-- What the node sweep may purge beyond volatile_node: a deleted node on a
+-- volume that keeps nothing on delete (retention_on_delete = 0). It must have
+-- no active placement of its own AND no active placement beneath it, so a
+-- container is only purged once everything under it has gone first.
+CREATE VIEW IF NOT EXISTS purgeable_node AS
+  SELECT d.node_id
+  FROM detached_node d
+  JOIN node   n ON n.node_id   = d.node_id
+  JOIN volume v ON v.volume_id = n.volume_id
+  WHERE v.retention_on_delete = 0
+    AND NOT EXISTS (SELECT 1 FROM active_edge ae WHERE ae.from_id = d.node_id)
+    -- a writer still holding the node open keeps it, as it keeps its staging
+    -- rows in prune_content_versions
+    AND d.node_id NOT IN (SELECT node_id FROM valid_lock);
 
 CREATE VIEW IF NOT EXISTS valid_mount AS
   SELECT * FROM mount

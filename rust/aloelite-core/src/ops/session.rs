@@ -10,7 +10,7 @@ use crate::records::{MountInfo, VolumeInfo};
 use crate::resolve::resolve;
 use crate::templates::mutation::{
     CREATE_MOUNT, CREATE_NODE, CREATE_VOLUME, LINK_ROOT, RENEW_MOUNT, SET_MOUNT_STATE,
-    UPDATE_VOLUME_CRYPTO,
+    SET_VOLUME_RETENTION_KEEP, SET_VOLUME_RETENTION_ON_DELETE, UPDATE_VOLUME_CRYPTO,
 };
 use crate::templates::resolution::{
     GET_MOUNT, GET_VOLUME, GET_VOLUME_CRYPTO, LIST_MOUNTS, LIST_VOLUMES,
@@ -162,6 +162,53 @@ pub fn change_pin(db: &mut Db, volume: &VolumeId, old_pin: &[u8], new_pin: &[u8]
 
 pub fn list_volumes(db: &mut Db) -> Result<Vec<VolumeInfo>> {
     db.all(LIST_VOLUMES, &[], VolumeInfo::from_row)
+}
+
+/// Set the volume's default content-retention policy (CV-6r1): keep the last
+/// `keep` versions of every entry that has no policy of its own, the
+/// committed one counted first. `None` clears the default, and such entries
+/// keep every version again. An entry's own `set_retention` always wins.
+/// Like every retention setting it changes nothing until the next
+/// `prune_content`.
+pub fn set_default_retention(db: &mut Db, volume: &VolumeId, keep: Option<i64>) -> Result<()> {
+    if keep.is_some_and(|k| k < 1) {
+        return Err(FsError::usage(
+            "keep must be at least 1, or None for no default",
+        ));
+    }
+    db.txn(|db| {
+        let hit = db.run(
+            SET_VOLUME_RETENTION_KEEP,
+            named_params! { ":volume": volume, ":keep": keep },
+        )?;
+        if hit == 0 {
+            return Err(FsError::not_found(format!("no such volume {volume}")));
+        }
+        Ok(())
+    })
+}
+
+/// Set what a prune keeps of a DELETED entry (one with no active placement
+/// left): -1 everything, 0 nothing, N its last N versions. The default, 1,
+/// keeps the bytes it had when it was deleted. With 0 the next prune removes
+/// the node itself, so nothing of it is recoverable; `remove` still destroys
+/// nothing by itself, and `purge` is the immediate form.
+pub fn set_retention_on_delete(db: &mut Db, volume: &VolumeId, keep: i64) -> Result<()> {
+    if keep < -1 {
+        return Err(FsError::usage(
+            "keep must be -1 (everything), 0 (nothing) or a count",
+        ));
+    }
+    db.txn(|db| {
+        let hit = db.run(
+            SET_VOLUME_RETENTION_ON_DELETE,
+            named_params! { ":volume": volume, ":keep": keep },
+        )?;
+        if hit == 0 {
+            return Err(FsError::not_found(format!("no such volume {volume}")));
+        }
+        Ok(())
+    })
 }
 
 /// Open a mount on a volume, anchored at `opts.at`. Returns the durable id.

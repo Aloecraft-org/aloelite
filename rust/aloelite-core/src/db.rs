@@ -54,7 +54,7 @@ pub const MIN_SQLITE: (u32, u32) = (3, 45);
 /// from the current schema on open, after any table-shape migration in
 /// [`MIGRATIONS`]. A file stamped NEWER is refused rather than half-read.
 /// Bump whenever `schema.sql` changes any view, trigger, or table.
-pub const SCHEMA_ERA: i64 = 3;
+pub const SCHEMA_ERA: i64 = 4;
 
 /// Second writers wait this long before failing (multi-connection model:
 /// a mount is a row, not a connection).
@@ -68,7 +68,11 @@ const NS_BOUND: i64 = 1_000_000_000_000_000;
 /// Table-shape migrations, keyed by the era they upgrade a file TO. Each runs
 /// before the derived-object rebuild and must be crash-idempotent: a failure
 /// between migration and stamp reruns it.
-const MIGRATIONS: &[(i64, Migration)] = &[(2, migrate_to_era2), (3, migrate_to_era3)];
+const MIGRATIONS: &[(i64, Migration)] = &[
+    (2, migrate_to_era2),
+    (3, migrate_to_era3),
+    (4, migrate_to_era4),
+];
 
 /// One table-shape upgrade step, run against the raw connection.
 type Migration = fn(&Connection) -> rusqlite::Result<()>;
@@ -628,6 +632,30 @@ fn migrate_to_era2(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Era 3 → 4. Two additive volume columns, each guarded so a crashed run
+/// reruns. Existing volumes take the column defaults: no default retention
+/// (as before), and `retention_on_delete = 1`, so the next prune keeps a
+/// deleted entry's latest version and drops the history beneath it.
+fn migrate_to_era4(conn: &Connection) -> rusqlite::Result<()> {
+    for (column, decl) in [
+        (
+            "retention_keep",
+            "INTEGER CHECK (retention_keep IS NULL OR retention_keep >= 1)",
+        ),
+        (
+            "retention_on_delete",
+            "INTEGER NOT NULL DEFAULT 1 CHECK (retention_on_delete >= -1)",
+        ),
+    ] {
+        if !column_exists(conn, "volume", column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE \"volume\" ADD COLUMN \"{column}\" {decl}"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 /// Era 2 → 3. Materialise `edge.name` for every placement that inherited it.
 ///
 /// In era 2 a null `edge.name` meant "use the node's name", so every lookup
@@ -778,6 +806,9 @@ mod tests {
             .unwrap();
         assert_eq!(created, 1_700_000_000_000_000_000);
         assert!(column_exists(db.connection(), "edge", "name").unwrap());
+        // era 4: both volume retention columns, at their defaults
+        assert!(column_exists(db.connection(), "volume", "retention_keep").unwrap());
+        assert!(column_exists(db.connection(), "volume", "retention_on_delete").unwrap());
         let stale: Option<()> = db
             .connection()
             .query_row(
