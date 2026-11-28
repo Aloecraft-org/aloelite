@@ -9,8 +9,8 @@ use crate::db::Db;
 use crate::errors::Result;
 use crate::records::{Anomaly, ContentPruneReport, PruneReport, VerifyReport};
 use crate::templates::maintenance::{
-    HEALTH_CHECK, PRUNE_CONTENT_CHUNKS, PRUNE_CONTENT_VERSIONS, PRUNE_DELETED_EDGES, PRUNE_LOCKS,
-    PRUNE_NODES,
+    HEALTH_CHECK, PRUNE_CONTENT_CHUNKS, PRUNE_CONTENT_COMMITS, PRUNE_CONTENT_VERSIONS,
+    PRUNE_DELETED_EDGES, PRUNE_LOCKS, PRUNE_NODES,
 };
 use crate::templates::resolution::{GET_CHUNK, VERIFY_MANIFEST};
 use crate::types::{MountId, VolumeId};
@@ -45,6 +45,7 @@ pub fn prune(db: &mut Db, volume: Option<&VolumeId>) -> Result<PruneReport> {
 pub fn prune_content(db: &mut Db, volume: Option<&VolumeId>) -> Result<ContentPruneReport> {
     db.txn(|db| {
         let versions = db.run(PRUNE_CONTENT_VERSIONS, named_params! { ":volume": volume })?;
+        db.run(PRUNE_CONTENT_COMMITS, named_params! { ":volume": volume })?;
         let chunks = db.run(PRUNE_CONTENT_CHUNKS, &[])?;
         Ok(ContentPruneReport {
             versions_pruned: versions,
@@ -66,8 +67,9 @@ pub fn verify(db: &mut Db, mount: &MountId, deep: bool) -> Result<VerifyReport> 
         node: String,
         version: i64,
         size: i64,
-        chunk_index: i64,
-        chunk_hash: String,
+        chunks: Option<i64>,
+        chunk_index: Option<i64>,
+        chunk_hash: Option<String>,
         chunk_length: Option<i64>,
         present: bool,
     }
@@ -80,6 +82,7 @@ pub fn verify(db: &mut Db, mount: &MountId, deep: bool) -> Result<VerifyReport> 
                 node: r.get("node_id")?,
                 version: r.get("version")?,
                 size: r.get("size")?,
+                chunks: r.get("chunks")?,
                 chunk_index: r.get("chunk_index")?,
                 chunk_hash: r.get("chunk_hash")?,
                 chunk_length: r.get("chunk_length")?,
@@ -106,27 +109,37 @@ pub fn verify(db: &mut Db, mount: &MountId, deep: bool) -> Result<VerifyReport> 
     let mut seen: Vec<String> = Vec::new();
     let mut seen_set: HashSet<String> = HashSet::new();
     for key in &order {
-        let refs = &groups[key];
+        let all_refs = &groups[key];
         let (node, version) = key;
-        let idxs: Vec<i64> = refs.iter().map(|r| r.chunk_index).collect();
-        if idxs.iter().copied().ne(0..idxs.len() as i64) {
-            problems.push(format!("gap node={node} v={version} indexes={idxs:?}"));
+        // one row with a NULL chunk_index = a committed version with no
+        // manifest row at all (legitimate only when it has zero chunks)
+        let refs: Vec<(i64, &str, &Ref)> = all_refs
+            .iter()
+            .filter_map(|r| Some((r.chunk_index?, r.chunk_hash.as_deref()?, *r)))
+            .collect();
+        let idxs: Vec<i64> = refs.iter().map(|(i, _, _)| *i).collect();
+        match all_refs[0].chunks {
+            None => problems.push(format!("no-commit-record node={node} v={version}")),
+            Some(chunks) if idxs.iter().copied().ne(0..chunks) => {
+                problems.push(format!("gap node={node} v={version} indexes={idxs:?}"));
+            }
+            Some(_) => {}
         }
         let mut total = 0i64;
-        for r in refs {
+        for (_, hash, r) in &refs {
             if !r.present {
-                problems.push(format!("missing-chunk node={node} hash={}", r.chunk_hash));
+                problems.push(format!("missing-chunk node={node} hash={hash}"));
                 continue;
             }
             total += r.chunk_length.unwrap_or(0);
-            if seen_set.insert(r.chunk_hash.clone()) {
-                seen.push(r.chunk_hash.clone());
+            if seen_set.insert((*hash).to_string()) {
+                seen.push((*hash).to_string());
             }
         }
-        if total != refs[0].size {
+        if total != all_refs[0].size {
             problems.push(format!(
                 "size-mismatch node={node} manifest={} chunks={total}",
-                refs[0].size
+                all_refs[0].size
             ));
         }
     }
@@ -228,10 +241,7 @@ mod tests {
     fn versions(db: &Db, node: &NodeId) -> Vec<i64> {
         let mut stmt = db
             .connection()
-            .prepare(
-                "SELECT DISTINCT version FROM content_version WHERE content_id = ?1 \
-                 ORDER BY version",
-            )
+            .prepare("SELECT version FROM content_commit WHERE content_id = ?1 ORDER BY version")
             .unwrap();
         stmt.query_map([&node.0], |r| r.get(0))
             .unwrap()
@@ -541,5 +551,248 @@ mod tests {
             ops::purge_by_id(&mut db, &m, &theirs),
             Err(FsError::VolumeMismatch)
         ));
+    }
+    // -- delta manifests (CV-4r1) -------------------------------------------
+
+    /// The positions `version` itself wrote a manifest row for.
+    fn rows(db: &Db, node: &NodeId, version: i64) -> Vec<i64> {
+        let mut stmt = db
+            .connection()
+            .prepare(
+                "SELECT chunk_index FROM content_version \
+                 WHERE content_id = ?1 AND version = ?2 ORDER BY chunk_index",
+            )
+            .unwrap();
+        stmt.query_map(rusqlite::params![&node.0, version], |r| r.get(0))
+            .unwrap()
+            .map(|v| v.unwrap())
+            .collect()
+    }
+
+    fn entry(db: &mut Db, m: &MountId, path: &str, data: &[u8]) -> NodeId {
+        ops::create_entry(db, m, path, Some(data), crate::types::Ownership::NONE).unwrap()
+    }
+
+    fn clean(db: &mut Db, m: &MountId) {
+        let report = ops::verify(db, m, false).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+    }
+
+    #[test]
+    fn a_version_writes_rows_only_for_the_positions_it_changes() {
+        let (mut db, _, m) = rig();
+        let f = entry(&mut db, &m, "/f", b"aaaabbbbccccdd");
+        assert_eq!(rows(&db, &f, 1), [0, 1, 2, 3]);
+        ops::append(&mut db, &m, "/f", b"EEEE").unwrap();
+        assert_eq!(rows(&db, &f, 2), [3, 4]);
+        ops::truncate(&mut db, &m, "/f", 8).unwrap(); // aligned: no row at all
+        assert_eq!(rows(&db, &f, 3), [0i64; 0]);
+        ops::truncate(&mut db, &m, "/f", 6).unwrap(); // the boundary chunk
+        assert_eq!(rows(&db, &f, 4), [1]);
+        ops::write_range(&mut db, &m, "/f", 1, b"Z").unwrap();
+        assert_eq!(rows(&db, &f, 5), [0]);
+        let mut w =
+            ops::open_write(&mut db, &m, "/f", crate::types::WriteMode::Append, None).unwrap();
+        w.write(&mut db, b"XXXXXXYY").unwrap();
+        w.close(&mut db).unwrap();
+        assert_eq!(rows(&db, &f, 6), [1, 2, 3]);
+        assert_eq!(ops::read_all(&mut db, &m, "/f").unwrap(), b"aZaabbXXXXXXYY");
+        clean(&mut db, &m);
+    }
+
+    #[test]
+    fn prune_keeps_the_rows_the_floor_still_reads() {
+        let (mut db, _, m) = rig();
+        let f = entry(&mut db, &m, "/f", b"aaaabbbbccccdddd"); // v1
+        ops::write_range(&mut db, &m, "/f", 4, b"BBBB").unwrap(); // v2: position 1
+        ops::write_range(&mut db, &m, "/f", 4, b"bbBB").unwrap(); // v3: position 1
+        ops::truncate(&mut db, &m, "/f", 12).unwrap(); // v4: no rows
+        ops::set_retention(&mut db, &m, "/f", Some(2)).unwrap(); // keeps v4 and v3
+
+        // v1's and v2's rows at position 1 are shadowed by v3's; the rest of
+        // v1 is still read by v3, the floor, which is four chunks long
+        assert_eq!(
+            ops::prune_content(&mut db, None).unwrap().versions_pruned,
+            2
+        );
+        assert_eq!(versions(&db, &f), [3, 4]);
+        assert_eq!(rows(&db, &f, 1), [0, 2, 3]);
+        assert_eq!(rows(&db, &f, 2), [0i64; 0]);
+        assert_eq!(
+            ops::prune_content(&mut db, None).unwrap().versions_pruned,
+            0
+        );
+
+        // the floor moves up to v4: position 3 is past its end
+        ops::set_retention(&mut db, &m, "/f", Some(1)).unwrap();
+        assert_eq!(
+            ops::prune_content(&mut db, None).unwrap().versions_pruned,
+            1
+        );
+        assert_eq!(versions(&db, &f), [4]);
+        assert_eq!(rows(&db, &f, 1), [0, 2]);
+        assert_eq!(rows(&db, &f, 3), [1]);
+        assert_eq!(ops::read_all(&mut db, &m, "/f").unwrap(), b"aaaabbBBcccc");
+        clean(&mut db, &m);
+    }
+
+    #[test]
+    fn an_abandoned_stream_is_staged_out_of_reach_and_pruned() {
+        let (mut db, _, m) = rig();
+        let f = entry(&mut db, &m, "/f", b"aaaabbbbcccc");
+        let mut w =
+            ops::open_write(&mut db, &m, "/f", crate::types::WriteMode::Truncate, None).unwrap();
+        w.write(&mut db, b"XXXXYYYYZZZZ").unwrap(); // full chunks staged
+        let staged: i64 = db
+            .connection()
+            .query_row(
+                "SELECT min(version) FROM content_version WHERE content_id = ?1 AND version > 1",
+                [&f.0],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(staged > 1 << 62);
+        w.abort(&mut db).unwrap();
+        ops::write_range(&mut db, &m, "/f", 0, b"N").unwrap(); // v2: position 0 only
+        assert_eq!(ops::read_all(&mut db, &m, "/f").unwrap(), b"Naaabbbbcccc");
+        ops::prune_content(&mut db, None).unwrap();
+        assert_eq!(rows(&db, &f, staged), [0i64; 0]);
+        assert_eq!(ops::read_all(&mut db, &m, "/f").unwrap(), b"Naaabbbbcccc");
+    }
+
+    #[test]
+    fn an_append_stream_pins_its_prefix_when_the_base_moves() {
+        let (mut db, _, m) = rig();
+        entry(&mut db, &m, "/f", b"aaaabbbbcc");
+        let mut w =
+            ops::open_write(&mut db, &m, "/f", crate::types::WriteMode::Append, None).unwrap();
+        w.write(&mut db, b"DDEEEE").unwrap();
+        ops::write_all(&mut db, &m, "/f", &[b'z'; 20]).unwrap(); // same mount, mid-stream
+        w.close(&mut db).unwrap();
+        assert_eq!(
+            ops::read_all(&mut db, &m, "/f").unwrap(),
+            b"aaaabbbbccDDEEEE"
+        );
+        clean(&mut db, &m);
+    }
+
+    #[test]
+    fn random_writes_and_prunes_match_a_plain_buffer() {
+        let (mut db, _, m) = rig();
+        let mut seed = 11u64;
+        let mut next = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % bound
+        };
+        let mut reference = b"seed".to_vec();
+        entry(&mut db, &m, "/f", &reference);
+        for step in 0..400 {
+            let op = next(6);
+            let len = next(10) as usize + 1;
+            let data: Vec<u8> = (0..len).map(|_| next(255) as u8 + 1).collect();
+            match op {
+                0..=2 => {
+                    let off = next(reference.len() as u64 + 6) as usize;
+                    if off + len > reference.len() {
+                        reference.resize(off + len, 0);
+                    }
+                    reference[off..off + len].copy_from_slice(&data);
+                    ops::write_range(&mut db, &m, "/f", off as u64, &data).unwrap();
+                }
+                3 => {
+                    reference.extend_from_slice(&data);
+                    ops::append(&mut db, &m, "/f", &data).unwrap();
+                }
+                4 => {
+                    let size = next(reference.len() as u64 + 9) as usize;
+                    reference.resize(size, 0);
+                    ops::truncate(&mut db, &m, "/f", size as u64).unwrap();
+                }
+                _ => {
+                    let append = next(2) == 0;
+                    let mode = if append {
+                        crate::types::WriteMode::Append
+                    } else {
+                        reference.clear();
+                        crate::types::WriteMode::Truncate
+                    };
+                    let mut w = ops::open_write(&mut db, &m, "/f", mode, None).unwrap();
+                    w.write(&mut db, &data).unwrap();
+                    w.close(&mut db).unwrap();
+                    reference.extend_from_slice(&data);
+                }
+            }
+            assert_eq!(
+                ops::read_all(&mut db, &m, "/f").unwrap(),
+                reference,
+                "step {step}"
+            );
+            if step % 7 == 0 {
+                let keep = [None, Some(1), Some(1), Some(2), Some(3)][next(5) as usize];
+                ops::set_retention(&mut db, &m, "/f", keep).unwrap();
+                ops::prune_content(&mut db, None).unwrap();
+                assert_eq!(
+                    ops::read_all(&mut db, &m, "/f").unwrap(),
+                    reference,
+                    "prune {step}"
+                );
+                clean(&mut db, &m);
+            }
+        }
+    }
+
+    #[test]
+    fn an_era4_file_gains_commit_records_and_reads_as_before() {
+        let (mut db, vol, m) = rig();
+        let f = entry(&mut db, &m, "/f", b"0000aa");
+        ops::write_all(&mut db, &m, "/f", b"1111bbbbc").unwrap();
+        let cut = entry(&mut db, &m, "/cut", b"xxxx");
+        ops::truncate(&mut db, &m, "/cut", 0).unwrap(); // committed at 2, no chunks
+        // an era-4 writer that died mid-stream left rows at committed + 1
+        db.connection()
+            .execute(
+                "INSERT INTO content_version (content_id, version, chunk_index, chunk_hash) \
+                 SELECT content_id, 3, chunk_index, chunk_hash FROM content_version \
+                 WHERE content_id = ?1 AND version = 1",
+                [&f.0],
+            )
+            .unwrap();
+        let commits = |db: &Db, node: &NodeId| -> Vec<(i64, i64, i64)> {
+            let mut stmt = db
+                .connection()
+                .prepare(
+                    "SELECT version, size, chunks FROM content_commit \
+                     WHERE content_id = ?1 ORDER BY version",
+                )
+                .unwrap();
+            stmt.query_map([&node.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(|v| v.unwrap())
+                .collect()
+        };
+        for _ in 0..2 {
+            // the second pass is the crash-rerun: stamp wound back
+            db.connection()
+                .execute_batch(
+                    "DROP TABLE content_commit; DROP INDEX content_version_position; \
+                     PRAGMA user_version = 4;",
+                )
+                .unwrap();
+            crate::db::install_schema(db.connection()).unwrap();
+            assert_eq!(commits(&db, &f), [(1, 6, 2), (2, 9, 3)]);
+            assert_eq!(commits(&db, &cut), [(1, 4, 1), (2, 0, 0)]);
+            assert_eq!(rows(&db, &f, 3), [0i64; 0]);
+            assert_eq!(ops::read_all(&mut db, &m, "/f").unwrap(), b"1111bbbbc");
+            assert_eq!(ops::read_all(&mut db, &m, "/cut").unwrap(), b"");
+            clean(&mut db, &m);
+        }
+        ops::write_range(&mut db, &m, "/f", 5, b"Z").unwrap(); // one row, not three
+        assert_eq!(rows(&db, &f, 3), [1]);
+        ops::set_default_retention(&mut db, &vol, Some(1)).unwrap();
+        ops::prune_content(&mut db, None).unwrap();
+        assert_eq!(ops::read_all(&mut db, &m, "/f").unwrap(), b"1111bZbbc");
+        clean(&mut db, &m);
     }
 }

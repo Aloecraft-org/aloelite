@@ -309,3 +309,122 @@ scenarios:
       - op: read_all
         args: {path: /b.bin}
         expect: {utf8: "shared payload"}
+
+  # CV-4r1: a version records only the positions it changes and takes the
+  # rest from the version beneath it. None of that is visible through the
+  # API, so these pin the ways it could become visible.
+  - scenario: shrink-then-grow-never-brings-back-old-bytes
+    requirements: [IO-2, CV-4r1]
+    description: >
+      A shrink writes nothing for the chunks it cuts off, so they are still
+      stored under the earlier version. Growing again must read zeros there,
+      whether the growth comes from truncate, a ranged write or an append.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "0123456789abcdefghijklmn"}}
+      - op: truncate
+        args: {path: /f.bin, size: 8}
+      - op: truncate
+        args: {path: /f.bin, size: 20}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {hex: "3031323334353637 000000000000000000000000"}
+      - op: truncate
+        args: {path: /f.bin, size: 8}
+      - op: write_range
+        args: {path: /f.bin, offset: 18, data: {utf8: "Z"}}
+        expect: 19
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {hex: "3031323334353637 00000000000000000000 5a"}
+      - op: truncate
+        args: {path: /f.bin, size: 8}
+      - op: append
+        args: {path: /f.bin, data: {utf8: "tail"}}
+        expect: 12
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "01234567tail"}
+      - op: verify
+        expect: {problems: []}
+
+  - scenario: an-aborted-stream-leaves-nothing-for-the-next-write
+    requirements: [CV-3, CV-4r1]
+    description: >
+      An aborted stream has already stored full chunks. The next write
+      changes one chunk and takes the others from the committed version, so
+      it must not pick up the chunks the aborted stream left behind.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "0123456789abcdefghijklmn"}}
+      - op: open_write
+        args: {path: /f.bin, mode: truncate}
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {repeat: {utf8: "Y"}, count: 96}}
+      - op: abort
+        args: {fd: {ref: writer}}
+      - op: write_range
+        args: {path: /f.bin, offset: 0, data: {utf8: "X"}}
+        expect: 24
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "X123456789abcdefghijklmn"}
+      - op: verify
+        expect: {problems: []}
+
+  - scenario: an-append-stream-after-ranged-writes-keeps-every-edit
+    requirements: [IO-2, CV-4r1]
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /f.bin, data: {utf8: "0123456789abcdefghij"}}
+      - op: write_range
+        args: {path: /f.bin, offset: 2, data: {utf8: "AB"}}
+      - op: write_range
+        args: {path: /f.bin, offset: 10, data: {utf8: "CD"}}
+      - op: open_write
+        args: {path: /f.bin, mode: append}
+        bind: writer
+      - op: write
+        args: {fd: {ref: writer}, data: {utf8: "-appended-across-chunks"}}
+      - op: close
+        args: {fd: {ref: writer}}
+      - op: read_all
+        args: {path: /f.bin}
+        expect: {utf8: "01AB456789CDcdefghij-appended-across-chunks"}
+      - op: verify
+        expect: {problems: []}
+
+  - scenario: a-copy-of-an-edited-entry-is-whole-and-independent
+    requirements: [CV-2, CV-4r1]
+    description: >
+      The source's current bytes are spread over several versions. The copy
+      has no earlier version of its own to take anything from.
+    setup: {chunk_size: 8}
+    steps:
+      - op: create_entry
+        args: {path: /a.bin, data: {utf8: "0123456789abcdefghijklmn"}}
+      - op: write_range
+        args: {path: /a.bin, offset: 9, data: {utf8: "XYZ"}}
+      - op: truncate
+        args: {path: /a.bin, size: 18}
+      - op: copy
+        args: {from: /a.bin, to: /b.bin}
+      - op: write_range
+        args: {path: /a.bin, offset: 0, data: {utf8: "changed!"}}
+      - op: read_all
+        args: {path: /b.bin}
+        expect: {utf8: "012345678XYZcdefgh"}
+      - op: write_range
+        args: {path: /b.bin, offset: 16, data: {utf8: "!!"}}
+      - op: read_all
+        args: {path: /b.bin}
+        expect: {utf8: "012345678XYZcdef!!"}
+      - op: read_all
+        args: {path: /a.bin}
+        expect: {utf8: "changed!8XYZcdefgh"}
+      - op: verify
+        expect: {problems: []}

@@ -183,34 +183,63 @@ resolution:
 
   read_chunks:
     sql: |
-      SELECT cc.data, cc.N_c, cc.enc_tag
-      FROM content_version cv
-      JOIN content_chunk cc ON cc.chunk_hash = cv.chunk_hash
-      WHERE cv.content_id = :node AND cv.version = :version
-      ORDER BY cv.chunk_index
+      WITH RECURSIVE
+        bound(n) AS MATERIALIZED (
+          SELECT chunks FROM content_commit
+          WHERE content_id = :node AND version = :version),
+        pos(i) AS (
+          SELECT 0 FROM bound WHERE n > 0
+          UNION ALL
+          SELECT i + 1 FROM pos, bound WHERE i + 1 < n)
+      SELECT pos.i AS chunk_index, cc.data, cc.N_c, cc.enc_tag
+      FROM pos
+      CROSS JOIN content_chunk cc ON cc.chunk_hash = (
+        SELECT cv.chunk_hash FROM content_version cv
+        WHERE cv.content_id = :node AND cv.chunk_index = pos.i
+          AND cv.version <= :version
+        ORDER BY cv.version DESC LIMIT 1)
     params:
       node:    "NodeId of an entry"
       version: "the version to reassemble (typically the committed version)"
-    returns: "[{ data }] in chunk_index order"
+    returns: "[{ chunk_index, data }] in chunk_index order"
     consumed_by: [read_all, open_read]
-    notes: "Reassembly of a version's bytes: concatenate data in chunk_index order. Empty result => empty content (zero chunks)."
+    notes: >
+      Reassembly of a version's bytes: concatenate data in chunk_index order.
+      Empty result => empty content (zero chunks). CV-4r1: the manifest is
+      stored as deltas, so each position below the version's chunk count
+      (content_commit) resolves to the latest row at or below the version --
+      one seek on content_version_position. Order comes from the walk itself:
+      the recursive CTE yields positions ascending and CROSS JOIN pins it as
+      the outer loop, so no ORDER BY has to sort the chunk payloads.
 
   read_chunks_range:
     sql: |
-      SELECT cv.chunk_index, cc.data, cc.N_c, cc.enc_tag
-      FROM content_version cv
-      JOIN content_chunk cc ON cc.chunk_hash = cv.chunk_hash
-      WHERE cv.content_id = :node AND cv.version = :version
-        AND cv.chunk_index BETWEEN :lo AND :hi
-      ORDER BY cv.chunk_index
+      WITH RECURSIVE
+        bound(n) AS MATERIALIZED (
+          SELECT min(chunks - 1, :hi) FROM content_commit
+          WHERE content_id = :node AND version = :version),
+        pos(i) AS (
+          SELECT :lo FROM bound WHERE :lo <= n
+          UNION ALL
+          SELECT i + 1 FROM pos, bound WHERE i < n)
+      SELECT pos.i AS chunk_index, cc.data, cc.N_c, cc.enc_tag
+      FROM pos
+      CROSS JOIN content_chunk cc ON cc.chunk_hash = (
+        SELECT cv.chunk_hash FROM content_version cv
+        WHERE cv.content_id = :node AND cv.chunk_index = pos.i
+          AND cv.version <= :version
+        ORDER BY cv.version DESC LIMIT 1)
     params:
       node:    "NodeId of an entry"
       version: "version to read from"
       lo:      "first chunk_index (inclusive)"
       hi:      "last chunk_index (inclusive)"
     returns: "[{ chunk_index, data }] in order"
-    consumed_by: ["ranged streaming reads (FUSE/SAF)"]
-    notes: "Byte-range access maps onto chunk_index range; the host trims the first/last chunk to the exact offset. Reserved for the streaming refinement."
+    consumed_by: ["ranged streaming reads (FUSE/SAF)", append, write_ranges, truncate]
+    notes: >
+      Byte-range access maps onto chunk_index range; the host trims the
+      first/last chunk to the exact offset. Positions resolve as in
+      read_chunks, and the range is clamped to the version's chunk count.
 
   read_chunk_size:
     sql: |
@@ -222,19 +251,35 @@ resolution:
 
   verify_manifest:
     sql: |
-      SELECT c.node_id, c.version, c.size, cv.chunk_index, cv.chunk_hash,
+      SELECT c.node_id, c.version, c.size, k.chunks,
+             cv.chunk_index, cv.chunk_hash,
              cc.length AS chunk_length,
              (cc.chunk_hash IS NOT NULL) AS present
       FROM content c
       JOIN node n ON n.node_id = c.node_id AND n.volume_id = :volume
-      JOIN content_version cv
-        ON cv.content_id = c.node_id AND cv.version = c.version
+      LEFT JOIN content_commit k
+        ON k.content_id = c.node_id AND k.version = c.version
+      LEFT JOIN content_version cv
+        ON cv.content_id = c.node_id AND cv.version <= c.version
+       AND cv.chunk_index < k.chunks
+       AND NOT EXISTS (
+             SELECT 1 FROM content_version x
+             WHERE x.content_id = cv.content_id
+               AND x.chunk_index = cv.chunk_index
+               AND x.version > cv.version AND x.version <= c.version)
       LEFT JOIN content_chunk cc ON cc.chunk_hash = cv.chunk_hash
+      WHERE c.version > 0
       ORDER BY c.node_id, cv.chunk_index
     params: { volume: "VolumeId" }
-    returns: "[{ node_id, version, size, chunk_index, chunk_hash, chunk_length, present }]"
+    returns: "[{ node_id, version, size, chunks, chunk_index, chunk_hash, chunk_length, present }]"
     consumed_by: [verify]
-    notes: "Committed-version manifest walk WITHOUT blobs (memory-bounded). Zero-chunk committed versions produce no rows and are vacuously fine."
+    notes: >
+      Committed-version manifest walk WITHOUT blobs (memory-bounded), resolved
+      through the deltas: the latest row at each position at or below the
+      committed version, inside its chunk count. Every entry committed above
+      version 0 yields at least one row; chunk_index is NULL when it has no
+      manifest row at all, and chunks is NULL when its content_commit record
+      is missing. The host checks the positions are exactly 0..chunks-1.
 
   get_chunk:
     sql: |
@@ -455,14 +500,30 @@ mutation:
       hash:    "chunk_hash referenced at this position"
     returns: none
     consumed_by: ["every chunked write"]
-    notes: "One ordered manifest row per chunk position (CV-4). Composite PK enforces position uniqueness."
+    notes: >
+      One manifest row per position this version CHANGES (CV-4r1); positions
+      it leaves alone get no row and resolve to an earlier version's. A
+      version that grows the content must write every position from the prior
+      end-of-content chunk to its own end. Composite PK enforces position
+      uniqueness.
 
   copy_chunk_refs:
     sql: |
+      WITH RECURSIVE
+        bound(n) AS MATERIALIZED (
+          SELECT chunks FROM content_commit
+          WHERE content_id = :src AND version = :src_version),
+        pos(i) AS (
+          SELECT 0 FROM bound WHERE n > 0
+          UNION ALL
+          SELECT i + 1 FROM pos, bound WHERE i + 1 < n)
       INSERT INTO content_version (content_id, version, chunk_index, chunk_hash)
-      SELECT :dst, :dst_version, chunk_index, chunk_hash
-      FROM content_version
-      WHERE content_id = :src AND version = :src_version
+      SELECT :dst, :dst_version, pos.i, (
+        SELECT cv.chunk_hash FROM content_version cv
+        WHERE cv.content_id = :src AND cv.chunk_index = pos.i
+          AND cv.version <= :src_version
+        ORDER BY cv.version DESC LIMIT 1)
+      FROM pos
     params:
       dst:         "destination NodeId"
       dst_version: "version to write on the destination"
@@ -473,43 +534,79 @@ mutation:
     notes: >
       Dedup-preserving copy: re-references the source's existing pool chunks
       (immutable, shared) rather than re-hashing bytes, so copying a stored
-      subtree is near-free.
+      subtree is near-free. The destination gets a FULL manifest (every
+      position of the source version, resolved through its deltas), since it
+      has no earlier version to take positions from.
 
   copy_chunk_refs_range:
     sql: |
+      WITH RECURSIVE pos(i) AS (
+        SELECT :lo WHERE :lo <= :hi
+        UNION ALL
+        SELECT i + 1 FROM pos WHERE i < :hi)
       INSERT INTO content_version (content_id, version, chunk_index, chunk_hash)
-      SELECT :node, :dst_version, chunk_index, chunk_hash
-      FROM content_version
-      WHERE content_id = :node AND version = :src_version
-        AND chunk_index BETWEEN :lo AND :hi
+      SELECT :node, :dst_version, pos.i, (
+        SELECT cv.chunk_hash FROM content_version cv
+        WHERE cv.content_id = :node AND cv.chunk_index = pos.i
+          AND cv.version <= :src_version
+        ORDER BY cv.version DESC LIMIT 1)
+      FROM pos
     params:
-      node:        "NodeId (same node — re-reference its own prior version)"
-      dst_version: "the new version being staged"
-      src_version: "the prior committed version to carry chunks from"
-      lo:          "first chunk_index to carry (inclusive)"
-      hi:          "last chunk_index to carry (inclusive)"
+      node:        "NodeId (same node — re-reference one of its own versions)"
+      dst_version: "the version being staged"
+      src_version: "the version whose positions are written out"
+      lo:          "first chunk_index (inclusive)"
+      hi:          "last chunk_index (inclusive)"
     returns: none
-    consumed_by: ["open_write/append (streaming carry-forward)"]
+    consumed_by: ["open_write/close when another commit landed mid-stream"]
     notes: >
-      Streaming append re-references the prior version's FULL leading chunks
-      (indices [0 .. floor(size/chunk_size)-1]) into the new version unchanged,
-      then rebuilds only from the partial final chunk onward. Keeps append
-      bounded-memory and preserves chunk sharing across versions.
+      Writes positions [lo, hi] of :src_version out as explicit rows of
+      :dst_version. No ordinary write needs it: a delta version takes the
+      positions it leaves alone from the committed version beneath it. The
+      one caller is an append stream that finds the committed pointer moved
+      since it opened -- its delta would otherwise land on bytes it never
+      saw, so it pins the prefix it was opened on.
 
   next_version:
     sql: |
-      SELECT max(
-        coalesce((SELECT version FROM content WHERE node_id = :node), 0),
-        coalesce((SELECT max(version) FROM content_version WHERE content_id = :node), 0)
-      ) + 1 AS next
+      SELECT coalesce((SELECT version FROM content WHERE node_id = :node), 0) + 1 AS next
     params: { node: "NodeId" }
     returns: "{ next }"
-    consumed_by: [write_all, "open_write/close (streaming)"]
+    consumed_by: [write_all, append, write_ranges, truncate, "open_write/close (streaming)"]
     notes: >
-      CV-3: the next version to allocate, under the entry's write lock. Takes the
-      max of the committed pointer and the highest existing manifest version so a
-      prior incomplete/aborted write (staged at committed+1 but never swapped) can
-      never have its version number reused.
+      CV-3: the next version to commit, under the entry's write lock: always
+      the committed pointer plus one, so committed versions are consecutive
+      and each one's deltas apply to the version directly beneath it. Nothing
+      else may hold that number: rows above the pointer live only at staging
+      numbers (staging_version), far above any commit.
+
+  staging_version:
+    sql: |
+      SELECT max(4611686018427387904,
+                 coalesce((SELECT max(version) FROM content_version
+                           WHERE content_id = :node), 0)) + 1 AS next
+    params: { node: "NodeId" }
+    returns: "{ next }"
+    consumed_by: ["open_write (streaming)"]
+    notes: >
+      Where a streaming writer stages its chunks before its close commits
+      them: a number above STAGING_BASE (2^62, the literal here) and above
+      every row the entry has, so two writers never share one. Staged rows
+      sit above the committed pointer and are not content (CV-3); they must
+      not sit at committed + 1, because a writer that died there would leave
+      rows the next commit of that number would silently inherit.
+
+  promote_staged:
+    sql: |
+      UPDATE content_version SET version = :version
+      WHERE content_id = :node AND version = :staging
+    params:
+      node:    "NodeId"
+      staging: "the staging number the rows were written at"
+      version: "the version being committed (next_version)"
+    returns: rowcount
+    consumed_by: ["open_write/close (streaming)"]
+    notes: "Renumbers a stream's staged rows to the version its close commits, in the same transaction as update_content."
 
   set_retention_keep:
     sql: |
@@ -1030,10 +1127,32 @@ maintenance:
   prune_content_versions:
     sql: |
       DELETE FROM content_version
-      WHERE NOT EXISTS (
-              SELECT 1 FROM retained_version r
-              WHERE r.content_id = content_version.content_id
-                AND r.version = content_version.version)
+      WHERE rowid IN (
+              SELECT cv.rowid
+              FROM retention_floor f
+              CROSS JOIN content_commit fk
+                ON fk.content_id = f.content_id AND fk.version = f.floor
+              CROSS JOIN content_version cv
+                ON cv.content_id = f.content_id AND cv.version < f.floor
+              WHERE EXISTS (
+                      SELECT 1 FROM content_commit o
+                      WHERE o.content_id = f.content_id AND o.version < f.floor)
+                AND (cv.chunk_index >= fk.chunks
+                     OR EXISTS (
+                          SELECT 1 FROM content_version x
+                          WHERE x.content_id = cv.content_id
+                            AND x.chunk_index = cv.chunk_index
+                            AND x.version > cv.version AND x.version <= f.floor))
+              UNION ALL
+              SELECT cv.rowid
+              FROM content c
+              CROSS JOIN content_version cv
+                ON cv.content_id = c.node_id AND cv.version > c.version
+              UNION ALL
+              SELECT cv.rowid
+              FROM effective_retention er
+              CROSS JOIN content_version cv ON cv.content_id = er.node_id
+              WHERE er.keep = 0)
         AND content_id NOT IN (SELECT node_id FROM valid_lock)
         AND (:volume IS NULL
              OR content_id IN (SELECT node_id FROM node WHERE volume_id = :volume))
@@ -1041,18 +1160,54 @@ maintenance:
     returns: rowcount
     consumed_by: [prune_content]
     notes: >
-      CV-7 step 1: drop manifest rows for non-retained versions (superseded
-      beyond policy, plus aborted writes above the committed pointer). Retained
-      versions are resolved by the retained_version view BEFORE any chunk is
-      collected. The valid_lock guard is the live-write exclusion: a node that
-      currently holds a valid exclusive write lock is mid-stream — its
-      above-committed staging rows look identical to abandoned orphans, so we
-      never reap a locked node's rows. An orphan is precisely above-committed
-      rows with NO valid lock (the writer died, mount ended, or ttl lapsed).
-      Must run before prune_content_chunks.
-      NOT EXISTS, not a row-value NOT IN: SQLite answers the latter by
-      scanning the whole retained list for every manifest row, which made a
-      sweep of 100,000 rows take seconds instead of milliseconds.
+      CV-7 step 1: drop the manifest rows no retained version reads. Three
+      kinds, one per branch. (1) A row below the entry's retention floor,
+      unless the floor version still takes that position from it: it goes if
+      a later row at the same position exists at or below the floor, or if
+      its position is past the floor version's chunk count. Checking the
+      floor alone is enough because retained versions are the contiguous run
+      from the floor up, and a version that grows writes every new position.
+      Rows are never moved: a surviving row stays at the version that wrote
+      it. (2) A row above the committed pointer: an aborted or abandoned
+      write. (3) Every row of an entry that retains nothing.
+      The valid_lock guard is the live-write exclusion: a node that currently
+      holds a valid exclusive write lock is mid-stream — its above-committed
+      staging rows look identical to abandoned orphans, so we never reap a
+      locked node's rows. An orphan is precisely above-committed rows with NO
+      valid lock (the writer died, mount ended, or ttl lapsed).
+      Each branch is driven from the entry side and reaches content_version
+      through its primary key, so rows at or above a floor are never visited.
+      CROSS JOIN is what holds that order: left to itself the planner scans
+      the whole manifest and looks each entry up from there.
+      Branch (1) also skips an entry with no content_commit record below its
+      floor: its floor has not moved since the last prune (which drops those
+      records, in prune_content_commits), so its surviving rows were already
+      judged against this floor and an idle entry costs one probe.
+      Must run before prune_content_commits and prune_content_chunks.
+
+  prune_content_commits:
+    sql: |
+      DELETE FROM content_commit
+      WHERE rowid IN (
+              SELECT k.rowid
+              FROM retention_floor f
+              CROSS JOIN content_commit k
+                ON k.content_id = f.content_id AND k.version < f.floor
+              UNION ALL
+              SELECT k.rowid
+              FROM effective_retention er
+              CROSS JOIN content_commit k ON k.content_id = er.node_id
+              WHERE er.keep = 0)
+        AND content_id NOT IN (SELECT node_id FROM valid_lock)
+        AND (:volume IS NULL
+             OR content_id IN (SELECT node_id FROM node WHERE volume_id = :volume))
+    params: { volume: "VolumeId to scope the sweep, or NULL for all" }
+    returns: rowcount
+    consumed_by: [prune_content]
+    notes: >
+      CV-7: forget the versions that are no longer retained, so the next
+      prune counts keep-last-N over the ones that are. Runs after
+      prune_content_versions, which reads the floor these records define.
 
   prune_content_chunks:
     sql: |
@@ -1080,5 +1235,5 @@ maintenance:
 host_only:
   resolve: "run resolve_path once from the mount point; read the last row for the answer or the error (see that template's notes). Do NOT fold resolve_segment — that is one round trip per segment"
   resolve_parent: "run resolve_path over all-but-last segment; return (container_id, final_name). A single-segment path needs no query at all: the parent is the mount point"
-  streaming_read_write: "descriptor read/write/seek operate on an in-memory buffer; reads reassemble via get_content_meta + read_chunks; a write stages chunks (upsert_chunk + insert_chunk_ref) in an independent commit then swaps the committed pointer (update_content) in a separate txn, releasing the lock"
+  streaming_read_write: "descriptor read/write/seek operate on an in-memory buffer; reads reassemble via get_content_meta + read_chunks; a write stages chunks (upsert_chunk + insert_chunk_ref) at a staging_version in independent commits; close renumbers them to next_version (promote_staged) and swaps the committed pointer (update_content) in one txn, releasing the lock"
   copy_pack_unpack: "enumerate_subtree -> host walk in canonical order -> create_* leaves, threading the old->new id map; pack/unpack add MsgPack (de)serialization in the same walk"

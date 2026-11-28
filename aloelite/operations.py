@@ -689,19 +689,19 @@ def write_all(db: Db, mount: MountId, path: str, data: bytes) -> None:
 def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
     """Atomically append `data` to an entry and return the new size.
 
-    Bounded-memory and bounded-cost: the prior version's full leading chunks are
-    carried forward BY REFERENCE (copy_chunk_refs_range — no data copy), and only
-    the old partial final chunk + the new bytes are re-chunked and staged. Each
+    Bounded-memory and bounded-cost: the new version records only the chunks
+    it changes (CV-4r1) -- the old partial final chunk and the new bytes, which
+    are re-chunked and staged. Every full leading chunk is taken from the prior
+    version with no row written for it. Each
     call is its own atomic commit (one new version, committed-pointer swap), which
     is what makes it safe to call repeatedly for append-mostly files (logs, mbox):
     every commit is immediately visible to readers and to /export, and a crash
     loses only the uncommitted in-flight batch, never prior commits.
 
-    Cost per call is O(full_chunk_count) ref-copies (a single INSERT..SELECT) plus
-    O(len(partial_tail) + len(data)) staging. With the 1 MiB default chunk size and
-    FUSE-side batching this is cheap for logs and per-message mail files. Each call
-    creates a new version; run prune_content (or set_retention keep=N) periodically
-    on hot append files to bound manifest growth.
+    Cost per call is O(len(partial_tail) + len(data)) staging, whatever the
+    size of the entry. Each call creates a new version; run prune_content (or
+    set_retention keep=N) periodically on hot append files so the superseded
+    tail chunks are reclaimed.
     """
     if not data:
         m = _require_mount(db, mount, write=True)
@@ -725,18 +725,6 @@ def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
         new_version = db.alloc_version(found.node)
         full = size // cs
         partial = size % cs
-        # carry the unchanged full leading chunks forward by reference
-        if full > 0:
-            db.run(
-                "mutation.copy_chunk_refs_range",
-                {
-                    "node": found.node,
-                    "dst_version": new_version,
-                    "src_version": src_version,
-                    "lo": 0,
-                    "hi": full - 1,
-                },
-            )
         # rebuild from the old partial tail + new data, re-chunked from index `full`
         tail = b""
         if partial > 0:
@@ -784,15 +772,16 @@ def write_ranges(db: Db, mount: MountId, path: str, ranges) -> int:
 
     Bounded cost: a chunk is rebuilt only if a range touches it, or if it
     lies between the prior EOF chunk and the new end (a short final chunk
-    is rebuilt and a gap zero-fills). Every other chunk is carried into the
-    new version BY REFERENCE, in contiguous runs. Rebuilt chunks are read,
+    is rebuilt and a gap zero-fills). Every other chunk is left to the
+    prior version: the new one writes no row for it (CV-4r1), so the cost
+    does not depend on the size of the entry. Rebuilt chunks are read,
     patched and staged one at a time, so memory is one chunk plus the
     ranges themselves, however far apart they are. Chunk alignment is
     preserved (an overwrite never shifts bytes), which keeps the
     uniform-chunks-except-last invariant the ranged reader depends on.
 
     Hot random-write entries should still carry set_retention(keep=N) and
-    see periodic prune_content (CV-6/CV-7) to bound manifest growth.
+    see periodic prune_content (CV-6/CV-7) so superseded chunks are reclaimed.
     """
     pairs = _ranges(ranges)
     if not pairs:
@@ -824,17 +813,6 @@ def write_ranges(db: Db, mount: MountId, path: str, ranges) -> int:
             # rebuild from the chunk holding the prior EOF to the new end
             spans.append((size // cs, (new_size - 1) // cs))
         rebuild = _merge_spans(spans)
-
-        # depth: carry every untouched run of the source by reference
-        nxt = 0
-        for lo, hi in rebuild:
-            if lo > nxt and nxt <= src_last:
-                _carry(
-                    db, found.node, new_version, src_version, nxt, min(lo - 1, src_last)
-                )
-            nxt = hi + 1
-        if nxt <= src_last:
-            _carry(db, found.node, new_version, src_version, nxt, src_last)
 
         # depth: rebuild touched chunks one at a time
         for lo, hi in rebuild:
@@ -891,18 +869,11 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return out
 
 
-def _carry(db: Db, node, dst: int, src: int, lo: int, hi: int) -> None:
-    db.run(
-        "mutation.copy_chunk_refs_range",
-        {"node": node, "dst_version": dst, "src_version": src, "lo": lo, "hi": hi},
-    )
-
-
 def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
-    """Atomically set an entry's size. Shrink carries full leading chunks by
-    reference and trims the boundary chunk; grow zero-fills (rebuilding only
-    the prior short final chunk). One new version per call; no-op when the
-    size is unchanged."""
+    """Atomically set an entry's size. Shrink trims the boundary chunk and
+    writes nothing else (the new version's chunk count hides the rest); grow
+    zero-fills, rebuilding only the prior short final chunk. One new version
+    per call; no-op when the size is unchanged."""
     if size < 0:
         raise ValueError("negative size")
     with db.txn():
@@ -922,34 +893,12 @@ def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
         new_version = db.alloc_version(found.node)
         if size < cur:
             full = size // cs
-            if full > 0:
-                db.run(
-                    "mutation.copy_chunk_refs_range",
-                    {
-                        "node": found.node,
-                        "dst_version": new_version,
-                        "src_version": src_version,
-                        "lo": 0,
-                        "hi": full - 1,
-                    },
-                )
             rem = size % cs
             if rem:
                 rows = db.read_chunk_range(found.node, src_version, full, full)
                 db.stage_chunk(found.node, new_version, full, rows[0][1][:rem])
         else:
             full = cur // cs
-            if full > 0:
-                db.run(
-                    "mutation.copy_chunk_refs_range",
-                    {
-                        "node": found.node,
-                        "dst_version": new_version,
-                        "src_version": src_version,
-                        "lo": 0,
-                        "hi": full - 1,
-                    },
-                )
             tail = b""
             if cur % cs:
                 rows = db.read_chunk_range(found.node, src_version, full, full)
@@ -1737,6 +1686,7 @@ def prune_content(db: Db, volume: VolumeId | None = None) -> ContentPruneReport:
     """
     with db.txn():
         versions = db.rowcount("maintenance.prune_content_versions", {"volume": volume})
+        db.rowcount("maintenance.prune_content_commits", {"volume": volume})
         chunks = db.rowcount("maintenance.prune_content_chunks")
     return ContentPruneReport(versions_pruned=versions, chunks_pruned=chunks)
 
@@ -1763,9 +1713,15 @@ def verify(db: Db, mount: MountId, *, deep: bool = False) -> VerifyReport:
         per_node.setdefault((r["node_id"], r["version"]), []).append(r)
 
     seen_chunks: set[str] = set()
-    for (node, version), refs in per_node.items():
+    for (node, version), all_refs in per_node.items():
+        # one row with a NULL chunk_index = a committed version with no
+        # manifest row at all (legitimate only when it has zero chunks)
+        refs = [r for r in all_refs if r["chunk_index"] is not None]
         idxs = [r["chunk_index"] for r in refs]
-        if idxs != [*range(len(idxs))]:
+        chunks = all_refs[0]["chunks"]
+        if chunks is None:
+            problems.append(f"no-commit-record node={node} v={version}")
+        elif idxs != [*range(chunks)]:
             problems.append(f"gap node={node} v={version} indexes={idxs}")
         total = 0
         for r in refs:
@@ -1774,9 +1730,10 @@ def verify(db: Db, mount: MountId, *, deep: bool = False) -> VerifyReport:
                 continue
             total += r["chunk_length"]
             seen_chunks.add(r["chunk_hash"])
-        if total != refs[0]["size"]:
+        if total != all_refs[0]["size"]:
             problems.append(
-                f"size-mismatch node={node} manifest={refs[0]['size']} chunks={total}"
+                f"size-mismatch node={node} manifest={all_refs[0]['size']} "
+                f"chunks={total}"
             )
 
     if deep:

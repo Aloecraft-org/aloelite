@@ -37,7 +37,9 @@ use rusqlite::named_params;
 
 use crate::db::Db;
 use crate::errors::{FsError, Result};
-use crate::templates::mutation::{COPY_CHUNK_REFS_RANGE, RELEASE_LOCK, UPDATE_CONTENT};
+use crate::templates::mutation::{
+    COPY_CHUNK_REFS_RANGE, PROMOTE_STAGED, RELEASE_LOCK, UPDATE_CONTENT,
+};
 use crate::templates::resolution::GET_LOCK_VALID;
 use crate::types::{FdId, LockId, NodeId, VolumeId, Whence};
 
@@ -65,13 +67,14 @@ pub struct Descriptor {
     version: i64,
     size: u64,
     // -- write mode --------------------------------------------------------
-    /// Allocated lazily on first flush / close.
-    new_version: Option<i64>,
-    /// Prior version to re-reference full leading chunks from (append).
+    /// Where chunks flushed before close are staged: a number far above any
+    /// commit, allocated at the first flush. Close renumbers them.
+    staging: Option<i64>,
+    /// The version an append was opened on.
     carry_src: i64,
-    /// Count of full leading chunks carried by reference.
+    /// Count of full leading chunks an append leaves to that version: the
+    /// stream writes only positions from here on (CV-4r1).
     carry_full: u64,
-    carry_done: bool,
     /// Next chunk index to assign.
     chunk_index: u64,
     /// Bytes already in committed chunks.
@@ -111,10 +114,9 @@ impl Descriptor {
             closed: false,
             version,
             size: size.max(0) as u64,
-            new_version: None,
+            staging: None,
             carry_src: 0,
             carry_full: 0,
-            carry_done: true,
             chunk_index: 0,
             flushed: 0,
             pending: Vec::new(),
@@ -141,10 +143,9 @@ impl Descriptor {
             closed: false,
             version: 0,
             size: 0,
-            new_version: None,
+            staging: None,
             carry_src: setup.carry_src,
             carry_full: setup.carry_full,
-            carry_done: false,
             chunk_index: setup.carry_full,
             flushed: setup.carry_full * chunk_size,
             pending: setup.pending,
@@ -351,41 +352,19 @@ impl Descriptor {
         let cs = self.chunk_size as usize;
         let chunk: Vec<u8> = self.pending.drain(..cs).collect();
         db.txn(|db| {
-            let version = self.claim_version_locked(db)?;
-            db.stage_chunk(&self.node, version, self.chunk_index as i64, &chunk)
+            let staging = match self.staging {
+                Some(v) => v,
+                None => {
+                    let v = db.alloc_staging(&self.node)?;
+                    self.staging = Some(v);
+                    v
+                }
+            };
+            db.stage_chunk(&self.node, staging, self.chunk_index as i64, &chunk)
         })?;
         self.chunk_index += 1;
         self.flushed += self.chunk_size;
         Ok(())
-    }
-
-    /// Allocate the new version on first use and carry the prior version's
-    /// full leading chunks into it (append). Idempotent; runs inside a txn.
-    fn claim_version_locked(&mut self, db: &mut Db) -> Result<i64> {
-        let version = match self.new_version {
-            Some(v) => v,
-            None => {
-                let v = db.alloc_version(&self.node)?;
-                self.new_version = Some(v);
-                v
-            }
-        };
-        if !self.carry_done {
-            if self.carry_full > 0 {
-                db.run(
-                    COPY_CHUNK_REFS_RANGE,
-                    named_params! {
-                        ":node": self.node,
-                        ":dst_version": version,
-                        ":src_version": self.carry_src,
-                        ":lo": 0i64,
-                        ":hi": self.carry_full as i64 - 1,
-                    },
-                )?;
-            }
-            self.carry_done = true;
-        }
-        Ok(version)
     }
 
     fn commit(&mut self, db: &mut Db) -> Result<()> {
@@ -400,9 +379,32 @@ impl Descriptor {
                     });
                 }
             }
-            let version = self.claim_version_locked(db)?;
+            let committed = db.read_content_meta(&self.node)?.map(|(v, _)| v);
+            let version = db.alloc_version(&self.node)?;
+            if self.carry_full > 0 && committed.is_some_and(|v| v != self.carry_src) {
+                // Another commit landed on this entry since the append was
+                // opened (the same mount may write through its own lock).
+                // The delta would land on bytes this stream never saw, so
+                // write out the prefix it was opened on.
+                db.run(
+                    COPY_CHUNK_REFS_RANGE,
+                    named_params! {
+                        ":node": self.node,
+                        ":dst_version": version,
+                        ":src_version": self.carry_src,
+                        ":lo": 0i64,
+                        ":hi": self.carry_full as i64 - 1,
+                    },
+                )?;
+            }
             if !self.pending.is_empty() {
                 db.stage_chunk(&self.node, version, self.chunk_index as i64, &self.pending)?;
+            }
+            if let Some(staging) = self.staging {
+                db.run(
+                    PROMOTE_STAGED,
+                    named_params! { ":node": self.node, ":staging": staging, ":version": version },
+                )?;
             }
             db.run(
                 UPDATE_CONTENT,

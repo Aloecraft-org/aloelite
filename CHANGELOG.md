@@ -12,7 +12,7 @@ migration rather than a compatible change.
 
 ## [0.5.0] - unreleased (prerelease)
 
-`v0.5.0` &middot; schema era `4`
+`v0.5.0` &middot; schema era `5`
 
 **The Mount API dispatch is a crate of its own.** `aloelite-wasm` held
 the only copy of the table that maps the spec's operation names onto
@@ -183,6 +183,27 @@ host path the manifest grants.
 
 ### Changed
 
+- **A version records only the chunks it changes. Schema era 5.**
+  Every commit used to write a manifest row for every chunk of the
+  file, changed or not, so the cost of a small write grew with the
+  size of the file it landed in: an 8 KiB write into a 64 MiB file
+  with 64 KiB chunks took 32 ms, almost all of it copying a thousand
+  rows that said nothing new. A version now writes rows for the
+  positions it changes and takes the rest from the version beneath it
+  (CV-4r1). The same write takes about 1 ms, and no longer depends on
+  the size of the file or on how small the chunks are. `append`,
+  `write_range`, `write_ranges`, `truncate` and append-mode streams
+  all write deltas; `write_all`, a truncate-mode stream and `copy`
+  write every position, as they must. A new `content_commit` table
+  records each committed version's size and chunk count. A stream's
+  chunks are staged at a number far above any commit until its close,
+  so chunks left by a writer that died can never be picked up by a
+  later version. `prune_content` drops the rows no retained version
+  still reads and leaves the rest where they are;
+  `versions_pruned` counts those rows, as it did. Nothing changes in
+  the Mount API. Opening a file migrates it to era 5 in place:
+  existing manifests are read as they stand, and a build that only
+  knows era 4 then refuses the file.
 - **A prune now trims the history of deleted entries.** A volume's
   `retention_on_delete` defaults to 1, on volumes that already exist
   too. So the first `prune_content` after upgrading keeps the last

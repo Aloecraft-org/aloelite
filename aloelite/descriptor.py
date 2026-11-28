@@ -21,13 +21,15 @@ Bounded-memory streaming (the refinement that replaces whole-file buffering):
   WRITES stream forward. The writer keeps a pending buffer under one chunk; each
   time a write pushes it past a chunk boundary, the complete chunk is staged +
   committed in its OWN short transaction (CV-5) and dropped from memory, and
-  chunk_index advances. The new version number is allocated lazily on the first
-  flush (or at close for sub-chunk files) so a same-mount write_all that lands
-  between open and close can't collide on the version. At close() the final
-  (short) chunk is staged and the committed-version pointer is swapped in one
-  transaction, firing node_touch_content and releasing the lock. A crash
-  mid-stream leaves staged chunks at a version ABOVE the committed pointer; the
-  prior committed version is intact, and prune_content reclaims the orphans once
+  chunk_index advances. Those chunks are staged at a number far above any
+  commit (allocated at the first flush), never at committed + 1: a version
+  records only the positions it changes (CV-4r1), so rows left at a number a
+  later commit takes would become part of it. At close() the final (short)
+  chunk is staged, the staged rows are renumbered to committed + 1 and the
+  committed-version pointer is swapped, all in one transaction, firing
+  node_touch_content and releasing the lock. A crash mid-stream leaves staged
+  chunks ABOVE the committed pointer; the prior committed version is intact,
+  and prune_content reclaims the orphans once
   the write lock is no longer valid (the live-lock guard keeps an in-progress
   write safe from a concurrent prune).
 
@@ -93,12 +95,14 @@ class Descriptor:
         self._closed = False
 
         if writable:
-            # The new version is allocated lazily (first flush / close) so a
-            # same-mount write between open and close can't take our number.
-            self._version: int | None = None
-            self._carry_src = carry_src  # prior version to re-reference from
-            self._carry_full = carry_full  # count of full leading chunks carried
-            self._carry_done = False
+            # Chunks flushed before close are staged at a number far above
+            # any commit (allocated at the first flush); close renumbers them
+            # to the version it commits. The stream writes only positions from
+            # carry_full on (CV-4r1): the leading full chunks of an append stay
+            # with the version it was opened on.
+            self._staging: int | None = None
+            self._carry_src = carry_src  # version an append was opened on
+            self._carry_full = carry_full  # full leading chunks left to it
             self._chunk_index = carry_full  # next chunk index to assign
             self._flushed = carry_full * chunk_size  # bytes already in committed chunks
             self._pending = bytearray(pending)  # bytes from self._flushed onward
@@ -184,30 +188,51 @@ class Descriptor:
         own short transaction (bounded memory + bounded WAL)."""
         chunk = bytes(self._pending[: self._cs])
         with self._db.txn():
-            self._claim_version_locked()
-            self._db.stage_chunk(self.node, self._version, self._chunk_index, chunk)
+            if self._staging is None:
+                self._staging = self._db.alloc_staging(self.node)
+            self._db.stage_chunk(self.node, self._staging, self._chunk_index, chunk)
         self._chunk_index += 1
         self._flushed += self._cs
         del self._pending[: self._cs]
 
-    def _claim_version_locked(self) -> None:
-        """Allocate the new version on first use and carry the prior version's
-        full leading chunks into it (append). Idempotent; runs inside a txn."""
-        if self._version is None:
-            self._version = self._db.alloc_version(self.node)
-        if not self._carry_done:
-            if self._carry_full > 0:
-                self._db.run(
-                    "mutation.copy_chunk_refs_range",
-                    {
-                        "node": self.node,
-                        "dst_version": self._version,
-                        "src_version": self._carry_src,
-                        "lo": 0,
-                        "hi": self._carry_full - 1,
-                    },
-                )
-            self._carry_done = True
+    def _commit_locked(self, size: int) -> None:
+        """Commit the stream as the next version, inside the caller's txn:
+        stage the final short chunk, renumber the chunks staged so far, and
+        swap the committed pointer."""
+        committed = self._db.read_content_meta(self.node)
+        version = self._db.alloc_version(self.node)
+        if (
+            self._carry_full > 0
+            and committed is not None
+            and committed[0] != self._carry_src
+        ):
+            # Another commit landed on this entry since the append was opened
+            # (the same mount may write through its own lock). The delta
+            # would land on bytes this stream never saw, so write out the
+            # prefix it was opened on.
+            self._db.run(
+                "mutation.copy_chunk_refs_range",
+                {
+                    "node": self.node,
+                    "dst_version": version,
+                    "src_version": self._carry_src,
+                    "lo": 0,
+                    "hi": self._carry_full - 1,
+                },
+            )
+        if len(self._pending) > 0:
+            self._db.stage_chunk(
+                self.node, version, self._chunk_index, bytes(self._pending)
+            )
+        if self._staging is not None:
+            self._db.rowcount(
+                "mutation.promote_staged",
+                {"node": self.node, "staging": self._staging, "version": version},
+            )
+        self._db.rowcount(
+            "mutation.update_content",
+            {"node": self.node, "version": version, "size": size, "hash": None},
+        )
 
     # -- cursor --------------------------------------------------------------
     def seek(self, offset: int, whence: Whence = Whence.SET) -> int:
@@ -287,23 +312,7 @@ class Descriptor:
                         )
                         if row is None or not row["valid"]:
                             raise LockInvalid(lock=self._lock, node=self.node)
-                    self._claim_version_locked()
-                    if len(self._pending) > 0:
-                        self._db.stage_chunk(
-                            self.node,
-                            self._version,
-                            self._chunk_index,
-                            bytes(self._pending),
-                        )
-                    self._db.rowcount(
-                        "mutation.update_content",
-                        {
-                            "node": self.node,
-                            "version": self._version,
-                            "size": size,
-                            "hash": None,
-                        },
-                    )
+                    self._commit_locked(size)
                     if self._lock is not None and self._owns_lock:
                         self._db.rowcount("mutation.release_lock", {"lock": self._lock})
             else:

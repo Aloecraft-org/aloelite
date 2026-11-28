@@ -232,3 +232,46 @@ targets (no wasm32 target or wasi-sdk installed).
 
 Next: the owner says when to open the PR; it targets PR #17's branch
 until that merges.
+
+## 2026-11-28 delta manifests (CV-4r1), schema era 5
+
+Plan: the owner committed CV-4r1 to doc/REQUIREMENTS.md himself (5f22de2)
+and asked for it to be built, outside the roadmap (I0 Seed still active).
+He then asked for the branch to sit on claude/project-thread-9x8lfm (the
+issue #15 work), so this is main + those two commits + this one. Steps:
+(1) schema era 5: `content_version` rows become per-version deltas, a
+`content_commit` table records each committed version's size and chunk
+count, a position index resolves a chunk in one seek; (2) Python engine;
+(3) Rust port; (4) tests in both plus shared conformance scenarios;
+(5) rerun the commit profile and the Postgres bench; (6) docs, changelog.
+
+Design, as built:
+- Position i of version V = the row with the greatest version <= V at
+  (content_id, i), for i < chunks(V). chunks(V) lives in `content_commit`,
+  written only by two triggers on `content`, so neither engine can commit
+  without it. Version 0 (the empty birth state) has no record.
+- Writers no longer carry anything: `next_version` is committed + 1 and a
+  direct writer stages only the positions it rebuilds. Every growth path
+  already rebuilt from the prior EOF chunk to the new end, which is the
+  invariant that stops rows beyond an old shrink from resurfacing.
+- Streams stage at `staging_version` (above 2^62) and close renumbers
+  (`promote_staged`). Staging at committed + 1, as before, would let a dead
+  writer's rows be inherited by the next commit of that number.
+- An append stream whose base moved mid-stream (same mount writing through
+  its own lock) writes its prefix out with `copy_chunk_refs_range`, the
+  only remaining caller.
+- Prune never moves rows. Retention is keep-last-N, so retained versions
+  are the run from `retention_floor.floor` to committed; a row below the
+  floor goes if a later row at its position exists at or below the floor,
+  or its position is past the floor's chunk count. This differs from what
+  I first described to the owner (folding rows upward); told him.
+- `versions_pruned` still counts manifest rows deleted.
+- Migration: delete rows above committed, create and fill `content_commit`
+  from the full manifests. Old manifests are valid deltas as they stand.
+
+Learned: SQLite refuses a correlated column in LIMIT/OFFSET ("no such
+column"), so the N-th highest version is a window rank, not OFFSET keep-1.
+A recursive CTE yields rows FIFO and CROSS JOIN pins it as the outer loop,
+which is what lets `read_chunks` return chunks in order with no ORDER BY
+sorting the payloads. An era-1 file has no `content_version` table, so the
+era-5 step returns early there.

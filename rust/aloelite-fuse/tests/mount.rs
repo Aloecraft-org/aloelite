@@ -513,7 +513,7 @@ fn a_mount_that_prunes_enforces_the_volumes_retention() {
         let got = db
             .connection()
             .query_row(
-                "SELECT (SELECT count(DISTINCT version) FROM content_version), \
+                "SELECT (SELECT count(*) FROM content_commit), \
                         (SELECT count(*) FROM node WHERE type = 'entry')",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),

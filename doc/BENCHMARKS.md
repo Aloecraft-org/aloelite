@@ -317,9 +317,9 @@ domain-separated by volume id, so identical plaintext cannot produce
 identical addresses. This is the property `doc/ENCRYPTION.md` claims, and
 `dedup_across_volumes` is where it gets measured.
 
-**Cheap versions of large files.** `write_range` carries every untouched
-chunk into the new version by reference, so an edit costs the chunk it
-touched, not the file it was in. Measured on a 64 MiB file with 1 MiB
+**Cheap versions of large files.** A version records only the chunks it
+changes (CV-4r1), so an edit costs the chunk it touched, not the file it
+was in. Measured on a 64 MiB file with 1 MiB
 chunks: a 1-byte edit adds 1.07 MB (1.02 chunks), a 4 KiB edit adds the same,
 and a 1 MiB edit straddling a boundary adds 2.11 MB (2.02 chunks). The floor
 is the chunk, and it does not move with file size.

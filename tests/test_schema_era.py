@@ -438,6 +438,80 @@ def test_era3_file_gains_the_volume_retention_columns_on_open(tmp_path: Path):
     db.close()
 
 
+def test_era4_file_gains_commit_records_and_reads_as_before(tmp_path: Path):
+    """Era 4 -> 5: full manifests stay as they are, every version gets its
+    content_commit record, rows above the committed pointer go, and the next
+    writes are deltas on top."""
+    p = tmp_path / "era4.fs"
+    db = _open(p)
+    vol = ops.create_volume(db, "v", 4).id
+    mid = ops.mount(db, vol, "/", ttl_ms=60_000)
+    ops.create_entry(db, mid, "/f", b"0000aa")
+    ops.write_all(db, mid, "/f", b"1111bbbbc")
+    ops.create_entry(db, mid, "/empty", b"")
+    ops.create_entry(db, mid, "/cut", b"xxxx")
+    ops.truncate(db, mid, "/cut", 0)  # committed at version 2 with no chunks
+    nid = ops.stat(db, mid, "/f").id
+    c = db.connection
+    # an era-4 writer that died mid-stream left rows at committed + 1
+    c.execute(
+        "INSERT INTO content_version (content_id, version, chunk_index, chunk_hash) "
+        "SELECT content_id, 3, chunk_index, chunk_hash FROM content_version "
+        "WHERE content_id = ? AND version = 1",
+        (nid,),
+    )
+    fresh_shape = c.execute("PRAGMA table_info(content_commit)").fetchall()
+    c.execute("DROP TABLE content_commit")
+    c.execute("DROP INDEX content_version_position")
+    c.execute("PRAGMA user_version = 4")
+    db.close()
+
+    for _ in range(2):  # the second pass is the crash-rerun: stamp wound back
+        db = _open(p)
+        c = db.connection
+        assert _user_version(db) == SCHEMA_ERA
+        assert c.execute("PRAGMA table_info(content_commit)").fetchall() == fresh_shape
+        commits = c.execute(
+            "SELECT version, size, chunks FROM content_commit "
+            "WHERE content_id = ? ORDER BY version",
+            (nid,),
+        ).fetchall()
+        assert [tuple(r) for r in commits] == [(1, 6, 2), (2, 9, 3)]
+        cut = ops.stat(db, mid, "/cut").id
+        assert c.execute(
+            "SELECT version, size, chunks FROM content_commit "
+            "WHERE content_id = ? ORDER BY version",
+            (cut,),
+        ).fetchall()[-1][:] == (2, 0, 0)
+        orphans = c.execute(
+            "SELECT count(*) FROM content_version WHERE content_id = ? AND version > 2",
+            (nid,),
+        ).fetchone()[0]
+        assert orphans == 0
+        mid = ops.mount(db, vol, "/", ttl_ms=60_000, allow_overlap=True)
+        assert ops.read_all(db, mid, "/f") == b"1111bbbbc"
+        assert ops.read_all(db, mid, "/empty") == b""
+        assert ops.read_all(db, mid, "/cut") == b""
+        assert ops.verify(db, mid).problems == []
+        c.execute("PRAGMA user_version = 4")
+        db.close()
+
+    db = _open(p)
+    mid = ops.mount(db, vol, "/", ttl_ms=60_000, allow_overlap=True)
+    ops.write_range(db, mid, "/f", 5, b"Z")  # version 3: one row, not three
+    rows = db.connection.execute(
+        "SELECT chunk_index FROM content_version WHERE content_id = ? AND version = 3",
+        (nid,),
+    ).fetchall()
+    assert [r[0] for r in rows] == [1]
+    assert ops.read_all(db, mid, "/f") == b"1111bZbbc"
+    ops.set_default_retention(db, vol, 1)
+    ops.prune_content(db)
+    assert ops.read_all(db, mid, "/f") == b"1111bZbbc"
+    assert ops.verify(db, mid).problems == []
+    db.close()
+
+
 def test_era3_guard_refuses_a_null_placement_name(tmp_path: Path):
     """The backstop for anything inserting outside create_edge."""
     from aloelite._sqlite import sqlite3 as sq

@@ -31,8 +31,9 @@ Two things to know about the eras that exist:
 - **era 3** arrived in 0.4.0 (every placement carries its own name, which is
   what makes a child lookup an index seek). Neither 0.3.x nor 0.4.0rc1 can
   open an era-3 file.
-- **era 4** arrived in 0.5.0 (a volume's default retention and what it keeps
-  of a deleted entry). 0.4.x cannot open an era-4 file.
+- **era 4** and **era 5** arrived in 0.5.0 (a volume's default retention and
+  what it keeps of a deleted entry; versions that record only the chunks they
+  change). 0.4.x cannot open a file of either era.
 
 **To fix it**, install the newer build. That is the intended path and the
 error says so.
