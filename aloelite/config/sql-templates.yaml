@@ -296,7 +296,7 @@ resolution:
 
   get_mount:
     sql: |
-      SELECT mount_id, volume_id, mount_point, state, expires_at, created_at
+      SELECT mount_id, volume_id, mount_point, state, expires_at, created_at, holder
       FROM mount WHERE mount_id = :mount
     params: { mount: "MountId" }
     returns: "MountInfo (minus mount_path) or empty"
@@ -321,7 +321,7 @@ resolution:
 
   list_mounts:
     sql: |
-      SELECT mount_id, volume_id, mount_point, state, expires_at, created_at
+      SELECT mount_id, volume_id, mount_point, state, expires_at, created_at, holder
       FROM mount
       WHERE (:volume IS NULL OR volume_id = :volume)
         AND (:include_unmounted OR state <> 'unmounted')
@@ -759,8 +759,8 @@ mutation:
 
   create_mount:
     sql: |
-      INSERT INTO mount (mount_id, volume_id, mount_point, expires_at, created_at, N_m, access, principal)
-      VALUES (:id, :volume, :mount_point, :expires_at, :created_at, :n_m, :access, :principal)
+      INSERT INTO mount (mount_id, volume_id, mount_point, expires_at, created_at, N_m, access, principal, holder)
+      VALUES (:id, :volume, :mount_point, :expires_at, :created_at, :n_m, :access, :principal, :holder)
     params:
       id:          "MountId, host-minted stateless uuid7 (D-1)"
       volume:      "VolumeId the session binds to"
@@ -769,6 +769,7 @@ mutation:
       created_at:  "ns epoch of mount creation, supplied by the host"
       access:      "'ro' | 'rw' (D-4 mount policy; vocabulary guarded by mount_guard_access)"
       principal:   "tenant/user identity for policy, or NULL"
+      holder:      "the holding process, as the host spells it (mount-api.yaml mount.holder), or NULL"
     returns: none
     consumed_by: [mount]
     notes: >

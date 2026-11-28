@@ -190,3 +190,45 @@ descriptor holds a lock and is spared.
 For the owner: CV-6r1 is his to write; PI-7 (archived placements are
 retained), TX-3 and OP-5 read as contradicted by retention_on_delete = 0
 and purge, and need his revision or his word that they stand.
+
+## 2026-11-28 issue #15: the three daemon bugs
+
+Plan: the owner asked directly for issue #15, outside the roadmap (I0
+Seed still active). One branch, claude/project-thread-9x8lfm, no PR
+until the owner says so. (1) Ownership on create: `create_container`,
+`create_entry`, `create_special` take optional uid/gid/mode in
+mount-api.yaml and both engines (set in the same transaction), a
+conformance scenario for it, and both daemons pass the caller's
+uid/gid (setgid-directory gid inheritance included) and always record
+the mode; mkdir stops writing the era-1 `mode` metadata. Rust daemon
+mounts with default_permissions like pyfuse3 does. (2) Stale mount row
+after SIGKILL: a design choice, put to the owner as a decision card;
+nothing schema-side starts before the answer, because the era-4 thread
+is changing the schema. (3) `aloelite-fuse` exit 1 after an external
+unmount: fuser 0.18's `is_mounted` reads POLLERR backwards, so teardown
+umounts a path that is no longer mounted (EINVAL), and could unmount an
+unrelated filesystem mounted there since; fuser 0.19 fixes it upstream.
+Move to fuser 0.19 (new Owner argument feeds (1)) and add a test.
+
+Answer: the owner picked "record daemon host and pid" for (2). The era-4
+thread (PR #17, claude/project-thread-j1p9cd) asked me to add the column on
+top of its branch, so this branch is based on it.
+
+Done: (1) and (3) in bc40251, (2) in the next commit. Holder format and
+the retire rule live in mount-api.yaml `mount.holder`; aloelite/holder.py
+and rust/aloelite-fuse/src/holder.rs implement it. Liveness is judged only
+for the same boot_id AND pid namespace inode (the pair names one pid
+space), via kill(pid, 0) == ESRCH or a changed /proc starttime; anything
+else is left to the lease, so a live daemon in another container is never
+evicted. Verified here as root: initdb as postgres on both daemons with
+--allow-other; kill -9 then remount for all four py/rs pairings; exit 0
+after fusermount3 -u, relative mountpoint included. bench drops
+`_reap_dead_mounts` and the `reap_p50_ms` detail.
+
+Learned: fuser 0.18's `is_mounted` returns true on POLLERR (backwards);
+0.19 (2026-11-20) fixes it and adds `Owner` to the create callbacks.
+`sql/` is a symlink to `aloelite/sql/`. Not run here: WASI and browser
+targets (no wasm32 target or wasi-sdk installed).
+
+Next: the owner says when to open the PR; it targets PR #17's branch
+until that merges.

@@ -361,10 +361,35 @@ DROP TABLE volume;
 ALTER TABLE volume_era3 RENAME TO volume;
 """
 
+# The era-3 `mount` table (no holder), swapped in the same way.
+_ERA3_MOUNT_COLUMNS = (
+    "mount_id, volume_id, mount_point, state, expires_at, created_at, N_m, "
+    "access, principal"
+)
+_ERA3_MOUNT_SWAP = f"""
+CREATE TABLE mount_era3 (
+  mount_id    TEXT    PRIMARY KEY,
+  volume_id   TEXT    NOT NULL REFERENCES volume (volume_id),
+  mount_point TEXT    NOT NULL REFERENCES node (node_id),
+  state       TEXT    NOT NULL DEFAULT 'new'
+                      CHECK (state IN ('new', 'active', 'unmounted')),
+  expires_at  INTEGER,
+  created_at  INTEGER NOT NULL,
+  N_m         BLOB    NOT NULL,
+  access      TEXT    NOT NULL DEFAULT 'rw',
+  principal   TEXT
+) STRICT;
+INSERT INTO mount_era3 ({_ERA3_MOUNT_COLUMNS})
+  SELECT {_ERA3_MOUNT_COLUMNS} FROM mount;
+DROP TABLE mount;
+ALTER TABLE mount_era3 RENAME TO mount;
+"""
+
 
 def test_era3_file_gains_the_volume_retention_columns_on_open(tmp_path: Path):
     """Era 3 -> 4 on a file in genuine era-3 shape: no volume.retention_keep,
-    no volume.retention_on_delete, and none of the views that read them.
+    no volume.retention_on_delete, no mount.holder, and none of the views
+    that read them.
 
     Reopening must add both columns with their defaults (no default policy, a
     recycle bin on delete), rebuild the views, and leave content readable and
@@ -389,6 +414,7 @@ def test_era3_file_gains_the_volume_retention_columns_on_open(tmp_path: Path):
         c.execute(f'DROP {kind} "{name}"')
     c.execute("PRAGMA foreign_keys = OFF")
     c.executescript(_ERA3_VOLUME_SWAP)
+    c.executescript(_ERA3_MOUNT_SWAP)
     c.execute("PRAGMA foreign_keys = ON")
     c.execute("PRAGMA user_version = 3")
     db.close()
@@ -398,7 +424,9 @@ def test_era3_file_gains_the_volume_retention_columns_on_open(tmp_path: Path):
         assert _user_version(db) == SCHEMA_ERA
         info = ops.list_volumes(db)[0]
         assert (info.retention, info.retention_on_delete) == (None, 1)
-        mid = ops.mount(db, vol, "/", ttl_ms=60_000, allow_overlap=True)
+        assert ops.list_mounts(db, vol)[0].holder is None  # the era-3 row
+        mid = ops.mount(db, vol, "/", ttl_ms=60_000, allow_overlap=True, holder="h")
+        assert ops.mount_info(db, mid).holder == "h"
         assert ops.read_all(db, mid, "/f") == b"2222"
         assert ops.prune_content(db).versions_pruned == 0  # no default: keep all
         db.connection.execute("PRAGMA user_version = 3")
@@ -466,6 +494,7 @@ def test_create_templates_thread_host_created_at(tmp_path: Path):
             "n_m": b"0123456789abcdef",
             "access": "rw",
             "principal": None,
+            "holder": None,
         },
     )
     row = db.connection.execute(

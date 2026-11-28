@@ -168,6 +168,8 @@ class MountInfo(_Record):
     state: MountState
     expires_at: Timestamp | None
     created_at: Timestamp
+    # the process holding the mount, as the host that made it spelled it
+    holder: str | None = None
 
     @classmethod
     def from_row(
@@ -183,6 +185,7 @@ class MountInfo(_Record):
             if r["expires_at"] is not None
             else None,
             created_at=Timestamp(r["created_at"]),
+            holder=r["holder"],
         )
 
 

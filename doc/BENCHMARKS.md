@@ -641,12 +641,10 @@ settles at the live data plus whatever is written between two prunes, and
 at `--prune-every 2` the two rows read 3.9 and 1.1. With the sweep on,
 TPC-B at 64K ran at 185 tps against 194 without it, one run each.
 
-The Python daemon (`fuse`) has no column. It records its own uid as the
-owner of every node created through it, and it mounts with
-`default_permissions`. A root daemon serving postgres through `allow_other`
-therefore refuses initdb its own subdirectories (#15). The suite runs
-postgres as another user only when the harness is root. On a non-root runner
-the daemon and the cluster share one uid, and this case never arises.
+The Python daemon (`fuse`) has no column because it has not been measured
+yet. The suite runs postgres as another user only when the harness is root.
+Both daemons then record the calling uid and gid as the owner of each node,
+and the kernel enforces the modes (`default_permissions`).
 
 ## The measured rows
 

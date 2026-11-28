@@ -39,6 +39,10 @@ pub struct MountOptions<'a> {
     pub principal: Option<&'a str>,
     /// D-4: stack an rw mount over a subtree another rw mount already covers.
     pub allow_overlap: bool,
+    /// The process holding the mount, as the host spells it; opaque to the
+    /// engine. A FUSE daemon records itself here so that the next daemon
+    /// can tell this mount's holder is dead (mount-api.yaml `mount.holder`).
+    pub holder: Option<&'a str>,
 }
 
 impl Default for MountOptions<'_> {
@@ -50,6 +54,7 @@ impl Default for MountOptions<'_> {
             access: Access::Rw,
             principal: None,
             allow_overlap: false,
+            holder: None,
         }
     }
 }
@@ -254,6 +259,7 @@ pub fn mount(db: &mut Db, volume: &VolumeId, opts: &MountOptions<'_>) -> Result<
                 ":n_m": n_m.as_slice(),
                 ":access": opts.access,
                 ":principal": opts.principal,
+                ":holder": opts.holder,
             },
         )?;
         match crow.enc_mode {

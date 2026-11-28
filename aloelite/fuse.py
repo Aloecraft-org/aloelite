@@ -62,6 +62,7 @@ import trio
 
 import aloelite.errors as aloe_errors
 from aloelite.aloelite import Aloelite
+from aloelite.holder import identity, retire_dead
 from aloelite.types import NodeType, Whence, WriteMode
 
 
@@ -457,14 +458,32 @@ class AloeFuse(pyfuse3.Operations):
         self._dirs.pop(fh, None)
 
     # -- create / delete ----------------------------------------------------
+    def _ownership(self, parent_inode: int, ctx, mode: int, is_dir: bool) -> dict:
+        """What a new node under the parent is owned by: the caller's uid, and
+        the caller's gid unless the parent is setgid, in which case the
+        parent's gid (and a new directory inherits the setgid bit) -- the rule
+        the kernel applies on a local filesystem and leaves to a FUSE one.
+        The umask is applied here too; doing it twice is harmless if the
+        kernel already did. The mode is always recorded, so the bits the
+        caller asked for are the bits it gets back. The kernel enforces them
+        (pyfuse3's default_permissions), which is why a node owned by the
+        daemon's uid instead locked a non-root caller out of its own tree.
+        The Rust daemon's Inner::ownership is the same rule."""
+        perms = mode & 0o7777 & ~ctx.umask
+        gid = ctx.gid
+        parent = self.m.stat_by_id(self._n[parent_inode])
+        if _mode_bits(parent, 0o777) & st_mod.S_ISGID:
+            gid = parent.gid if parent.gid is not None else os.getgid()
+            if is_dir:
+                perms |= st_mod.S_ISGID
+        return {"uid": ctx.uid, "gid": gid, "mode": perms}
+
     async def mkdir(self, parent_inode, name, mode, ctx):
         base = self._path(parent_inode).rstrip("/")
         path = f"{base}/{os.fsdecode(name)}"
         try:
-            node = self.m.create_container(path)
-            perms = mode & 0o7777
-            if perms and perms != 0o777:
-                self.m.set_metadata(path, {"mode": format(perms, "o")})
+            owner = self._ownership(parent_inode, ctx, mode, is_dir=True)
+            node = self.m.create_container(path, **owner)
             return self._live_attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
@@ -473,10 +492,8 @@ class AloeFuse(pyfuse3.Operations):
         base = self._path(parent_inode).rstrip("/")
         path = f"{base}/{os.fsdecode(name)}"
         try:
-            node = self.m.create_entry(path, b"")
-            perms = mode & 0o7777
-            if perms and perms != 0o666:
-                self.m.set_owner(path, mode=perms)
+            owner = self._ownership(parent_inode, ctx, mode, is_dir=False)
+            node = self.m.create_entry(path, b"", **owner)
             ino = self._remember(node)
             fh = self._next_fh()
             acc = flags & os.O_ACCMODE
@@ -516,8 +533,11 @@ class AloeFuse(pyfuse3.Operations):
             # era 2: first-class symlink type; the content is the target.
             # (Era-1 files used an entry + NODE-6 'symlink' metadata flag,
             # which _attr still honors on read.)
+            # a symlink's permission bits are never consulted; record none
+            owner = self._ownership(parent_inode, ctx, 0, is_dir=False)
+            owner["mode"] = None
             node = self.m.create_special(
-                path, NodeType.SYMLINK, os.fsencode(os.fsdecode(target))
+                path, NodeType.SYMLINK, os.fsencode(os.fsdecode(target)), **owner
             )
             return self._live_attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
@@ -541,15 +561,13 @@ class AloeFuse(pyfuse3.Operations):
         base = self._path(parent_inode).rstrip("/")
         path = f"{base}/{os.fsdecode(name)}"
         try:
+            owner = self._ownership(parent_inode, ctx, mode, is_dir=False)
             if st_mod.S_ISFIFO(mode):
-                node = self.m.create_special(path, NodeType.FIFO)
+                node = self.m.create_special(path, NodeType.FIFO, **owner)
             elif st_mod.S_ISSOCK(mode):
-                node = self.m.create_special(path, NodeType.SOCKET)
+                node = self.m.create_special(path, NodeType.SOCKET, **owner)
             else:  # S_IFREG (or unspecified): mknod can make regular files
-                node = self.m.create_entry(path, b"")
-            perms = mode & 0o7777
-            if perms:
-                self.m.set_owner(path, mode=perms)
+                node = self.m.create_entry(path, b"", **owner)
             return self._live_attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
@@ -922,7 +940,9 @@ async def _watch_stop(stop_event, interval: float = 0.2) -> None:
 
 # The daemon's engine mount carries a ttl and renews it while alive (ACC-3),
 # so a crashed daemon's mount row EXPIRES instead of blocking the volume's
-# rw-per-subtree admission (D-4) forever. Same trio loop as the handlers, so
+# rw-per-subtree admission (D-4) forever. A crash on this same host is caught
+# sooner, by the holder check in fuse_main (aloelite/holder.py); the lease is
+# what ends a holder that check cannot judge. Same trio loop as the handlers, so
 # the shared connection is never used concurrently.
 _MOUNT_TTL_MS = 300_000
 _RENEW_EVERY_S = 60.0
@@ -1005,8 +1025,12 @@ async def fuse_main(
             fs, volume_name, pin=pin, create=create, chunk_size=chunk_size
         )
         _apply_retention(fs, vol_id, retention, retention_on_delete)
+        # A daemon that died without unmounting (SIGKILL, OOM) leaves its row
+        # admitted until the lease runs out; retire the ones whose holder is
+        # provably gone, then record this process as the new holder (#15).
+        retire_dead(fs, vol_id)
         mount = fs.mount(
-            vol_id, pin=pin, access=access, ttl_ms=_MOUNT_TTL_MS
+            vol_id, pin=pin, access=access, ttl_ms=_MOUNT_TTL_MS, holder=identity()
         ).__enter__()
         try:
             ops = AloeFuse(mount)
@@ -1251,7 +1275,7 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
                 raise rest
         print("\naloefuse: interrupted; unmounted cleanly", file=sys.stderr)
         sys.exit(130)
-    except (aloe_errors.NotFound, ChunkSizeFixed) as e:
+    except (aloe_errors.NotFound, aloe_errors.MountConflict, ChunkSizeFixed) as e:
         print(f"aloefuse: {e}", file=sys.stderr)
         sys.exit(1)
     except aloe_errors.BadKey:

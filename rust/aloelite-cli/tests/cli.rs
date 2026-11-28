@@ -327,10 +327,30 @@ fn get_recursive_never_escapes_the_destination() {
     let mut db = aloelite_store::file::open(&f).unwrap();
     let vol = ops::list_volumes(&mut db).unwrap().remove(0).id;
     let m = ops::mount(&mut db, &vol, &MountOptions::default()).unwrap();
-    ops::create_container(&mut db, &m, "/evil").unwrap();
-    ops::create_container(&mut db, &m, "/evil/..").unwrap(); // a container literally named '..'
-    ops::create_entry(&mut db, &m, "/evil/../child", Some(b"escaped")).unwrap();
-    ops::create_entry(&mut db, &m, "/evil/ok.txt", Some(b"fine")).unwrap();
+    ops::create_container(&mut db, &m, "/evil", aloelite_core::types::Ownership::NONE).unwrap();
+    ops::create_container(
+        &mut db,
+        &m,
+        "/evil/..",
+        aloelite_core::types::Ownership::NONE,
+    )
+    .unwrap(); // a container literally named '..'
+    ops::create_entry(
+        &mut db,
+        &m,
+        "/evil/../child",
+        Some(b"escaped"),
+        aloelite_core::types::Ownership::NONE,
+    )
+    .unwrap();
+    ops::create_entry(
+        &mut db,
+        &m,
+        "/evil/ok.txt",
+        Some(b"fine"),
+        aloelite_core::types::Ownership::NONE,
+    )
+    .unwrap();
     ops::unmount(&mut db, &m).unwrap();
     db.close().unwrap();
     let out = dir.join("safe");

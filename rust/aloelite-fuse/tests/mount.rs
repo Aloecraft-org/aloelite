@@ -529,3 +529,139 @@ fn a_mount_that_prunes_enforces_the_volumes_retention() {
     assert_eq!(counts(), (1, 1), "(versions, entries) after a prune");
     assert_eq!(std::fs::read(m.path("kept")).unwrap(), [b'd'; 16]);
 }
+
+// ---------------------------------------------------------------------------
+// ownership on create, and the end of a session (issue #15)
+// ---------------------------------------------------------------------------
+
+/// A node is owned by the caller that made it, carries exactly the mode it
+/// asked for (less the umask), and under a setgid directory takes the
+/// directory's group, a new subdirectory inheriting the setgid bit. The
+/// daemon's own uid used to be recorded instead, which with
+/// default_permissions locked another uid out of its own tree.
+#[test]
+fn new_nodes_belong_to_the_caller() {
+    let Some(m) = Mounted::start("owner") else {
+        return;
+    };
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    let old = unsafe { libc::umask(0o022) };
+    let mkdir = |p: &Path, mode: u32| {
+        let c = CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkdir(c.as_ptr(), mode) }, 0, "mkdir {p:?}");
+    };
+    mkdir(&m.path("d"), 0o750);
+    drop(Fd::open(&m.path("d/f"), libc::O_WRONLY | libc::O_CREAT));
+    let d = std::fs::metadata(m.path("d")).unwrap();
+    let f = std::fs::metadata(m.path("d/f")).unwrap();
+    assert_eq!((d.uid(), d.gid(), d.mode() & 0o7777), (uid, gid, 0o750));
+    assert_eq!((f.uid(), f.gid(), f.mode() & 0o7777), (uid, gid, 0o644));
+
+    // setgid inheritance needs a group other than ours, which only root
+    // can give a directory
+    if uid == 0 {
+        let other = 65534;
+        std::os::unix::fs::chown(m.path("d"), None, Some(other)).unwrap();
+        std::fs::set_permissions(m.path("d"), std::fs::Permissions::from_mode(0o2775)).unwrap();
+        mkdir(&m.path("d/sub"), 0o755);
+        drop(Fd::open(&m.path("d/g"), libc::O_WRONLY | libc::O_CREAT));
+        let sub = std::fs::metadata(m.path("d/sub")).unwrap();
+        let g = std::fs::metadata(m.path("d/g")).unwrap();
+        assert_eq!((sub.gid(), sub.mode() & 0o7777), (other, 0o2755));
+        assert_eq!((g.gid(), g.mode() & 0o7777), (other, 0o644));
+    }
+    unsafe { libc::umask(old) };
+}
+
+/// An unmount from outside ends the session, and tearing the mount down
+/// afterwards succeeds: the daemon used to unmount the path a second time,
+/// fail with EINVAL, and exit 1 after an ordinary `fusermount3 -u`.
+#[test]
+fn an_external_unmount_ends_the_session_cleanly() {
+    let Some(mut m) = Mounted::start("external-umount") else {
+        return;
+    };
+    std::fs::write(m.path("f"), b"kept").unwrap();
+    let status = std::process::Command::new("fusermount3")
+        .arg("-u")
+        .arg(&m.mp)
+        .status();
+    let Ok(status) = status else {
+        eprintln!("skip external-umount: no fusermount3");
+        return;
+    };
+    assert!(status.success(), "fusermount3 -u failed");
+    let mount = m.mount.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !mount.ended() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(mount.ended(), "session did not notice the unmount");
+    mount.unmount().expect("teardown after an external unmount");
+}
+
+/// SIGKILL the daemon, clear the dead kernel mount, and mount again at once.
+/// The killed daemon's rw row used to refuse the remount until its
+/// five-minute lease ran out; its recorded holder is now provably gone, so
+/// the next daemon retires the row.
+#[test]
+fn a_killed_daemons_mount_does_not_block_a_remount() {
+    if !Path::new("/dev/fuse").exists() {
+        eprintln!("skip killed-daemon: /dev/fuse not available");
+        return;
+    }
+    let root = scratch("killed-daemon");
+    let (file, mp) = (root.join("k.fs"), root.join("mnt"));
+    std::fs::create_dir_all(&mp).unwrap();
+    let daemon = |create: bool| {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_aloelite-fuse"));
+        cmd.arg("-f").arg(&file).args(["-v", "data"]);
+        if create {
+            cmd.arg("--create");
+        }
+        cmd.arg(&mp)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let wait_mounted = |child: &mut std::process::Child| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !is_mounted(&mp) {
+            if child.try_wait().unwrap().is_some() {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        is_mounted(&mp)
+    };
+    let mut first = daemon(true);
+    if !wait_mounted(&mut first) {
+        eprintln!("skip killed-daemon: cannot mount FUSE here");
+        let _ = first.kill();
+        std::fs::remove_dir_all(&root).ok();
+        return;
+    }
+    std::fs::write(mp.join("f"), b"kept").unwrap();
+    first.kill().unwrap(); // SIGKILL
+    first.wait().unwrap();
+    let cleared = std::process::Command::new("fusermount3")
+        .arg("-u")
+        .arg(&mp)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(cleared, "fusermount3 -u of the dead mount");
+
+    let mut second = daemon(false);
+    assert!(wait_mounted(&mut second), "remount refused after a SIGKILL");
+    assert_eq!(std::fs::read(mp.join("f")).unwrap(), b"kept");
+    let _ = std::process::Command::new("fusermount3")
+        .arg("-u")
+        .arg(&mp)
+        .status();
+    assert!(
+        second.wait().unwrap().success(),
+        "daemon exit after fusermount3 -u"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}

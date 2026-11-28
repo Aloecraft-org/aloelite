@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use aloelite_core::ops;
-use aloelite_core::types::{MountId, NodeType, WriteMode};
+use aloelite_core::types::{MountId, NodeType, Ownership, WriteMode};
 use aloelite_core::{Db, FsError};
 
 use crate::fail::{Result, fail};
@@ -66,11 +66,11 @@ pub fn mkdir(db: &mut Db, m: &MountId, path: &str, parents: bool, exist_ok: bool
         for i in 1..segs.len() {
             let parent = format!("/{}", segs[..i].join("/"));
             if !ops::exists(db, m, &parent)? {
-                ops::create_container(db, m, &parent)?;
+                ops::create_container(db, m, &parent, Ownership::NONE)?;
             }
         }
     }
-    ops::create_container(db, m, path)?;
+    ops::create_container(db, m, path, Ownership::NONE)?;
     Ok(())
 }
 
@@ -82,12 +82,12 @@ pub fn put_bytes(db: &mut Db, m: &MountId, path: &str, data: &[u8], append: bool
         if exists {
             ops::append(db, m, path, data)?;
         } else {
-            ops::create_entry(db, m, path, Some(data))?;
+            ops::create_entry(db, m, path, Some(data), Ownership::NONE)?;
         }
     } else if exists {
         ops::write_all(db, m, path, data)?;
     } else {
-        ops::create_entry(db, m, path, Some(data))?;
+        ops::create_entry(db, m, path, Some(data), Ownership::NONE)?;
     }
     Ok(())
 }

@@ -315,7 +315,11 @@ CREATE TABLE IF NOT EXISTS mount (
   -- era 2 (D-4 / HANDOFF-0.4 §4.3): mount policy. access vocabulary lives in
   -- mount_guard_access (a trigger, like NODE-2) so a future era can widen it.
   access      TEXT    NOT NULL DEFAULT 'rw',                            -- 'ro' | 'rw'
-  principal   TEXT                                                      -- tenant/user identity for policy + future ACLs; NULL = unattributed
+  principal   TEXT,                                                     -- tenant/user identity for policy + future ACLs; NULL = unattributed
+  -- era 4: the process holding the mount, as the host that made it wrote it
+  -- (mount-api.yaml `mount.holder`); opaque here. NULL = unknown, and the
+  -- lease (expires_at) is then the only way a dead holder's mount ends.
+  holder      TEXT
 ) STRICT;
 
 -- Locks. ACC-6..9. Scoped to one mount; cascade is a dangle-safety net, not

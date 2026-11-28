@@ -41,6 +41,36 @@ scenarios:
         args: {path: /f}
         expect: {uid: null, gid: null, mode: null}
 
+  - scenario: create-ops-record-ownership
+    requirements: [NODE-4]
+    description: >
+      create_container, create_entry and create_special take the new node's
+      uid/gid/mode, recorded in the create's own transaction (a FUSE daemon
+      passes the caller's ids, so a node is owned by whoever made it). mode
+      is masked to 07777; an omitted field stays null, like a node never
+      chowned.
+    steps:
+      - op: create_container
+        args: {path: /d, uid: 1001, gid: 1002, mode: 1517}
+      - op: stat
+        args: {path: /d}
+        expect: {uid: 1001, gid: 1002, mode: 1517}
+      - op: create_entry
+        args: {path: /d/f, data: {utf8: "x"}, uid: 1001, gid: 1002, mode: 33188}
+      - op: stat
+        args: {path: /d/f}
+        expect: {uid: 1001, gid: 1002, mode: 420}
+      - op: create_special
+        args: {path: /d/l, type: symlink, data: {utf8: "f"}, uid: 1001}
+      - op: stat
+        args: {path: /d/l}
+        expect: {uid: 1001, gid: null, mode: null}
+      - op: create_entry
+        args: {path: /plain, data: {utf8: "x"}}
+      - op: stat
+        args: {path: /plain}
+        expect: {uid: null, gid: null, mode: null}
+
   - scenario: xattrs-round-trip-binary-values
     requirements: [NODE-4]
     description: >

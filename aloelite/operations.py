@@ -348,6 +348,7 @@ def mount(
     access: str = "rw",
     principal: str | None = None,
     allow_overlap: bool = False,
+    holder: str | None = None,
 ) -> MountId:
     """Open a mount on a volume, anchored at `at` (relative to the
     volume root). Returns the durable MountId.
@@ -396,6 +397,7 @@ def mount(
                 "n_m": n_m,
                 "access": access,
                 "principal": principal,
+                "holder": holder,
             },
         )
 
@@ -582,23 +584,61 @@ def path_of(db: Db, mount: MountId, node: NodeId) -> str:
 # ===========================================================================
 # Structural
 # ===========================================================================
-def create_container(db: Db, mount: MountId, path: str) -> NodeId:
+def create_container(
+    db: Db,
+    mount: MountId,
+    path: str,
+    *,
+    uid: int | None = None,
+    gid: int | None = None,
+    mode: int | None = None,
+) -> NodeId:
+    """uid/gid/mode, when given, are recorded in the create's own transaction
+    (NODE-4), so the node is never visible without its owner; None leaves the
+    column NULL. The same three keywords on create_entry/create_special."""
     with db.txn():
         m = _require_mount(db, mount, write=True)
         parent, name = resolve_parent(db, m.mount_point, path)
         _require_name(name)
         node = _new_node(db, m, type=NodeType.CONTAINER, name=name)
+        _stamp_owner(db, node, uid, gid, mode)
         _link(db, m, parent, node)
     return node
 
 
+def _stamp_owner(
+    db: Db, node: NodeId, uid: int | None, gid: int | None, mode: int | None
+) -> None:
+    """A create's ownership on the node it just made; nothing to write when
+    no field is given."""
+    if uid is None and gid is None and mode is None:
+        return
+    db.rowcount(
+        "mutation.set_owner",
+        {
+            "node": node,
+            "uid": uid,
+            "gid": gid,
+            "mode": mode & 0o7777 if mode is not None else None,
+        },
+    )
+
+
 def _create_entry_internal(
-    db: Db, mount: MountId, path: str, data: bytes | None = None
+    db: Db,
+    mount: MountId,
+    path: str,
+    data: bytes | None = None,
+    *,
+    uid: int | None = None,
+    gid: int | None = None,
+    mode: int | None = None,
 ) -> NodeId:
     m = _require_mount(db, mount, write=True)
     parent, name = resolve_parent(db, m.mount_point, path)
     _require_name(name)
     node = _new_node(db, m, type=NodeType.ENTRY, name=name)
+    _stamp_owner(db, node, uid, gid, mode)
     # Establish content at creation. Uniform chunking: empty => version 0 / zero
     # chunks; with data => version 1 staged. create_content + stage_chunks are
     # INSERTs, so they do NOT bump modified_at (a fresh file keeps
@@ -609,10 +649,19 @@ def _create_entry_internal(
 
 
 def create_entry(
-    db: Db, mount: MountId, path: str, data: bytes | None = None
+    db: Db,
+    mount: MountId,
+    path: str,
+    data: bytes | None = None,
+    *,
+    uid: int | None = None,
+    gid: int | None = None,
+    mode: int | None = None,
 ) -> NodeId:
     with db.txn():
-        return _create_entry_internal(db, mount, path, data)
+        return _create_entry_internal(
+            db, mount, path, data, uid=uid, gid=gid, mode=mode
+        )
 
 
 def write_all(db: Db, mount: MountId, path: str, data: bytes) -> None:
@@ -979,7 +1028,15 @@ def link(db: Db, mount: MountId, src: str, dst: str) -> None:
 
 
 def create_special(
-    db: Db, mount: MountId, path: str, type: NodeType, data: bytes = b""
+    db: Db,
+    mount: MountId,
+    path: str,
+    type: NodeType,
+    data: bytes = b"",
+    *,
+    uid: int | None = None,
+    gid: int | None = None,
+    mode: int | None = None,
 ) -> NodeId:
     """Create a symlink/fifo/socket leaf (era 2 / D-3). `data` is the symlink
     target; fifo/socket carry an empty content row (the kernel owns their
@@ -991,6 +1048,7 @@ def create_special(
         parent, name = resolve_parent(db, m.mount_point, path)
         _require_name(name)
         node = _new_node(db, m, type=type, name=name)
+        _stamp_owner(db, node, uid, gid, mode)
         _put_initial_content(db, m, node, data)
         _link(db, m, parent, node)
     return node

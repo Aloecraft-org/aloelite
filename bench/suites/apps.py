@@ -208,7 +208,7 @@ def _kill_loop(run, label, cfg, frontend, mode, fs_file, mp, workdir, pg, as_use
     that changes what a round costs in space, not what it can lose.
     """
     rng = random.Random(4242)
-    recover, reap, corrupt, refused = [], [], 0, 0
+    recover, corrupt, refused = [], 0, 0
     for _ in range(cfg["pg_kill_rounds"]):
         with _hosting(frontend, mode, fs_file, mp, workdir, as_user) as (root, daemon):
             pg.datadir = root / "pgdata"
@@ -221,8 +221,8 @@ def _kill_loop(run, label, cfg, frontend, mode, fs_file, mp, workdir, pg, as_use
             _kill_cluster(pg.postmaster_pid, first=daemon)
             load.kill()
             load.wait(timeout=30)
-        if frontend != "ext4":
-            reap.append(_reap_dead_mounts(fs_file))
+        # No reaping between rounds: the next daemon retires the killed
+        # one's mount row itself, because its recorded holder is gone (#15).
 
         # A real crash leaves postmaster.pid behind; postgres copes with it.
         with _hosting(frontend, mode, fs_file, mp, workdir, as_user) as (root, _d):
@@ -238,8 +238,6 @@ def _kill_loop(run, label, cfg, frontend, mode, fs_file, mp, workdir, pg, as_use
     detail.update(
         {"refused_starts": float(refused), "rounds": float(cfg["pg_kill_rounds"])}
     )
-    if reap:
-        detail["reap_p50_ms"] = latency_detail(reap)["p50_ms"]
     run.add(
         Row(
             metric="pg_crash_corrupt",
@@ -315,36 +313,13 @@ def _unmount_quietly(mp: Path) -> None:
         subprocess.run(["fusermount3", "-uz", str(mp)], capture_output=True)
 
 
-def _reap_dead_mounts(fs_file: Path) -> float:
-    """Retire the killed daemon's mount row, then prune its entry locks.
-
-    A SIGKILLed daemon never unmounts, and D-4 refuses a second rw mount
-    over its row until the lease runs out (MOUNT_TTL_MS, five minutes).
-    Waiting that out would be measuring a timer; this is what an operator
-    who knows the daemon is dead does instead. Returns seconds taken.
-    """
-    from aloelite.aloelite import Aloelite
-
-    start = time.perf_counter()
-    fs = Aloelite(fs_file)
-    try:
-        volume = fs.resolve_volume_name("pg")
-        for info in fs.list_mounts(volume):
-            fs.attach(info.id).unmount()
-        fs.prune(volume)  # ACC-10: lock reclamation is deferred to prune
-    finally:
-        fs.close()
-    return time.perf_counter() - start
-
-
 def _make_datadir(datadir: Path, as_user) -> None:
     """PGDATA, owned by the cluster's user before initdb sees it.
 
-    Made here rather than by initdb because the daemon records ITS uid as
-    the owner of anything created through it, and postgres refuses a data
-    directory it does not own. Everything initdb creates below this is
-    then the daemon's too, which is harmless on a mount without
-    default_permissions and fatal on one with it.
+    Made here rather than by initdb because initdb creates only the data
+    directory itself, and its parent is the mount root, which the harness
+    (root, when postgres runs as another user) owns. Everything below is
+    created by postgres and owned by it, on every frontend.
     """
     datadir.mkdir()
     os.chown(datadir, as_user.pw_uid, as_user.pw_gid)

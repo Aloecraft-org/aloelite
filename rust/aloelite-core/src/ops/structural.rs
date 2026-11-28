@@ -14,7 +14,7 @@ use crate::templates::mutation::{
 };
 use crate::templates::resolution::{GET_NODE, RESOLVE_SEGMENT};
 use crate::templates::validation::CHECK_CYCLE;
-use crate::types::{MountId, NodeId, NodeType};
+use crate::types::{MountId, NodeId, NodeType, Ownership};
 
 use super::{
     link_child, lock_held, meta_to_json, new_node, put_initial_content, require_mount, require_name,
@@ -24,12 +24,18 @@ use super::{
 // surface
 // ---------------------------------------------------------------------------
 
-pub fn create_container(db: &mut Db, mount: &MountId, path: &str) -> Result<NodeId> {
+pub fn create_container(
+    db: &mut Db,
+    mount: &MountId,
+    path: &str,
+    owner: Ownership,
+) -> Result<NodeId> {
     db.txn(|db| {
         let m = require_mount(db, mount, true)?;
         let parent = resolve_parent(db, &m.mount_point, path)?;
         require_name(&parent.name)?;
         let node = new_node(db, &m, NodeType::Container, &parent.name, None, None, None)?;
+        stamp_owner(db, &node, owner)?;
         link_child(db, &m, &parent.container, &node, None)?;
         Ok(node)
     })
@@ -40,8 +46,9 @@ pub fn create_entry(
     mount: &MountId,
     path: &str,
     data: Option<&[u8]>,
+    owner: Ownership,
 ) -> Result<NodeId> {
-    db.txn(|db| create_entry_internal(db, mount, path, data))
+    db.txn(|db| create_entry_internal(db, mount, path, data, owner))
 }
 
 /// Rename the placement the path walked (D-5). For a hardlinked node this
@@ -118,6 +125,7 @@ pub fn create_special(
     path: &str,
     kind: NodeType,
     data: &[u8],
+    owner: Ownership,
 ) -> Result<NodeId> {
     if matches!(kind, NodeType::Container | NodeType::Entry) {
         return Err(FsError::unsupported(format!(
@@ -129,6 +137,7 @@ pub fn create_special(
         let parent = resolve_parent(db, &m.mount_point, path)?;
         require_name(&parent.name)?;
         let node = new_node(db, &m, kind, &parent.name, None, None, None)?;
+        stamp_owner(db, &node, owner)?;
         put_initial_content(db, &m, &node, data)?;
         link_child(db, &m, &parent.container, &node, None)?;
         Ok(node)
@@ -320,14 +329,35 @@ pub(crate) fn create_entry_internal(
     mount: &MountId,
     path: &str,
     data: Option<&[u8]>,
+    owner: Ownership,
 ) -> Result<NodeId> {
     let m = require_mount(db, mount, true)?;
     let parent = resolve_parent(db, &m.mount_point, path)?;
     require_name(&parent.name)?;
     let node = new_node(db, &m, NodeType::Entry, &parent.name, None, None, None)?;
+    stamp_owner(db, &node, owner)?;
     // Establish content at creation: empty => version 0 / zero chunks; with
     // data => version 1 staged. INSERTs, so modified_at stays == created_at.
     put_initial_content(db, &m, &node, data.unwrap_or(&[]))?;
     link_child(db, &m, &parent.container, &node, None)?;
     Ok(node)
+}
+
+/// Record a create's ownership on the node it just made, inside the
+/// create's transaction, so a node is never visible without its owner.
+/// Nothing to write when no field is given (the columns stay NULL).
+fn stamp_owner(db: &mut Db, node: &NodeId, owner: Ownership) -> Result<()> {
+    if owner.is_none() {
+        return Ok(());
+    }
+    db.run(
+        SET_OWNER,
+        named_params! {
+            ":node": node,
+            ":uid": owner.uid,
+            ":gid": owner.gid,
+            ":mode": owner.mode.map(|m| m & 0o7777),
+        },
+    )?;
+    Ok(())
 }

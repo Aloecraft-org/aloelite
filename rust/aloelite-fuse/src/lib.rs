@@ -26,7 +26,8 @@
 //! Layout: [`overlay`] is the dirty-extent state, portable and unit-tested;
 //! [`errno`] and [`inode`] are the two small mappings; [`fs`] is the
 //! `Filesystem` impl; [`daemon`] mounts, renews the engine lease and
-//! unmounts on a signal; [`cli`] is `aloelite-fuse`'s command line, the same
+//! unmounts on a signal; [`holder`] records the daemon on its mount row and
+//! retires the rows of daemons that died without unmounting; [`cli`] is `aloelite-fuse`'s command line, the same
 //! flags as the Python entry point.
 
 pub mod cli;
@@ -38,3 +39,5 @@ pub mod overlay;
 pub mod daemon;
 #[cfg(target_os = "linux")]
 pub mod fs;
+#[cfg(target_os = "linux")]
+pub mod holder;

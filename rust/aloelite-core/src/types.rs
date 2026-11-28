@@ -24,6 +24,32 @@ use serde::{Deserialize, Serialize};
 /// Unix epoch nanoseconds (era 2; era 1 stored milliseconds).
 pub type Timestamp = i64;
 
+/// The ownership a create op stamps on the node it makes: the spec's
+/// optional `uid`/`gid`/`mode` trio on `create_container`, `create_entry`
+/// and `create_special`, the same three `set_owner` takes. `None` leaves a
+/// column NULL, which hosts read as their process defaults (NODE-4); a FUSE
+/// daemon passes the caller's ids so a node is owned by whoever made it.
+/// Applied in the create's own transaction; mode is masked to 07777.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Ownership {
+    pub uid: Option<i64>,
+    pub gid: Option<i64>,
+    pub mode: Option<i64>,
+}
+
+impl Ownership {
+    /// No ownership recorded: every column stays NULL.
+    pub const NONE: Ownership = Ownership {
+        uid: None,
+        gid: None,
+        mode: None,
+    };
+
+    pub fn is_none(&self) -> bool {
+        self.uid.is_none() && self.gid.is_none() && self.mode.is_none()
+    }
+}
+
 /// A byte size as a command line spells it: `65536`, `64K` or `1M`, the
 /// suffix binary and case-insensitive. `None` for anything else, zero
 /// included. Shared by every front-end that takes `--chunk-size`; the

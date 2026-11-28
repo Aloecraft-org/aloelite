@@ -19,7 +19,14 @@ fn a_volume_survives_close_and_reopen_by_path() {
         let mut db = file::open(&path).unwrap();
         let volume = ops::create_volume(&mut db, Some("v"), 64, None, EncMode::Convergent).unwrap();
         let mount = ops::mount(&mut db, &volume.id, &MountOptions::default()).unwrap();
-        ops::create_entry(&mut db, &mount, "/hello.txt", Some(b"hello")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &mount,
+            "/hello.txt",
+            Some(b"hello"),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         ops::unmount(&mut db, &mount).unwrap();
         db.close().unwrap();
         volume
@@ -60,7 +67,14 @@ fn a_native_wal_file_opens_as_a_memory_image_and_a_snapshot_reopens_natively() {
         assert_eq!(mode, "wal", "the native file is in WAL mode");
         let volume = ops::create_volume(&mut db, Some("v"), 64, None, EncMode::Convergent).unwrap();
         let mount = ops::mount(&mut db, &volume.id, &MountOptions::default()).unwrap();
-        ops::create_entry(&mut db, &mount, "/hello.txt", Some(b"hello")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &mount,
+            "/hello.txt",
+            Some(b"hello"),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         ops::unmount(&mut db, &mount).unwrap();
         db.close().unwrap(); // the last connection checkpoints the WAL
         volume
@@ -79,7 +93,14 @@ fn a_native_wal_file_opens_as_a_memory_image_and_a_snapshot_reopens_natively() {
         ops::read_all(&mut db, &mount, "/hello.txt").unwrap(),
         b"hello"
     );
-    ops::create_entry(&mut db, &mount, "/later.txt", Some(b"x")).unwrap();
+    ops::create_entry(
+        &mut db,
+        &mount,
+        "/later.txt",
+        Some(b"x"),
+        aloelite_core::types::Ownership::NONE,
+    )
+    .unwrap();
     ops::unmount(&mut db, &mount).unwrap();
     let snapshot = db.snapshot().unwrap();
     db.close().unwrap();

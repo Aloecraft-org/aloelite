@@ -48,6 +48,12 @@ _MOUNT_WAIT_S = 15.0
 @pytest.fixture
 def mnt(tmp_path: Path):
     """A live aloelite-fuse mount on a fresh volume file; unmounts on exit."""
+    for mp, _daemon in _mounted(tmp_path):
+        yield mp
+
+
+def _mounted(tmp_path: Path, *extra: str):
+    """Yields (mountpoint, daemon process) once, then unmounts."""
     mp = tmp_path / "mnt"
     mp.mkdir()
     proc = subprocess.Popen(
@@ -60,6 +66,7 @@ def mnt(tmp_path: Path):
             "-v",
             "data",
             "--create",
+            *extra,
             str(mp),
         ],
         stdout=subprocess.PIPE,
@@ -77,7 +84,7 @@ def mnt(tmp_path: Path):
         proc.terminate()
         pytest.fail(f"mount did not appear within {_MOUNT_WAIT_S}s")
     try:
-        yield mp
+        yield mp, proc
     finally:
         subprocess.run(["fusermount3", "-u", str(mp)], capture_output=True)
         try:
@@ -200,6 +207,84 @@ def test_plain_roundtrip_unaffected(mnt: Path):
         assert _pread_uncached(r, 70000, 0) == b"Q" * 60000
     finally:
         os.close(r)
+
+
+# --------------------------------------------------------------------------
+# Ownership on create (issue #15)
+# --------------------------------------------------------------------------
+def test_new_nodes_belong_to_the_caller(mnt: Path):
+    """A node is owned by the caller that made it and carries exactly the
+    mode it asked for, less the umask; under a setgid directory it takes the
+    directory's group and a new subdirectory inherits the setgid bit."""
+    old = os.umask(0o022)
+    try:
+        os.mkdir(mnt / "d", 0o750)
+        os.close(os.open(mnt / "d" / "f", os.O_WRONLY | os.O_CREAT, 0o666))
+        d, f = os.stat(mnt / "d"), os.stat(mnt / "d" / "f")
+        me = (os.geteuid(), os.getegid())
+        assert (d.st_uid, d.st_gid, d.st_mode & 0o7777) == (*me, 0o750)
+        assert (f.st_uid, f.st_gid, f.st_mode & 0o7777) == (*me, 0o644)
+        if os.geteuid() == 0:  # only root can give a directory another group
+            os.chown(mnt / "d", -1, 65534)
+            os.chmod(mnt / "d", 0o2775)
+            os.mkdir(mnt / "d" / "sub", 0o755)
+            sub = os.stat(mnt / "d" / "sub")
+            assert (sub.st_gid, sub.st_mode & 0o7777) == (65534, 0o2755)
+    finally:
+        os.umask(old)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs root to serve another uid")
+def test_root_daemon_serves_another_uid():
+    """The initdb failure: a root daemon with --allow-other, a directory
+    handed to another uid, and that uid building a 0700 tree inside it. With
+    the daemon's own uid recorded as owner, the kernel's permission check
+    (default_permissions) refused the uid entry to what it had just made."""
+    # the other uid has to reach the mountpoint, so not under pytest's 0700
+    # basetemp
+    import tempfile
+
+    root = Path(tempfile.mkdtemp(prefix="aloelite-uid-"))
+    root.chmod(0o755)
+    try:
+        _serve_another_uid(root)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _serve_another_uid(root: Path) -> None:
+    for mp, _daemon in _mounted(root, "--allow-other"):
+        os.mkdir(mp / "home")
+        os.chown(mp / "home", 65534, 65534)
+        made = subprocess.run(
+            ["sh", "-c", "umask 077; mkdir -p a/b/c; echo ok > a/b/c/f; cat a/b/c/f"],
+            cwd=mp / "home",
+            user=65534,
+            group=65534,
+            extra_groups=[],
+            capture_output=True,
+            text=True,
+        )
+        assert made.returncode == 0, made.stderr
+        assert made.stdout == "ok\n"
+        st = os.stat(mp / "home" / "a" / "b" / "c")
+        assert (st.st_uid, st.st_gid, st.st_mode & 0o7777) == (65534, 65534, 0o700)
+
+
+def test_a_killed_daemons_mount_does_not_block_a_remount(tmp_path: Path):
+    """SIGKILL the daemon, clear the dead kernel mount, mount again at once.
+    The killed daemon's rw row used to refuse the remount (mount_conflict)
+    until its five-minute lease ran out; its recorded holder is now
+    provably gone, so the next daemon retires the row (#15)."""
+    first = _mounted(tmp_path)
+    mp, daemon = next(first)
+    (mp / "f").write_bytes(b"kept")
+    os.sync()
+    daemon.kill()
+    first.close()  # fusermount3 -u the dead mount, and reap the daemon
+    mp.rmdir()
+    for mp, _daemon in _mounted(tmp_path):
+        assert (mp / "f").read_bytes() == b"kept"
 
 
 # --------------------------------------------------------------------------
