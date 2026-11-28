@@ -274,7 +274,17 @@ impl Inner {
     fn getattr(&mut self, inode: u64) -> Result<FileAttr> {
         let node = self.node(inode)?;
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
-        let mut a = self.attr(inode, &info);
+        Ok(self.live_attr(inode, &info))
+    }
+
+    /// [`Self::attr`] with the size every open handle on `inode` has not yet
+    /// committed laid over it. Every reply that carries attributes goes
+    /// through here: the kernel takes the size in a LOOKUP reply as
+    /// authoritative just as it does a GETATTR one, so a lookup that reported
+    /// only committed bytes shrank the kernel's i_size under an open writer,
+    /// and a reader opened after the 1 s entry TTL was cut short.
+    fn live_attr(&self, inode: u64, info: &NodeInfo) -> FileAttr {
+        let mut a = self.attr(inode, info);
         let mut size = a.size;
         for h in self.open.values() {
             match h {
@@ -292,7 +302,7 @@ impl Inner {
         }
         a.size = size;
         a.blocks = size.div_ceil(512);
-        Ok(a)
+        a
     }
 
     fn lookup(&mut self, parent: u64, name: &OsStr) -> Result<FileAttr> {
@@ -306,7 +316,7 @@ impl Inner {
         let path = self.child_path(parent, name)?;
         let info = aloelite_core::ops::stat(&mut self.db, &self.mount, &path)?;
         let inode = self.remember(info.id.clone());
-        Ok(self.attr(inode, &info))
+        Ok(self.live_attr(inode, &info))
     }
 
     // -- directories --------------------------------------------------------
@@ -388,7 +398,7 @@ impl Inner {
         }
         let inode = self.remember(node.clone());
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
-        Ok(self.attr(inode, &info))
+        Ok(self.live_attr(inode, &info))
     }
 
     fn symlink(&mut self, parent: u64, name: &OsStr, target: &[u8]) -> Result<FileAttr> {
@@ -402,7 +412,7 @@ impl Inner {
         )?;
         let inode = self.remember(node.clone());
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
-        Ok(self.attr(inode, &info))
+        Ok(self.live_attr(inode, &info))
     }
 
     fn link(&mut self, inode: u64, new_parent: u64, new_name: &OsStr) -> Result<FileAttr> {
@@ -411,7 +421,7 @@ impl Inner {
         aloelite_core::ops::link(&mut self.db, &self.mount, &src, &dst)?;
         let node = self.node(inode)?;
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
-        Ok(self.attr(inode, &info))
+        Ok(self.live_attr(inode, &info))
     }
 
     /// FIFOs and sockets only; a regular file for `S_IFREG`. Device nodes are
@@ -451,7 +461,7 @@ impl Inner {
         }
         let inode = self.remember(node.clone());
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
-        Ok(self.attr(inode, &info))
+        Ok(self.live_attr(inode, &info))
     }
 
     fn unlink(&mut self, parent: u64, name: &OsStr) -> Result<()> {
@@ -529,7 +539,7 @@ impl Inner {
         let inode = self.remember(node.clone());
         let fh = self.open_handle(inode, &path, flags)?;
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
-        Ok((fh, self.attr(inode, &info)))
+        Ok((fh, self.live_attr(inode, &info)))
     }
 
     fn open(&mut self, inode: u64, flags: i32) -> Result<u64> {

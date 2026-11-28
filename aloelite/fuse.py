@@ -326,6 +326,26 @@ class AloeFuse(pyfuse3.Operations):
         self._fh += 1
         return self._fh
 
+    def _live_attr(self, inode: int, info) -> pyfuse3.EntryAttributes:
+        """_attr with the size open handles have not yet committed laid over
+        it. Every reply that carries attributes goes through here: the kernel
+        takes the size in a LOOKUP (or readdir) reply as authoritative just as
+        it does a GETATTR one, so a lookup that reported only committed bytes
+        shrank the kernel's i_size under an open writer, and a reader opened
+        after the 1s entry timeout was cut short."""
+        a = self._attr(inode, info)
+        for h in self._open.values():
+            if h.get("inode") == inode and h.get("mode") == "a":
+                a.st_size += len(h["buf"])
+        for h in self._open.values():
+            if h.get("inode") == inode and h.get("mode") == "w":
+                a.st_size = max(a.st_size, h["pos"])
+        of = self._files.get(inode)
+        if of is not None:
+            a.st_size = max(a.st_size, of.size)
+        a.st_blocks = (a.st_size + 511) // 512
+        return a
+
     def _attr(self, inode: int, info) -> pyfuse3.EntryAttributes:
         a = pyfuse3.EntryAttributes()
         a.st_ino = inode
@@ -361,23 +381,7 @@ class AloeFuse(pyfuse3.Operations):
     # -- lookups ------------------------------------------------------------
     async def getattr(self, inode, ctx=None):
         try:
-            a = self._attr(inode, self.m.stat_by_id(self._n[inode]))
-            extra = sum(
-                len(h["buf"])
-                for h in self._open.values()
-                if h.get("mode") == "a" and h.get("inode") == inode
-            )
-            if extra:
-                a.st_size += extra
-                a.st_blocks = (a.st_size + 511) // 512
-            for h in self._open.values():
-                if h.get("inode") == inode and h.get("mode") == "w":
-                    a.st_size = max(a.st_size, h["pos"])
-            of = self._files.get(inode)
-            if of is not None:
-                a.st_size = max(a.st_size, of.size)
-            a.st_blocks = (a.st_size + 511) // 512
-            return a
+            return self._live_attr(inode, self.m.stat_by_id(self._n[inode]))
         except KeyError:
             raise pyfuse3.FUSEError(errno.ENOENT)
         except Exception as e:
@@ -392,7 +396,7 @@ class AloeFuse(pyfuse3.Operations):
             info = self.m.stat(f"{base}/{nm}")
         except Exception as e:
             raise _wrap(e)
-        return self._attr(self._remember(info.id), info)
+        return self._live_attr(self._remember(info.id), info)
 
     async def access(self, inode, mode, ctx):
         # Single-user mount, world-rw modes in getattr: everything present is
@@ -440,7 +444,7 @@ class AloeFuse(pyfuse3.Operations):
                 continue
             ino = self._register(e.node)
             if not pyfuse3.readdir_reply(
-                token, os.fsencode(e.name), self._attr(ino, info), i + 1
+                token, os.fsencode(e.name), self._live_attr(ino, info), i + 1
             ):
                 break
 
@@ -456,7 +460,7 @@ class AloeFuse(pyfuse3.Operations):
             perms = mode & 0o7777
             if perms and perms != 0o777:
                 self.m.set_metadata(path, {"mode": format(perms, "o")})
-            return self._attr(self._remember(node), self.m.stat_by_id(node))
+            return self._live_attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
 
@@ -498,7 +502,7 @@ class AloeFuse(pyfuse3.Operations):
         except Exception as e:
             raise _wrap(e)
         fi = pyfuse3.FileInfo(fh=fh)
-        return (fi, self._attr(ino, self.m.stat_by_id(node)))
+        return (fi, self._live_attr(ino, self.m.stat_by_id(node)))
 
     async def symlink(self, parent_inode, name, target, ctx):
         base = self._path(parent_inode).rstrip("/")
@@ -510,7 +514,7 @@ class AloeFuse(pyfuse3.Operations):
             node = self.m.create_special(
                 path, NodeType.SYMLINK, os.fsencode(os.fsdecode(target))
             )
-            return self._attr(self._remember(node), self.m.stat_by_id(node))
+            return self._live_attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
 
@@ -519,7 +523,7 @@ class AloeFuse(pyfuse3.Operations):
         base = self._path(new_parent_inode).rstrip("/")
         try:
             self.m.hardlink(self._path(inode), f"{base}/{os.fsdecode(new_name)}")
-            return self._attr(inode, self.m.stat_by_id(self._n[inode]))
+            return self._live_attr(inode, self.m.stat_by_id(self._n[inode]))
         except Exception as e:
             raise _wrap(e)
 
@@ -541,7 +545,7 @@ class AloeFuse(pyfuse3.Operations):
             perms = mode & 0o7777
             if perms:
                 self.m.set_owner(path, mode=perms)
-            return self._attr(self._remember(node), self.m.stat_by_id(node))
+            return self._live_attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
 

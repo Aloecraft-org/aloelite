@@ -547,6 +547,16 @@ releases:
         into that message, the WAL image above included. Only a missing
         function or a NULL answer means too old now; anything else comes
         back as the `sqlite` error it is.
+      - |
+        **A file being extended on a mount keeps its size when it is opened
+        again by path.** Both FUSE daemons answered LOOKUP with the committed
+        size only, ignoring writes still buffered on an open handle. The
+        kernel adopts the size in a lookup reply, so once the 1 s entry
+        timeout had passed, opening the file by path shrank the kernel's view
+        of it and a new reader stopped at the committed end. PostgreSQL 18's
+        initdb copies template files this way and lost every block after the
+        first. Every reply that carries attributes now reports the same size
+        GETATTR does. (#14)
   - version: "0.4.0"
     date: 2026-09-12
     status: released
