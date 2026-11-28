@@ -49,6 +49,12 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y fuse3 libfuse3-dev pkg-config
 
+    # The `postgres` suite runs a real cluster on a mount. The hosted image
+    # usually carries PostgreSQL already; absent, the suite records a skip.
+    - name: Install PostgreSQL
+      continue-on-error: true
+      run: sudo apt-get install -y postgresql
+
     - name: Install aloelite
       run: |
         python -m pip install --upgrade pip
@@ -103,6 +109,12 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y fuse3 libfuse3-dev pkg-config
+
+    # The `postgres` suite runs a real cluster on a mount. The hosted image
+    # usually carries PostgreSQL already; absent, the suite records a skip.
+    - name: Install PostgreSQL
+      continue-on-error: true
+      run: sudo apt-get install -y postgresql
 
     # The comparators are what make the numbers mean anything to a reader who
     # has never used aloelite. Absent, the suite records why and carries on.

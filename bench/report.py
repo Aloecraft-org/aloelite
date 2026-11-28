@@ -133,6 +133,14 @@ SECTIONS: dict[str, tuple[str, str]] = {
         "0 is the pass — a throughput figure would mean nothing if the bytes "
         "disagreed.",
     ),
+    "postgres": (
+        "PostgreSQL with PGDATA on a mount",
+        "A real cluster: initdb, `pgbench -i`, the TPC-B-like mix and a "
+        "read-only mix, with fsync on everywhere and ext4 on the same disk as "
+        "the baseline. `pg_space_amplification` is host bytes per PGDATA "
+        "byte, before and after prune + VACUUM; `pg_crash_corrupt` counts "
+        "pg_amcheck findings after a SIGKILL of the daemon, so 0 is the pass.",
+    ),
     "external": (
         "Outside comparators",
         "gocryptfs for encrypted FUSE throughput, restic for ingest and "
@@ -162,6 +170,15 @@ DETAIL_COLUMNS: dict[str, tuple[str, ...]] = {
     "resolve": ("depth", "round_trips", "modelled_at_1ms_rtt_ms"),
     "cli": ("p99_ms", "startup_floor_ms", "above_floor_ms", "MiB_s"),
     "interop": ("bytes_match", "write_MiB_s", "read_MiB_s"),
+    "postgres": (
+        "p50_ms",
+        "p99_ms",
+        "failed",
+        "vacuum_s",
+        "after_prune_ratio",
+        "after_keep1_ratio",
+        "refused_starts",
+    ),
 }
 
 

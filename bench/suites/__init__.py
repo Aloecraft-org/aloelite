@@ -12,7 +12,7 @@ Entry points
   load(name)     resolve one suite to its callable
 
 Configurable values
-  GROUPS         which suites belong to `core`, `deep`, `external`
+  GROUPS         which suites belong to `core`, `deep`, `apps`, `external`
 
 Fan-out points
   SUITES is the dispatch table. Suites are imported lazily so that one that
@@ -45,11 +45,13 @@ SUITES: dict[str, str] = {
     "resolve": "bench.suites.resolve:resolve",
     "cli": "bench.suites.rust:cli",
     "interop": "bench.suites.rust:interop",
+    "postgres": "bench.suites.apps:postgres",
 }
 
 # What CI runs, and in what order. `core` is the set that fits a runner
 # comfortably; `deep` adds the ones that want minutes and disk; `external`
-# needs gocryptfs/restic installed and is opt-in everywhere.
+# needs gocryptfs/restic installed and is opt-in everywhere. `apps` runs real
+# programs (PostgreSQL) on a mount and skips when they are not installed.
 GROUPS: dict[str, tuple[str, ...]] = {
     "core": ("throughput", "smallfile", "random", "append", "space", "dedup"),
     "deep": (
@@ -67,9 +69,10 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "cli",
         "interop",
     ),
+    "apps": ("postgres",),
     "external": ("external",),
 }
-GROUPS["all"] = GROUPS["core"] + GROUPS["deep"] + GROUPS["external"]
+GROUPS["all"] = GROUPS["core"] + GROUPS["deep"] + GROUPS["apps"] + GROUPS["external"]
 
 
 def load(name: str) -> Callable:

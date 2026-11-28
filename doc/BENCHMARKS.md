@@ -586,6 +586,39 @@ volume churned through four versions of 64 MiB: prune freed 202 MB of pages,
 and the file stayed at 269 MB until `VACUUM` (399 ms) brought it to 68 MB.
 The suite reports the two separately for exactly this reason.
 
+**A database's data directory on a mount, under default retention.**
+`postgres` runs a real PostgreSQL 16 cluster with PGDATA on the mount and
+fsync on: initdb, `pgbench -i -s 1`, 5 s of the TPC-B-like mix with two
+clients, then a SIGKILL of the daemon mid-load. One smoke-scale run, one
+4-vCPU host:
+
+| | ext4 | `rust-fuse` plain | `rust-fuse` convergent | `fuse` plain |
+|---|---|---|---|---|
+| `pgbench -i` | 0.14 s | 36 s | 71 s | 110 s |
+| TPC-B tps | 3,571 | 150 | 103 | 125 |
+| TPC-B p99 | 1.1 ms | 24 ms | 34 ms | 34 ms |
+| read-only tps | 37,350 | 38,470 | 37,430 | 35,660 |
+| host bytes per PGDATA byte | 1.00 | 27.9 | 24.8 | 26.5 |
+| the same after keep-last-1 + VACUUM | | 0.74 | 0.73 | 0.73 |
+| pg_amcheck findings after the kill | 0 | 0 | 0 | 0 |
+
+Reads are free, because the server's own buffer cache answers them. Writes
+pay 24 to 35x in tps, and `pgbench -i` pays 250x or more, most of it in
+`VACUUM`. The space is the number to act on. Every fsync commits a version
+of the file. Retention is per entry, and its default is NULL, which keeps
+every superseded version (CV-6). So a 73 MB cluster grew to 2 GB within a minute,
+and prune followed by VACUUM returned none of it. Setting keep-last-1 on
+every file and pruning again brought the same volume under PGDATA's own
+size. After the kill, recovery was clean on every frontend.
+
+The `fuse` column was taken with a local fix to the Python daemon. As
+released, that daemon records its own uid as the owner of every node created
+through it, and it mounts with `default_permissions`. A root daemon serving
+postgres through `allow_other` therefore refuses initdb its own
+subdirectories. The suite runs postgres as another user only when the harness
+is root. On a non-root runner the daemon and the cluster share one uid, and
+this case never arises.
+
 ## The measured rows
 
 The tables are generated, not written: `bench/report.py` renders
