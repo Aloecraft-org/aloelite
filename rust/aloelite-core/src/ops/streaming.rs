@@ -8,7 +8,7 @@ use crate::descriptor::{Descriptor, WriterSetup};
 use crate::errors::{FsError, Result};
 use crate::resolve::resolve;
 use crate::templates::mutation::CREATE_LOCK;
-use crate::types::{FdId, LockId, MountId, NodeType, WriteMode};
+use crate::types::{FdId, LockId, MountId, NodeType, Ownership, WriteMode};
 
 use super::locking::require_own_lock;
 use super::structural::create_entry_internal;
@@ -57,7 +57,7 @@ pub fn open_write(
             // safe creation inside this same transaction (the MountId is
             // passed, not the resolved Mount: create re-validates it)
             Err(FsError::NotFound { .. }) if mode == WriteMode::Truncate => {
-                create_entry_internal(db, mount, path, None)?
+                create_entry_internal(db, mount, path, None, Ownership::NONE)?
             }
             Err(e) => return Err(e),
         };

@@ -90,6 +90,7 @@ pub struct Options<'a> {
 pub struct Mount {
     session: Option<fuser::BackgroundSession>,
     inner: Option<Arc<Mutex<Inner>>>,
+    ended: Arc<AtomicBool>,
     renew_stop: Arc<AtomicBool>,
     renew: Option<JoinHandle<()>>,
 }
@@ -122,12 +123,20 @@ impl Mount {
         )?;
         let fs = AloeFuse::new(db, mount)?;
         let inner = fs.inner.clone();
+        let ended = fs.ended.clone();
 
         let renew_stop = Arc::new(AtomicBool::new(false));
         let renew = spawn_renew(inner.clone(), renew_stop.clone(), opts.prune_every);
 
         let mut cfg = fuser::Config::default();
-        cfg.mount_options = vec![fuser::MountOption::FSName("aloefuse".to_owned())];
+        // default_permissions: the kernel enforces the uid/gid/mode getattr
+        // reports, as pyfuse3's defaults have the reference daemon do. Without
+        // it a mount shared with --allow-other let every uid read, write and
+        // chown every node.
+        cfg.mount_options = vec![
+            fuser::MountOption::FSName("aloefuse".to_owned()),
+            fuser::MountOption::DefaultPermissions,
+        ];
         if opts.access == Access::Ro {
             cfg.mount_options.push(fuser::MountOption::RO);
         }
@@ -154,12 +163,20 @@ impl Mount {
         Ok(Mount {
             session: Some(session),
             inner: Some(inner),
+            ended,
             renew_stop,
             renew: Some(renew),
         })
     }
 
-    /// Unmount, stop the lease renewal, and close the engine.
+    /// True once the FUSE session has ended without us: the filesystem was
+    /// unmounted from outside (`fusermount3 -u`, `umount`).
+    pub fn ended(&self) -> bool {
+        self.ended.load(Ordering::Relaxed)
+    }
+
+    /// Unmount (unless already unmounted from outside), stop the lease
+    /// renewal, and close the engine.
     pub fn unmount(mut self) -> Result<(), DaemonError> {
         self.teardown()
     }
@@ -167,6 +184,9 @@ impl Mount {
     fn teardown(&mut self) -> Result<(), DaemonError> {
         // 1. unmount the kernel filesystem and join fuser's thread — this
         //    drops the AloeFuse it owns, releasing that reference to `inner`.
+        //    After an external unmount fuser only joins: it no longer
+        //    unmounts the path again, which failed with EINVAL (fuser < 0.19)
+        //    and could have unmounted whatever was mounted there since.
         if let Some(session) = self.session.take() {
             session.umount_and_join()?;
         }
@@ -203,8 +223,7 @@ impl Drop for Mount {
 pub fn serve(opts: &Options) -> Result<(), DaemonError> {
     install_signal_handlers();
     let mount = Mount::spawn(opts)?;
-    let mountpoint = opts.mountpoint.to_owned();
-    while !STOP.load(Ordering::Relaxed) && is_mounted(&mountpoint) {
+    while !STOP.load(Ordering::Relaxed) && !mount.ended() {
         thread::sleep(Duration::from_millis(200));
     }
     mount.unmount()
@@ -291,18 +310,6 @@ fn spawn_renew(
             }
         }
     })
-}
-
-/// True while `mountpoint` appears in the kernel's mount table.
-fn is_mounted(mountpoint: &Path) -> bool {
-    let Ok(contents) = std::fs::read_to_string("/proc/mounts") else {
-        return true; // cannot tell: assume still mounted, wait for the signal
-    };
-    let want = mountpoint.to_string_lossy();
-    contents
-        .lines()
-        .filter_map(|l| l.split_whitespace().nth(1))
-        .any(|p| p == want)
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);

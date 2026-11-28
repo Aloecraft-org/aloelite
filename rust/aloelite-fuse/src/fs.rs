@@ -23,11 +23,11 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aloelite_core::records::{DirEntry, NodeInfo};
-use aloelite_core::types::{MountId, NodeId, NodeType, WriteMode};
+use aloelite_core::types::{MountId, NodeId, NodeType, Ownership, WriteMode};
 use aloelite_core::{Db, Descriptor, FsError, Result};
 use fuser::{
     Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, LockOwner, OpenFlags,
-    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    Owner, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 
@@ -55,6 +55,10 @@ pub const APPEND_BATCH: usize = 1 << 20;
 /// The daemon: engine state behind one lock.
 pub struct AloeFuse {
     pub(crate) inner: std::sync::Arc<Mutex<Inner>>,
+    /// Set once the FUSE session has ended, however it ended: fuser calls
+    /// `destroy` when the kernel connection goes away, so an external
+    /// `fusermount3 -u` is seen here rather than by scanning a mount table.
+    pub(crate) ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AloeFuse {
@@ -75,6 +79,7 @@ impl AloeFuse {
                 dirs: HashMap::new(),
                 next_fh: 0,
             })),
+            ended: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 }
@@ -385,30 +390,40 @@ impl Inner {
     }
 
     // -- create / delete ----------------------------------------------------
-    fn mkdir(&mut self, parent: u64, name: &OsStr, mode: u32) -> Result<FileAttr> {
+    fn mkdir(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        owner: Owner,
+    ) -> Result<FileAttr> {
         let path = self.child_path(parent, name)?;
-        let node = aloelite_core::ops::create_container(&mut self.db, &self.mount, &path)?;
-        let perms = mode & 0o7777;
-        if perms != 0 && perms != 0o777 {
-            // mkdir writes mode to metadata (the reference's shape), so a
-            // directory reads back the same permission bits either way.
-            let meta =
-                std::collections::BTreeMap::from([("mode".to_owned(), format!("{perms:o}"))]);
-            aloelite_core::ops::set_metadata(&mut self.db, &self.mount, &path, &meta)?;
-        }
+        let owner = self.ownership(parent, owner, mode, umask, true)?;
+        let node = aloelite_core::ops::create_container(&mut self.db, &self.mount, &path, owner)?;
         let inode = self.remember(node.clone());
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
         Ok(self.live_attr(inode, &info))
     }
 
-    fn symlink(&mut self, parent: u64, name: &OsStr, target: &[u8]) -> Result<FileAttr> {
+    fn symlink(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        target: &[u8],
+        owner: Owner,
+    ) -> Result<FileAttr> {
         let path = self.child_path(parent, name)?;
+        // a symlink's permission bits are never consulted; record none
+        let mut owner = self.ownership(parent, owner, 0, 0, false)?;
+        owner.mode = None;
         let node = aloelite_core::ops::create_special(
             &mut self.db,
             &self.mount,
             &path,
             NodeType::Symlink,
             target,
+            owner,
         )?;
         let inode = self.remember(node.clone());
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
@@ -426,8 +441,16 @@ impl Inner {
 
     /// FIFOs and sockets only; a regular file for `S_IFREG`. Device nodes are
     /// refused by the caller (D-3).
-    fn mknod(&mut self, parent: u64, name: &OsStr, mode: u32) -> Result<FileAttr> {
+    fn mknod(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        owner: Owner,
+    ) -> Result<FileAttr> {
         let path = self.child_path(parent, name)?;
+        let owner = self.ownership(parent, owner, mode, umask, false)?;
         let fmt = mode & libc::S_IFMT;
         let node = if fmt == libc::S_IFIFO {
             aloelite_core::ops::create_special(
@@ -436,6 +459,7 @@ impl Inner {
                 &path,
                 NodeType::Fifo,
                 &[],
+                owner,
             )?
         } else if fmt == libc::S_IFSOCK {
             aloelite_core::ops::create_special(
@@ -444,24 +468,48 @@ impl Inner {
                 &path,
                 NodeType::Socket,
                 &[],
+                owner,
             )?
         } else {
-            aloelite_core::ops::create_entry(&mut self.db, &self.mount, &path, Some(&[]))?
+            aloelite_core::ops::create_entry(&mut self.db, &self.mount, &path, Some(&[]), owner)?
         };
-        let perms = (mode & 0o7777) as i64;
-        if perms != 0 {
-            aloelite_core::ops::set_owner(
-                &mut self.db,
-                &self.mount,
-                &path,
-                None,
-                None,
-                Some(perms),
-            )?;
-        }
         let inode = self.remember(node.clone());
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
         Ok(self.live_attr(inode, &info))
+    }
+
+    /// What a new node under `parent` is owned by: the caller's uid, and
+    /// the caller's gid unless `parent` is setgid, in which case the parent's
+    /// gid (and a new directory inherits the setgid bit) -- the rule the
+    /// kernel applies on a local filesystem and leaves to a FUSE one. `mode`
+    /// arrives with the umask already applied (no FUSE_DONT_MASK), and is
+    /// always recorded, so the bits the caller asked for are the bits it
+    /// gets back whatever the defaults. The umask is applied here too;
+    /// twice is harmless if the kernel already did. The reference daemon's
+    /// `AloeFuse._ownership` is the same rule.
+    fn ownership(
+        &mut self,
+        parent: u64,
+        owner: Owner,
+        mode: u32,
+        umask: u32,
+        is_dir: bool,
+    ) -> Result<Ownership> {
+        let node = self.node(parent)?;
+        let p = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
+        let mut perms = i64::from(mode & 0o7777 & !umask);
+        let mut gid = i64::from(owner.gid);
+        if mode_bits(&p, 0o777) & libc::S_ISGID != 0 {
+            gid = p.gid.unwrap_or_else(|| i64::from(current_gid()));
+            if is_dir {
+                perms |= i64::from(libc::S_ISGID);
+            }
+        }
+        Ok(Ownership {
+            uid: Some(i64::from(owner.uid)),
+            gid: Some(gid),
+            mode: Some(perms),
+        })
     }
 
     fn unlink(&mut self, parent: u64, name: &OsStr) -> Result<()> {
@@ -521,21 +569,14 @@ impl Inner {
         parent: u64,
         name: &OsStr,
         mode: u32,
+        umask: u32,
         flags: i32,
+        owner: Owner,
     ) -> Result<(u64, FileAttr)> {
         let path = self.child_path(parent, name)?;
-        let node = aloelite_core::ops::create_entry(&mut self.db, &self.mount, &path, Some(&[]))?;
-        let perms = (mode & 0o7777) as i64;
-        if perms != 0 && perms != 0o666 {
-            aloelite_core::ops::set_owner(
-                &mut self.db,
-                &self.mount,
-                &path,
-                None,
-                None,
-                Some(perms),
-            )?;
-        }
+        let owner = self.ownership(parent, owner, mode, umask, false)?;
+        let node =
+            aloelite_core::ops::create_entry(&mut self.db, &self.mount, &path, Some(&[]), owner)?;
         let inode = self.remember(node.clone());
         let fh = self.open_handle(inode, &path, flags)?;
         let info = aloelite_core::ops::stat_by_id(&mut self.db, &self.mount, &node)?;
@@ -857,6 +898,10 @@ macro_rules! guard {
 }
 
 impl Filesystem for AloeFuse {
+    fn destroy(&mut self) {
+        self.ended.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         match guard!(self).lookup(parent.0, name) {
             Ok(a) => reply.entry(&TTL, &a, Generation(0)),
@@ -892,6 +937,7 @@ impl Filesystem for AloeFuse {
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
         _flags: Option<fuser::BsdFileFlags>,
+        _kill_suid_gid: bool,
         reply: ReplyAttr,
     ) {
         match guard!(self).setattr(ino.0, mode, uid, gid, size, atime, mtime, fh.map(|f| f.0)) {
@@ -913,8 +959,9 @@ impl Filesystem for AloeFuse {
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
-        _umask: u32,
+        umask: u32,
         _rdev: u32,
+        owner: Owner,
         reply: ReplyEntry,
     ) {
         // device nodes refused by decision (D-3), not omission
@@ -922,7 +969,7 @@ impl Filesystem for AloeFuse {
         if fmt == libc::S_IFBLK || fmt == libc::S_IFCHR {
             return reply.error(Errno::from_i32(libc::EPERM));
         }
-        match guard!(self).mknod(parent.0, name, mode) {
+        match guard!(self).mknod(parent.0, name, mode, umask, owner) {
             Ok(a) => reply.entry(&TTL, &a, Generation(0)),
             Err(e) => reply.error(err(&e)),
         }
@@ -934,10 +981,11 @@ impl Filesystem for AloeFuse {
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
-        _umask: u32,
+        umask: u32,
+        owner: Owner,
         reply: ReplyEntry,
     ) {
-        match guard!(self).mkdir(parent.0, name, mode) {
+        match guard!(self).mkdir(parent.0, name, mode, umask, owner) {
             Ok(a) => reply.entry(&TTL, &a, Generation(0)),
             Err(e) => reply.error(err(&e)),
         }
@@ -963,10 +1011,11 @@ impl Filesystem for AloeFuse {
         parent: INodeNo,
         link_name: &OsStr,
         target: &std::path::Path,
+        owner: Owner,
         reply: ReplyEntry,
     ) {
         let target = target.as_os_str().as_encoded_bytes().to_vec();
-        match guard!(self).symlink(parent.0, link_name, &target) {
+        match guard!(self).symlink(parent.0, link_name, &target, owner) {
             Ok(a) => reply.entry(&TTL, &a, Generation(0)),
             Err(e) => reply.error(err(&e)),
         }
@@ -980,6 +1029,7 @@ impl Filesystem for AloeFuse {
         newparent: INodeNo,
         newname: &OsStr,
         _flags: fuser::RenameFlags,
+        _owner: Option<Owner>,
         reply: ReplyEmpty,
     ) {
         match guard!(self).rename(parent.0, name, newparent.0, newname) {
@@ -1002,7 +1052,14 @@ impl Filesystem for AloeFuse {
         }
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        flags: OpenFlags,
+        _kill_suid_gid: bool,
+        reply: ReplyOpen,
+    ) {
         match guard!(self).open(ino.0, flags.0) {
             Ok(fh) => reply.opened(FileHandle(fh), fuser::FopenFlags::empty()),
             Err(e) => reply.error(err(&e)),
@@ -1015,11 +1072,13 @@ impl Filesystem for AloeFuse {
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
-        _umask: u32,
+        umask: u32,
         flags: i32,
+        _kill_suid_gid: bool,
+        owner: Owner,
         reply: ReplyCreate,
     ) {
-        match guard!(self).create(parent.0, name, mode, flags) {
+        match guard!(self).create(parent.0, name, mode, umask, flags, owner) {
             Ok((fh, a)) => reply.created(
                 &TTL,
                 &a,

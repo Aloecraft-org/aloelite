@@ -457,14 +457,32 @@ class AloeFuse(pyfuse3.Operations):
         self._dirs.pop(fh, None)
 
     # -- create / delete ----------------------------------------------------
+    def _ownership(self, parent_inode: int, ctx, mode: int, is_dir: bool) -> dict:
+        """What a new node under the parent is owned by: the caller's uid, and
+        the caller's gid unless the parent is setgid, in which case the
+        parent's gid (and a new directory inherits the setgid bit) -- the rule
+        the kernel applies on a local filesystem and leaves to a FUSE one.
+        The umask is applied here too; doing it twice is harmless if the
+        kernel already did. The mode is always recorded, so the bits the
+        caller asked for are the bits it gets back. The kernel enforces them
+        (pyfuse3's default_permissions), which is why a node owned by the
+        daemon's uid instead locked a non-root caller out of its own tree.
+        The Rust daemon's Inner::ownership is the same rule."""
+        perms = mode & 0o7777 & ~ctx.umask
+        gid = ctx.gid
+        parent = self.m.stat_by_id(self._n[parent_inode])
+        if _mode_bits(parent, 0o777) & st_mod.S_ISGID:
+            gid = parent.gid if parent.gid is not None else os.getgid()
+            if is_dir:
+                perms |= st_mod.S_ISGID
+        return {"uid": ctx.uid, "gid": gid, "mode": perms}
+
     async def mkdir(self, parent_inode, name, mode, ctx):
         base = self._path(parent_inode).rstrip("/")
         path = f"{base}/{os.fsdecode(name)}"
         try:
-            node = self.m.create_container(path)
-            perms = mode & 0o7777
-            if perms and perms != 0o777:
-                self.m.set_metadata(path, {"mode": format(perms, "o")})
+            owner = self._ownership(parent_inode, ctx, mode, is_dir=True)
+            node = self.m.create_container(path, **owner)
             return self._live_attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)
@@ -473,10 +491,8 @@ class AloeFuse(pyfuse3.Operations):
         base = self._path(parent_inode).rstrip("/")
         path = f"{base}/{os.fsdecode(name)}"
         try:
-            node = self.m.create_entry(path, b"")
-            perms = mode & 0o7777
-            if perms and perms != 0o666:
-                self.m.set_owner(path, mode=perms)
+            owner = self._ownership(parent_inode, ctx, mode, is_dir=False)
+            node = self.m.create_entry(path, b"", **owner)
             ino = self._remember(node)
             fh = self._next_fh()
             acc = flags & os.O_ACCMODE
@@ -516,8 +532,11 @@ class AloeFuse(pyfuse3.Operations):
             # era 2: first-class symlink type; the content is the target.
             # (Era-1 files used an entry + NODE-6 'symlink' metadata flag,
             # which _attr still honors on read.)
+            # a symlink's permission bits are never consulted; record none
+            owner = self._ownership(parent_inode, ctx, 0, is_dir=False)
+            owner["mode"] = None
             node = self.m.create_special(
-                path, NodeType.SYMLINK, os.fsencode(os.fsdecode(target))
+                path, NodeType.SYMLINK, os.fsencode(os.fsdecode(target)), **owner
             )
             return self._live_attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
@@ -541,15 +560,13 @@ class AloeFuse(pyfuse3.Operations):
         base = self._path(parent_inode).rstrip("/")
         path = f"{base}/{os.fsdecode(name)}"
         try:
+            owner = self._ownership(parent_inode, ctx, mode, is_dir=False)
             if st_mod.S_ISFIFO(mode):
-                node = self.m.create_special(path, NodeType.FIFO)
+                node = self.m.create_special(path, NodeType.FIFO, **owner)
             elif st_mod.S_ISSOCK(mode):
-                node = self.m.create_special(path, NodeType.SOCKET)
+                node = self.m.create_special(path, NodeType.SOCKET, **owner)
             else:  # S_IFREG (or unspecified): mknod can make regular files
-                node = self.m.create_entry(path, b"")
-            perms = mode & 0o7777
-            if perms:
-                self.m.set_owner(path, mode=perms)
+                node = self.m.create_entry(path, b"", **owner)
             return self._live_attr(self._remember(node), self.m.stat_by_id(node))
         except Exception as e:
             raise _wrap(e)

@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use aloelite_core::crypto::EncMode;
 use aloelite_core::ops::{self, MountOptions};
-use aloelite_core::types::{Access, MountId, VolumeId};
+use aloelite_core::types::{Access, MountId, Ownership, VolumeId};
 use aloelite_core::{Db, Result};
 use ego_platform::entropy::SystemEntropy;
 use rusqlite::Connection;
@@ -105,8 +105,14 @@ impl Rig {
                 let mut keyed = open(&path);
                 let volume = keyed_volume(&mut keyed, "vault", cs, EncMode::Convergent);
                 let mid = mount(&mut keyed, &volume, &pin_options());
-                ops::create_entry(&mut keyed, &mid, "/secret.txt", Some(b"TOP SECRET"))
-                    .expect("seed");
+                ops::create_entry(
+                    &mut keyed,
+                    &mid,
+                    "/secret.txt",
+                    Some(b"TOP SECRET"),
+                    Ownership::NONE,
+                )
+                .expect("seed");
                 keyed.close().expect("close");
                 (vec![open(&path)], named([("default", 0, mid)]))
             }
@@ -122,6 +128,7 @@ impl Rig {
                     &plain_mount,
                     "/plain.txt",
                     Some(b"readable by anyone"),
+                    Ownership::NONE,
                 )
                 .expect("seed");
                 let vault = keyed_volume(&mut db, "vault", cs, EncMode::Convergent);
@@ -137,10 +144,22 @@ impl Rig {
                 let mut db = open(&path);
                 let volume = keyed_volume(&mut db, "vault", cs, mode);
                 let mid = mount(&mut db, &volume, &pin_options());
-                ops::create_entry(&mut db, &mid, "/a.bin", Some(b"identical payload"))
-                    .expect("seed");
-                ops::create_entry(&mut db, &mid, "/b.bin", Some(b"identical payload"))
-                    .expect("seed");
+                ops::create_entry(
+                    &mut db,
+                    &mid,
+                    "/a.bin",
+                    Some(b"identical payload"),
+                    Ownership::NONE,
+                )
+                .expect("seed");
+                ops::create_entry(
+                    &mut db,
+                    &mid,
+                    "/b.bin",
+                    Some(b"identical payload"),
+                    Ownership::NONE,
+                )
+                .expect("seed");
                 (vec![db], named([("default", 0, mid)]))
             }
             "two_mounts_one_volume" => {

@@ -25,7 +25,14 @@ async fn a_volume_in_opfs_survives_close_and_reopen() {
         let mut db = pool.open("reopen.db").unwrap();
         let volume = ops::create_volume(&mut db, Some("v"), 64, None, EncMode::Convergent).unwrap();
         let mount = ops::mount(&mut db, &volume.id, &MountOptions::default()).unwrap();
-        ops::create_entry(&mut db, &mount, "/hello.txt", Some(b"hello")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &mount,
+            "/hello.txt",
+            Some(b"hello"),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         ops::unmount(&mut db, &mount).unwrap();
         db.close().unwrap();
         volume
@@ -56,7 +63,14 @@ async fn an_exported_database_imports_under_a_new_name() {
     let mut db = pool.open("source.db").unwrap();
     let volume = ops::create_volume(&mut db, Some("v"), 64, None, EncMode::Convergent).unwrap();
     let mount = ops::mount(&mut db, &volume.id, &MountOptions::default()).unwrap();
-    ops::create_entry(&mut db, &mount, "/f", Some(b"bytes")).unwrap();
+    ops::create_entry(
+        &mut db,
+        &mount,
+        "/f",
+        Some(b"bytes"),
+        aloelite_core::types::Ownership::NONE,
+    )
+    .unwrap();
     ops::unmount(&mut db, &mount).unwrap();
     db.close().unwrap();
 

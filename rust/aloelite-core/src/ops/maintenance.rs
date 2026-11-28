@@ -259,8 +259,22 @@ mod tests {
     #[test]
     fn the_volume_default_governs_entries_without_their_own_policy() {
         let (mut db, vol, m) = rig();
-        ops::create_entry(&mut db, &m, "/plain", Some(b"0000")).unwrap();
-        ops::create_entry(&mut db, &m, "/own", Some(b"0000")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/plain",
+            Some(b"0000"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/own",
+            Some(b"0000"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
         ops::set_retention(&mut db, &m, "/own", Some(3)).unwrap();
         rewrite(&mut db, &m, "/plain", 5);
         rewrite(&mut db, &m, "/own", 5);
@@ -290,7 +304,14 @@ mod tests {
     #[test]
     fn no_policy_removes_current_content() {
         let (mut db, _, m) = rig();
-        ops::create_entry(&mut db, &m, "/f", Some(b"0000")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(b"0000"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
         rewrite(&mut db, &m, "/f", 2);
         ops::set_retention(&mut db, &m, "/f", Some(0)).unwrap();
         ops::prune_content(&mut db, None).unwrap();
@@ -335,7 +356,14 @@ mod tests {
             if let Some(keep) = setting {
                 ops::set_retention_on_delete(&mut db, &vol, keep).unwrap();
             }
-            ops::create_entry(&mut db, &m, "/f", Some(b"0000")).unwrap();
+            ops::create_entry(
+                &mut db,
+                &m,
+                "/f",
+                Some(b"0000"),
+                crate::types::Ownership::NONE,
+            )
+            .unwrap();
             rewrite(&mut db, &m, "/f", 5);
             let f = nid(&mut db, &m, "/f");
             ops::remove(&mut db, &m, "/f").unwrap();
@@ -352,11 +380,32 @@ mod tests {
     fn retention_on_delete_zero_purges_deleted_nodes_at_prune() {
         let (mut db, vol, m) = rig();
         ops::set_retention_on_delete(&mut db, &vol, 0).unwrap();
-        ops::create_entry(&mut db, &m, "/gone", Some(b"0000")).unwrap();
-        ops::create_entry(&mut db, &m, "/stays", Some(b"1111")).unwrap();
-        ops::create_container(&mut db, &m, "/d").unwrap();
-        ops::create_container(&mut db, &m, "/d/sub").unwrap();
-        ops::create_entry(&mut db, &m, "/d/sub/deep", Some(b"2222")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/gone",
+            Some(b"0000"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/stays",
+            Some(b"1111"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
+        ops::create_container(&mut db, &m, "/d", crate::types::Ownership::NONE).unwrap();
+        ops::create_container(&mut db, &m, "/d/sub", crate::types::Ownership::NONE).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/d/sub/deep",
+            Some(b"2222"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
         ops::link(&mut db, &m, "/stays", "/alias").unwrap();
         let gone = nid(&mut db, &m, "/gone");
         let deep = nid(&mut db, &m, "/d/sub/deep");
@@ -387,7 +436,14 @@ mod tests {
     fn retention_on_delete_zero_spares_a_node_a_lock_holds() {
         let (mut db, vol, m) = rig();
         ops::set_retention_on_delete(&mut db, &vol, 0).unwrap();
-        ops::create_entry(&mut db, &m, "/f", Some(b"0000")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(b"0000"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
         let f = nid(&mut db, &m, "/f");
         let lock = ops::lock(&mut db, &m, "/f", None).unwrap();
         // the holder may unlink its own open file
@@ -403,7 +459,14 @@ mod tests {
     fn purge_destroys_now_whatever_the_volume_keeps() {
         let (mut db, vol, m) = rig();
         ops::set_retention_on_delete(&mut db, &vol, -1).unwrap();
-        ops::create_entry(&mut db, &m, "/f", Some(b"0000")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(b"0000"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
         rewrite(&mut db, &m, "/f", 3);
         let f = nid(&mut db, &m, "/f");
         ops::purge(&mut db, &m, "/f").unwrap();
@@ -424,7 +487,14 @@ mod tests {
     fn purge_by_id_reaches_a_deleted_entry_and_refuses_roots_and_strangers() {
         let (mut db, vol, m) = rig();
         ops::set_retention_on_delete(&mut db, &vol, -1).unwrap();
-        ops::create_entry(&mut db, &m, "/f", Some(b"0000")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(b"0000"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
         let f = nid(&mut db, &m, "/f");
         ops::remove(&mut db, &m, "/f").unwrap();
         ops::prune(&mut db, None).unwrap();
@@ -437,7 +507,14 @@ mod tests {
         ));
 
         // a placed node loses every placement
-        ops::create_entry(&mut db, &m, "/g", Some(b"1111")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/g",
+            Some(b"1111"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
         ops::link(&mut db, &m, "/g", "/g2").unwrap();
         let g = nid(&mut db, &m, "/g");
         ops::purge_by_id(&mut db, &m, &g).unwrap();
@@ -451,7 +528,14 @@ mod tests {
         ));
         let other = ops::create_volume(&mut db, Some("other"), 4, None, EncMode::None).unwrap();
         let om = ops::mount(&mut db, &other.id, &MountOptions::default()).unwrap();
-        ops::create_entry(&mut db, &om, "/theirs", Some(b"x")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &om,
+            "/theirs",
+            Some(b"x"),
+            crate::types::Ownership::NONE,
+        )
+        .unwrap();
         let theirs = nid(&mut db, &om, "/theirs");
         assert!(matches!(
             ops::purge_by_id(&mut db, &m, &theirs),

@@ -188,7 +188,14 @@ mod tests {
     #[test]
     fn disjoint_writes_zero_fill_the_gap() {
         let (mut db, m) = engine();
-        ops::create_entry(&mut db, &m, "/f", Some(b"")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(b""),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         let mut ov = Overlay::new(&mut db, &m, "/f").unwrap();
         ov.write(&mut db, &m, 0, &[b'X'; 100]).unwrap();
         ov.write(&mut db, &m, 200, &[b'Y'; 100]).unwrap();
@@ -203,7 +210,14 @@ mod tests {
     #[test]
     fn overlapping_writes_coalesce_into_one_extent() {
         let (mut db, m) = engine();
-        ops::create_entry(&mut db, &m, "/f", Some(b"")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(b""),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         let mut ov = Overlay::new(&mut db, &m, "/f").unwrap();
         ov.write(&mut db, &m, 0, b"AAAAA").unwrap();
         ov.write(&mut db, &m, 3, b"BBBBB").unwrap(); // overlaps at 3-4, extends to 8
@@ -216,7 +230,14 @@ mod tests {
     #[test]
     fn a_read_overlays_dirty_bytes_on_committed_content() {
         let (mut db, m) = engine();
-        ops::create_entry(&mut db, &m, "/f", Some(b"0123456789")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(b"0123456789"),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         let mut ov = Overlay::new(&mut db, &m, "/f").unwrap();
         ov.write(&mut db, &m, 4, b"AB").unwrap();
         assert_eq!(ov.read(&mut db, &m, 0, 10).unwrap(), b"0123AB6789");
@@ -228,7 +249,14 @@ mod tests {
     #[test]
     fn flush_commits_extents_and_is_idempotent() {
         let (mut db, m) = engine();
-        ops::create_entry(&mut db, &m, "/f", Some(b"")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(b""),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         let mut ov = Overlay::new(&mut db, &m, "/f").unwrap();
         ov.write(&mut db, &m, 0, b"committed").unwrap();
         assert!(ov.is_dirty());
@@ -243,7 +271,14 @@ mod tests {
         // A database checkpoint: many small writes far apart, then one fsync.
         // Each extent used to land as its own write_range, so its own version.
         let (mut db, m) = engine();
-        ops::create_entry(&mut db, &m, "/f", Some(&[b'.'; 64 << 10])).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(&[b'.'; 64 << 10]),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         let before = ops::stat(&mut db, &m, "/f").unwrap().version;
         let mut ov = Overlay::new(&mut db, &m, "/f").unwrap();
         for i in 0..200u64 {
@@ -260,7 +295,14 @@ mod tests {
     #[test]
     fn truncate_flushes_then_shrinks() {
         let (mut db, m) = engine();
-        ops::create_entry(&mut db, &m, "/f", Some(b"0123456789")).unwrap();
+        ops::create_entry(
+            &mut db,
+            &m,
+            "/f",
+            Some(b"0123456789"),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         let mut ov = Overlay::new(&mut db, &m, "/f").unwrap();
         ov.write(&mut db, &m, 2, b"XY").unwrap();
         ov.truncate(&mut db, &m, 4).unwrap();

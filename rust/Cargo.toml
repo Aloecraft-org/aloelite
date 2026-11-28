@@ -104,7 +104,7 @@ base64 = "0.22"
 hex = "0.4"
 
 # --- native frontends ---
-fuser = "0.18"
+fuser = "0.19"
 libc = "0.2"
 
 # --- the Extism plug-in ---

@@ -37,7 +37,14 @@ store_test!(
         let volume =
             ops::create_volume(image.db(), Some("v"), 64, None, EncMode::Convergent).unwrap();
         let mount = ops::mount(image.db(), &volume.id, &MountOptions::default()).unwrap();
-        ops::create_entry(image.db(), &mount, "/hello.txt", Some(b"hello")).unwrap();
+        ops::create_entry(
+            image.db(),
+            &mount,
+            "/hello.txt",
+            Some(b"hello"),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         assert!(
             store.get("vol").await.unwrap().is_none(),
             "nothing reaches the store before the first checkpoint"
@@ -54,7 +61,14 @@ store_test!(
             "the blob is a whole SQLite file"
         );
 
-        ops::create_entry(image.db(), &mount, "/later.txt", Some(b"x")).unwrap();
+        ops::create_entry(
+            image.db(),
+            &mount,
+            "/later.txt",
+            Some(b"x"),
+            aloelite_core::types::Ownership::NONE,
+        )
+        .unwrap();
         ops::unmount(image.db(), &mount).unwrap();
         image.close().await.unwrap(); // close checkpoints first
 
@@ -79,11 +93,25 @@ store_test!(
             let volume =
                 ops::create_volume(image.db(), Some("v"), 64, None, EncMode::Convergent).unwrap();
             let mount = ops::mount(image.db(), &volume.id, &MountOptions::default()).unwrap();
-            ops::create_entry(image.db(), &mount, "/kept.txt", Some(b"kept")).unwrap();
+            ops::create_entry(
+                image.db(),
+                &mount,
+                "/kept.txt",
+                Some(b"kept"),
+                aloelite_core::types::Ownership::NONE,
+            )
+            .unwrap();
             ops::unmount(image.db(), &mount).unwrap();
             image.checkpoint().await.unwrap();
             let mount = ops::mount(image.db(), &volume.id, &MountOptions::default()).unwrap();
-            ops::create_entry(image.db(), &mount, "/lost.txt", Some(b"lost")).unwrap();
+            ops::create_entry(
+                image.db(),
+                &mount,
+                "/lost.txt",
+                Some(b"lost"),
+                aloelite_core::types::Ownership::NONE,
+            )
+            .unwrap();
             volume
             // dropped without close: the crash
         };

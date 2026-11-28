@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use aloelite_core::ops;
-use aloelite_core::types::{LockId, MountId, NodeId, NodeType, Whence, WriteMode};
+use aloelite_core::types::{LockId, MountId, NodeId, NodeType, Ownership, Whence, WriteMode};
 use aloelite_core::{Db, Descriptor, FsError};
 use base64::Engine;
 use serde::Serialize;
@@ -416,6 +416,15 @@ impl Args {
 // depth: dispatch
 // ---------------------------------------------------------------------------
 
+/// The optional uid/gid/mode a create op stamps on its node.
+fn owner(a: &Args) -> Ownership {
+    Ownership {
+        uid: a.opt_int("uid"),
+        gid: a.opt_int("gid"),
+        mode: a.opt_int("mode"),
+    }
+}
+
 fn json(v: impl Serialize) -> Out {
     Out::Json(serde_json::to_value(v).expect("records serialize"))
 }
@@ -503,12 +512,13 @@ fn mount_op(op: &str, a: &Args, db: &mut Db, mount: &MountId, via: &str) -> Step
         }
         // -- structural ------------------------------------------------------
         "create_container" => {
-            a.allow(&["path"]);
-            ops::create_container(db, mount, a.str("path")).map(json)
+            a.allow(&["path", "uid", "gid", "mode"]);
+            ops::create_container(db, mount, a.str("path"), owner(&a)).map(json)
         }
         "create_entry" => {
-            a.allow(&["path", "data"]);
-            ops::create_entry(db, mount, a.str("path"), a.opt_bytes("data").as_deref()).map(json)
+            a.allow(&["path", "data", "uid", "gid", "mode"]);
+            let data = a.opt_bytes("data");
+            ops::create_entry(db, mount, a.str("path"), data.as_deref(), owner(&a)).map(json)
         }
         "write_all" => {
             a.allow(&["path", "data"]);
@@ -544,9 +554,10 @@ fn mount_op(op: &str, a: &Args, db: &mut Db, mount: &MountId, via: &str) -> Step
             ops::link(db, mount, a.str("src"), a.str("dst")).map(|()| unit())
         }
         "create_special" => {
-            a.allow(&["path", "type", "data"]);
+            a.allow(&["path", "type", "data", "uid", "gid", "mode"]);
             let data = a.opt_bytes("data").unwrap_or_default();
-            ops::create_special(db, mount, a.str("path"), a.node_type("type"), &data).map(json)
+            let kind = a.node_type("type");
+            ops::create_special(db, mount, a.str("path"), kind, &data, owner(&a)).map(json)
         }
         "set_owner" => {
             a.allow(&["path", "uid", "gid", "mode"]);

@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use aloelite_core::ops::{self, MountOptions};
-use aloelite_core::types::{FdId, NodeId, VolumeId};
+use aloelite_core::types::{FdId, NodeId, Ownership, VolumeId};
 use aloelite_core::{Db, Descriptor, FsError};
 use serde::Serialize;
 
@@ -189,6 +189,14 @@ fn engine_op<S: Surface>(
 ) -> Result<S::Out, FsError> {
     let mnt = || a.mount();
     let path = || a.str("path");
+    // the optional uid/gid/mode a create op stamps on its node
+    let owner = || -> Result<Ownership, FsError> {
+        Ok(Ownership {
+            uid: a.opt_int("uid")?,
+            gid: a.opt_int("gid")?,
+            mode: a.opt_int("mode")?,
+        })
+    };
     Ok(match op {
         // -- session -------------------------------------------------------
         "create_volume" => {
@@ -254,12 +262,13 @@ fn engine_op<S: Surface>(
             a.opt_bool("include_unmounted")?.unwrap_or(false),
         )?),
         // -- structural ----------------------------------------------------
-        "create_container" => S::record(&ops::create_container(db, &mnt()?, &path()?)?),
+        "create_container" => S::record(&ops::create_container(db, &mnt()?, &path()?, owner()?)?),
         "create_entry" => S::record(&ops::create_entry(
             db,
             &mnt()?,
             &path()?,
             a.opt_bytes("data")?.as_deref(),
+            owner()?,
         )?),
         "write_all" => {
             ops::write_all(db, &mnt()?, &path()?, &a.bytes("data")?)?;
@@ -292,6 +301,7 @@ fn engine_op<S: Surface>(
             &path()?,
             a.node_type("type")?,
             &a.opt_bytes("data")?.unwrap_or_default(),
+            owner()?,
         )?),
         "set_owner" => {
             ops::set_owner(

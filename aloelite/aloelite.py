@@ -321,11 +321,32 @@ class Mount:
                     ops.create_container(self._db, self.id, parent)
         return ops.create_container(self._db, self.id, path)
 
-    def create_container(self, path: str) -> NodeId:
-        return ops.create_container(self._db, self.id, path)
+    def create_container(
+        self,
+        path: str,
+        *,
+        uid: int | None = None,
+        gid: int | None = None,
+        mode: int | None = None,
+    ) -> NodeId:
+        """uid/gid/mode, when given, are the new node's owner and permission
+        bits, set in the same transaction (NODE-4)."""
+        return ops.create_container(
+            self._db, self.id, path, uid=uid, gid=gid, mode=mode
+        )
 
-    def create_entry(self, path: str, data: bytes | None = None) -> NodeId:
-        return ops.create_entry(self._db, self.id, path, data)
+    def create_entry(
+        self,
+        path: str,
+        data: bytes | None = None,
+        *,
+        uid: int | None = None,
+        gid: int | None = None,
+        mode: int | None = None,
+    ) -> NodeId:
+        return ops.create_entry(
+            self._db, self.id, path, data, uid=uid, gid=gid, mode=mode
+        )
 
     def put(self, path: str, data: bytes, *, append: bool = False) -> None:
         """Write bytes, doing the right thing: append if asked, replace if the
@@ -373,9 +394,20 @@ class Mount:
         special leaves only — containers are refused."""
         ops.link(self._db, self.id, src, dst)
 
-    def create_special(self, path: str, type: NodeType, data: bytes = b"") -> NodeId:
+    def create_special(
+        self,
+        path: str,
+        type: NodeType,
+        data: bytes = b"",
+        *,
+        uid: int | None = None,
+        gid: int | None = None,
+        mode: int | None = None,
+    ) -> NodeId:
         """A symlink (data = target), fifo, or socket leaf (era 2 / D-3)."""
-        return ops.create_special(self._db, self.id, path, type, data)
+        return ops.create_special(
+            self._db, self.id, path, type, data, uid=uid, gid=gid, mode=mode
+        )
 
     def set_owner(
         self,

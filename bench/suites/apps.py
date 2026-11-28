@@ -340,11 +340,10 @@ def _reap_dead_mounts(fs_file: Path) -> float:
 def _make_datadir(datadir: Path, as_user) -> None:
     """PGDATA, owned by the cluster's user before initdb sees it.
 
-    Made here rather than by initdb because the daemon records ITS uid as
-    the owner of anything created through it, and postgres refuses a data
-    directory it does not own. Everything initdb creates below this is
-    then the daemon's too, which is harmless on a mount without
-    default_permissions and fatal on one with it.
+    Made here rather than by initdb because initdb creates only the data
+    directory itself, and its parent is the mount root, which the harness
+    (root, when postgres runs as another user) owns. Everything below is
+    created by postgres and owned by it, on every frontend.
     """
     datadir.mkdir()
     os.chown(datadir, as_user.pw_uid, as_user.pw_gid)

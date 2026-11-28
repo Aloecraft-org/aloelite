@@ -76,11 +76,11 @@ pub const OPS: &[Op] = &[
     // -- structural --------------------------------------------------------
     Op {
         name: "create_container",
-        args: &["mount", "path"],
+        args: &["mount", "path", "uid", "gid", "mode"],
     },
     Op {
         name: "create_entry",
-        args: &["mount", "path", "data"],
+        args: &["mount", "path", "data", "uid", "gid", "mode"],
     },
     Op {
         name: "write_all",
@@ -108,7 +108,7 @@ pub const OPS: &[Op] = &[
     },
     Op {
         name: "create_special",
-        args: &["mount", "path", "type", "data"],
+        args: &["mount", "path", "type", "data", "uid", "gid", "mode"],
     },
     Op {
         name: "set_owner",

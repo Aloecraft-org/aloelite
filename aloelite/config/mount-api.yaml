@@ -235,15 +235,22 @@ operations:
   # --- structural (path-first, all atomic + mutating) ----------------------
   structural:
     create_container:
-      params:  { mount: MountId, path: Path }
+      params:  { mount: MountId, path: Path, uid: "int?", gid: "int?", mode: "int?" }
       returns: NodeId
       flags:   { mutates: true, atomic: true, locks: false, addr: path }
       raises:  [not_found, not_a_container, nameless, mount_invalid]
+      note: >
+        uid/gid/mode, when given, are recorded on the new node in the same
+        transaction as the create (NODE-4), so it is never visible without
+        its owner; null leaves a column null, which hosts read as their
+        process defaults. mode is masked to 07777. A FUSE daemon passes the
+        caller's ids here.
     create_entry:
-      params:  { mount: MountId, path: Path, data: "Bytes?" }
+      params:  { mount: MountId, path: Path, data: "Bytes?", uid: "int?", gid: "int?", mode: "int?" }
       returns: NodeId
       flags:   { mutates: true, atomic: true, locks: false, addr: path }
       raises:  [not_found, not_a_container, nameless, mount_invalid]
+      note:    "uid/gid/mode as for create_container"
     write_all:
       params:  { mount: MountId, path: Path, data: Bytes }
       returns: void
@@ -302,7 +309,7 @@ operations:
         own name). Containers refused -- PI-1 keeps the container graph a
         tree. nlink is the derived count of active placements.
     create_special:
-      params:  { mount: MountId, path: Path, type: NodeType, data: bytes }
+      params:  { mount: MountId, path: Path, type: NodeType, data: bytes, uid: "int?", gid: "int?", mode: "int?" }
       returns: NodeId
       flags:   { mutates: true, atomic: true, locks: false, addr: path }
       raises:  [not_found, nameless, unsupported, mount_invalid]
@@ -310,7 +317,7 @@ operations:
         create a symlink (data = target bytes), fifo, or socket leaf (era 2,
         D-3). container/entry are refused -- use create_container /
         create_entry. fifo/socket carry an empty content row; the kernel owns
-        their rendezvous semantics.
+        their rendezvous semantics. uid/gid/mode as for create_container.
     set_owner:
       params:  { mount: MountId, path: Path, uid: "int?", gid: "int?", mode: "int?" }
       returns: void
