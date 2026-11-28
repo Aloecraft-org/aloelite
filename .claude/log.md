@@ -275,3 +275,21 @@ A recursive CTE yields rows FIFO and CROSS JOIN pins it as the outer loop,
 which is what lets `read_chunks` return chunks in order with no ORDER BY
 sorting the payloads. An era-1 file has no `content_version` table, so the
 era-5 step returns early there.
+
+Done: both engines, 638 Python tests, 257 Rust tests, 108 conformance
+scenarios (4 new). Commit profile, 8 KiB write, Python engine, synchronous
+FULL: 64K chunks 16 MiB file 7.0 -> 1.0 ms, 64 MiB 32 -> 0.94 ms; 16K
+chunks 16 MiB 30 -> 0.8 ms; 1M chunks unchanged (the chunk rewrite
+dominates). Postgres smoke bench, TPC-B tps before -> after: 1M 121 ->
+115; 64K 194 -> 574 (rust-fuse), 602 (fuse); 16K 64 -> 835, 693; 64K with
+retention 1 and a prune every 5 s 185 -> 795, 656. The Python daemon cell
+now runs as root (issue #15 fixes are under this branch).
+
+Learned: with no sqlite_stat1 the planner drives the prune from a full
+manifest scan; CROSS JOIN pins the entry-first order. A stale release
+daemon showed it as a 2 s stall per prune in the bench, so rebuild
+`--release` after any template change before benchmarking.
+
+Next: PR targets claude/project-thread-9x8lfm until that merges. Not run
+here: WASI and browser targets. Requirements text the owner may want to
+look at is in the PR body.

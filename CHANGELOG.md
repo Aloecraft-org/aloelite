@@ -191,7 +191,10 @@ host path the manifest grants.
   rows that said nothing new. A version now writes rows for the
   positions it changes and takes the rest from the version beneath it
   (CV-4r1). The same write takes about 1 ms, and no longer depends on
-  the size of the file or on how small the chunks are. `append`,
+  the size of the file or on how small the chunks are. PostgreSQL's
+  TPC-B on a mount with 64 KiB chunks went from 194 to 574
+  transactions a second, and with 16 KiB chunks from 64 to 835
+  (`doc/BENCHMARKS.md`). `append`,
   `write_range`, `write_ranges`, `truncate` and append-mode streams
   all write deltas; `write_all`, a truncate-mode stream and `copy`
   write every position, as they must. A new `content_commit` table
