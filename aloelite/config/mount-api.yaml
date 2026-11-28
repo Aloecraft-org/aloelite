@@ -84,7 +84,8 @@ records:
   MountInfo:
     { id: MountId, volume: VolumeId, mount_point: NodeId, mount_path: Path,
       state: MountState, expires_at: "Timestamp?", created_at: Timestamp,
-      note: "mount_path is the mount point's volume-absolute path, recomputed on read" }
+      holder: "string?",
+      note: "mount_path is the mount point's volume-absolute path, recomputed on read; holder as mount was given it" }
   LockInfo:
     { id: LockId, mount: MountId, node: NodeId, expires_at: "Timestamp?" }
   Anomaly:
@@ -191,7 +192,7 @@ operations:
     mount:
       params:  { fs: FsHandle, volume: VolumeId, at: "Path?", ttl_ms: "int?",
                  pin: "bytes?", access: "string?", principal: "string?",
-                 allow_overlap: "bool?" }
+                 allow_overlap: "bool?", holder: "string?" }
       returns: MountId
       flags:   { mutates: true, atomic: true, locks: false }
       raises:  [not_found, mount_conflict, bad_key, encryption_required]
@@ -211,7 +212,17 @@ operations:
         cipher is connection-scoped every later operation re-checks it
         against its volume: mounting a second volume replaces the cipher,
         so a stale mount on the first now fails with encryption_required
-        rather than reading ciphertext as plaintext.
+        rather than reading ciphertext as plaintext. Era 4: holder names the
+        process holding the mount; the engine stores it and never reads it.
+        Both FUSE daemons write `linux boot=<boot_id> pidns=<pid namespace
+        inode> pid=<pid> start=<starttime> host=<hostname>` (boot_id from
+        /proc/sys/kernel/random/boot_id, the namespace from /proc/self/ns/pid,
+        starttime field 22 of /proc/<pid>/stat), and before mounting each
+        unmounts every mount on the volume whose holder has the same boot and
+        pid namespace as itself and is provably gone: kill(pid, 0) fails with
+        ESRCH, or the pid now belongs to a process with another starttime. A
+        holder they cannot judge (another host, boot or namespace, or none)
+        is left to its lease.
     unmount:
       params:  { mount: MountId }
       returns: void

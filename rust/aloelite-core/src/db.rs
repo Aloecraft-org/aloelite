@@ -632,24 +632,29 @@ fn migrate_to_era2(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Era 3 → 4. Two additive volume columns, each guarded so a crashed run
-/// reruns. Existing volumes take the column defaults: no default retention
-/// (as before), and `retention_on_delete = 1`, so the next prune keeps a
+/// Era 3 → 4. Additive columns, each guarded so a crashed run reruns.
+/// Existing volumes take the column defaults: no default retention (as
+/// before), and `retention_on_delete = 1`, so the next prune keeps a
 /// deleted entry's latest version and drops the history beneath it.
+/// Existing mounts have no recorded holder, so only their lease can end
+/// them, as before.
 fn migrate_to_era4(conn: &Connection) -> rusqlite::Result<()> {
-    for (column, decl) in [
+    for (table, column, decl) in [
         (
+            "volume",
             "retention_keep",
             "INTEGER CHECK (retention_keep IS NULL OR retention_keep >= 1)",
         ),
         (
+            "volume",
             "retention_on_delete",
             "INTEGER NOT NULL DEFAULT 1 CHECK (retention_on_delete >= -1)",
         ),
+        ("mount", "holder", "TEXT"),
     ] {
-        if !column_exists(conn, "volume", column)? {
+        if !column_exists(conn, table, column)? {
             conn.execute_batch(&format!(
-                "ALTER TABLE \"volume\" ADD COLUMN \"{column}\" {decl}"
+                "ALTER TABLE \"{table}\" ADD COLUMN \"{column}\" {decl}"
             ))?;
         }
     }
@@ -809,6 +814,8 @@ mod tests {
         // era 4: both volume retention columns, at their defaults
         assert!(column_exists(db.connection(), "volume", "retention_keep").unwrap());
         assert!(column_exists(db.connection(), "volume", "retention_on_delete").unwrap());
+        // era 4: the mount holder, which an era-1 mount row never had
+        assert!(column_exists(db.connection(), "mount", "holder").unwrap());
         let stale: Option<()> = db
             .connection()
             .query_row(

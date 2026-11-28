@@ -170,6 +170,7 @@ class Aloelite:
         access: str = "rw",
         principal: str | None = None,
         allow_overlap: bool = False,
+        holder: str | None = None,
     ) -> "Mount":
         """Open a mount on a volume, addressed by id or by name.
 
@@ -202,6 +203,7 @@ class Aloelite:
             access=access,
             principal=principal,
             allow_overlap=allow_overlap,
+            holder=holder,
         )
         sess = self._db.active_session
         token = sess["token"] if sess and sess.get("mount_id") == mid else None

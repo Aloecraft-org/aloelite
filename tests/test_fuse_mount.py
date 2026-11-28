@@ -48,10 +48,12 @@ _MOUNT_WAIT_S = 15.0
 @pytest.fixture
 def mnt(tmp_path: Path):
     """A live aloelite-fuse mount on a fresh volume file; unmounts on exit."""
-    yield from _mounted(tmp_path)
+    for mp, _daemon in _mounted(tmp_path):
+        yield mp
 
 
 def _mounted(tmp_path: Path, *extra: str):
+    """Yields (mountpoint, daemon process) once, then unmounts."""
     mp = tmp_path / "mnt"
     mp.mkdir()
     proc = subprocess.Popen(
@@ -82,7 +84,7 @@ def _mounted(tmp_path: Path, *extra: str):
         proc.terminate()
         pytest.fail(f"mount did not appear within {_MOUNT_WAIT_S}s")
     try:
-        yield mp
+        yield mp, proc
     finally:
         subprocess.run(["fusermount3", "-u", str(mp)], capture_output=True)
         try:
@@ -251,7 +253,7 @@ def test_root_daemon_serves_another_uid():
 
 
 def _serve_another_uid(root: Path) -> None:
-    for mp in _mounted(root, "--allow-other"):
+    for mp, _daemon in _mounted(root, "--allow-other"):
         os.mkdir(mp / "home")
         os.chown(mp / "home", 65534, 65534)
         made = subprocess.run(
@@ -267,6 +269,22 @@ def _serve_another_uid(root: Path) -> None:
         assert made.stdout == "ok\n"
         st = os.stat(mp / "home" / "a" / "b" / "c")
         assert (st.st_uid, st.st_gid, st.st_mode & 0o7777) == (65534, 65534, 0o700)
+
+
+def test_a_killed_daemons_mount_does_not_block_a_remount(tmp_path: Path):
+    """SIGKILL the daemon, clear the dead kernel mount, mount again at once.
+    The killed daemon's rw row used to refuse the remount (mount_conflict)
+    until its five-minute lease ran out; its recorded holder is now
+    provably gone, so the next daemon retires the row (#15)."""
+    first = _mounted(tmp_path)
+    mp, daemon = next(first)
+    (mp / "f").write_bytes(b"kept")
+    os.sync()
+    daemon.kill()
+    first.close()  # fusermount3 -u the dead mount, and reap the daemon
+    mp.rmdir()
+    for mp, _daemon in _mounted(tmp_path):
+        assert (mp / "f").read_bytes() == b"kept"
 
 
 # --------------------------------------------------------------------------

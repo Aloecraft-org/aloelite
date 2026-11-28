@@ -55,6 +55,7 @@ pub const OPS: &[Op] = &[
             "access",
             "principal",
             "allow_overlap",
+            "holder",
         ],
     },
     Op {

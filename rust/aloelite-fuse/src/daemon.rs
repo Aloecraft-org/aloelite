@@ -4,6 +4,9 @@
 //! The lease matters (ACC-3): the daemon's engine mount carries a TTL and a
 //! background thread renews it, so a crashed daemon's mount row expires
 //! rather than blocking the volume's rw-per-subtree admission (D-4) forever.
+//! A crash on this same host is caught sooner: the row records its holder,
+//! and the next daemon retires it once that process is gone
+//! ([`crate::holder`]). The lease ends any holder that check cannot judge.
 //! The renew thread shares the one engine connection through the same mutex
 //! as the FUSE handlers, so the connection is never touched concurrently.
 //!
@@ -109,6 +112,11 @@ impl Mount {
         let volume =
             find_or_create_volume(&mut db, opts.volume, opts.pin, opts.create, opts.chunk_size)?;
         apply_retention(&mut db, &volume, opts.retention, opts.retention_on_delete)?;
+        // A daemon that died without unmounting (SIGKILL, OOM) leaves its row
+        // admitted until the lease runs out; retire the ones whose holder is
+        // provably gone, then record this process as the new holder (#15).
+        crate::holder::retire_dead(&mut db, &volume)?;
+        let holder = crate::holder::identity();
         let mount = ops::mount(
             &mut db,
             &volume,
@@ -119,6 +127,7 @@ impl Mount {
                 access: opts.access,
                 principal: None,
                 allow_overlap: false,
+                holder: holder.as_deref(),
             },
         )?;
         let fs = AloeFuse::new(db, mount)?;

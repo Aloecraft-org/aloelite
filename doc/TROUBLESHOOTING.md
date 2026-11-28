@@ -79,6 +79,15 @@ Then mount again. If this happens under the manager, unmount and remount
 the volume via the API or admin panel; the manager's next restart also
 sweeps stale mounts automatically.
 
+### "An rw mount already covers this subtree"
+
+Another rw mount of the volume is still valid. Each daemon records itself
+on its mount row, and the next daemon on the same machine retires the row
+of one that has exited, so a remount after a crash or `kill -9` works at
+once. A row it cannot judge, such as one held from another machine or
+container, lasts until its five-minute lease runs out. `aloelite mounts`
+lists the mounts that are still valid.
+
 ### Mount succeeds but another user/container sees an empty directory
 
 FUSE mounts are private to the mounting user unless `allow_other` is

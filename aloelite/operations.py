@@ -348,6 +348,7 @@ def mount(
     access: str = "rw",
     principal: str | None = None,
     allow_overlap: bool = False,
+    holder: str | None = None,
 ) -> MountId:
     """Open a mount on a volume, anchored at `at` (relative to the
     volume root). Returns the durable MountId.
@@ -396,6 +397,7 @@ def mount(
                 "n_m": n_m,
                 "access": access,
                 "principal": principal,
+                "holder": holder,
             },
         )
 

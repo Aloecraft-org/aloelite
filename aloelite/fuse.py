@@ -62,6 +62,7 @@ import trio
 
 import aloelite.errors as aloe_errors
 from aloelite.aloelite import Aloelite
+from aloelite.holder import identity, retire_dead
 from aloelite.types import NodeType, Whence, WriteMode
 
 
@@ -939,7 +940,9 @@ async def _watch_stop(stop_event, interval: float = 0.2) -> None:
 
 # The daemon's engine mount carries a ttl and renews it while alive (ACC-3),
 # so a crashed daemon's mount row EXPIRES instead of blocking the volume's
-# rw-per-subtree admission (D-4) forever. Same trio loop as the handlers, so
+# rw-per-subtree admission (D-4) forever. A crash on this same host is caught
+# sooner, by the holder check in fuse_main (aloelite/holder.py); the lease is
+# what ends a holder that check cannot judge. Same trio loop as the handlers, so
 # the shared connection is never used concurrently.
 _MOUNT_TTL_MS = 300_000
 _RENEW_EVERY_S = 60.0
@@ -1022,8 +1025,12 @@ async def fuse_main(
             fs, volume_name, pin=pin, create=create, chunk_size=chunk_size
         )
         _apply_retention(fs, vol_id, retention, retention_on_delete)
+        # A daemon that died without unmounting (SIGKILL, OOM) leaves its row
+        # admitted until the lease runs out; retire the ones whose holder is
+        # provably gone, then record this process as the new holder (#15).
+        retire_dead(fs, vol_id)
         mount = fs.mount(
-            vol_id, pin=pin, access=access, ttl_ms=_MOUNT_TTL_MS
+            vol_id, pin=pin, access=access, ttl_ms=_MOUNT_TTL_MS, holder=identity()
         ).__enter__()
         try:
             ops = AloeFuse(mount)
@@ -1268,7 +1275,7 @@ A bare --pin (no SECRET) prompts on your terminal; place it last.
                 raise rest
         print("\naloefuse: interrupted; unmounted cleanly", file=sys.stderr)
         sys.exit(130)
-    except (aloe_errors.NotFound, ChunkSizeFixed) as e:
+    except (aloe_errors.NotFound, aloe_errors.MountConflict, ChunkSizeFixed) as e:
         print(f"aloefuse: {e}", file=sys.stderr)
         sys.exit(1)
     except aloe_errors.BadKey:

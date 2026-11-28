@@ -536,6 +536,33 @@ host path the manifest grants.
   initdb copies template files this way and lost every block after the
   first. Every reply that carries attributes now reports the same size
   GETATTR does. (#14)
+- **A node made through a mount is owned by whoever made it.** Both
+  FUSE daemons recorded nothing on create, so every node reported the
+  daemon's own uid. The Python daemon mounts with
+  `default_permissions`, so a root daemon serving another user with
+  `--allow-other` locked that user out of the directories it had just
+  made, and `initdb` failed. Both daemons now record the caller's uid
+  and gid, the group of a setgid parent (a new directory inherits the
+  bit), and the mode asked for, less the umask. `create_container`,
+  `create_entry` and `create_special` take optional `uid`, `gid` and
+  `mode`, set in the same transaction as the create. The Rust daemon
+  now also mounts with `default_permissions`, so the kernel enforces
+  the modes both daemons report. Without it, `--allow-other` let any
+  user read, write and chown every node. (#15)
+- **A daemon killed with SIGKILL no longer blocks a remount for five
+  minutes.** Its rw mount row stayed valid until the lease ran out,
+  and the next daemon on the volume was refused. The mount row now
+  records the process that holds it (`mount.holder`, schema era 4),
+  and a daemon starting on the same machine retires any mount whose
+  holder has exited. A holder on another machine, boot or pid
+  namespace is still left to its lease. (#15)
+- **`aloelite-fuse` exits 0 after an external `fusermount3 -u`.** The
+  Rust daemon unmounted the path a second time during teardown and
+  exited 1 with `Invalid argument`; it could also have unmounted a
+  filesystem mounted there since. It also unmounted itself at once
+  when given a relative mountpoint. fuser 0.19 fixes the first, and
+  the daemon now waits for its FUSE session to end instead of
+  scanning the mount table. (#15)
 
 
 ## [0.4.0] - 2026-09-12

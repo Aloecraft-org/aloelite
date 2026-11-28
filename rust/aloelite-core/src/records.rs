@@ -92,6 +92,8 @@ pub struct MountInfo {
     pub state: MountState,
     pub expires_at: Option<Timestamp>,
     pub created_at: Timestamp,
+    /// The process holding the mount, as the host that made it spelled it.
+    pub holder: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -239,6 +241,7 @@ impl MountInfo {
             state: r.get("state")?,
             expires_at: r.get("expires_at")?,
             created_at: r.get("created_at")?,
+            holder: r.get("holder")?,
         })
     }
 }

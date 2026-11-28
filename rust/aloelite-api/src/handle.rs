@@ -240,6 +240,7 @@ fn engine_op<S: Surface>(
             let at = a.opt_str("at")?;
             let pin = a.opt_bytes("pin")?;
             let principal = a.opt_str("principal")?;
+            let holder = a.opt_str("holder")?;
             let opts = MountOptions {
                 at: at.as_deref().unwrap_or("/"),
                 ttl_ms: a.opt_int("ttl_ms")?,
@@ -247,6 +248,7 @@ fn engine_op<S: Surface>(
                 access: a.access("access")?,
                 principal: principal.as_deref(),
                 allow_overlap: a.opt_bool("allow_overlap")?.unwrap_or(false),
+                holder: holder.as_deref(),
             };
             S::record(&ops::mount(db, &a.volume("volume")?, &opts)?)
         }

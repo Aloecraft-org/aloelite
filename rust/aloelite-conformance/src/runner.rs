@@ -513,12 +513,12 @@ fn mount_op(op: &str, a: &Args, db: &mut Db, mount: &MountId, via: &str) -> Step
         // -- structural ------------------------------------------------------
         "create_container" => {
             a.allow(&["path", "uid", "gid", "mode"]);
-            ops::create_container(db, mount, a.str("path"), owner(&a)).map(json)
+            ops::create_container(db, mount, a.str("path"), owner(a)).map(json)
         }
         "create_entry" => {
             a.allow(&["path", "data", "uid", "gid", "mode"]);
             let data = a.opt_bytes("data");
-            ops::create_entry(db, mount, a.str("path"), data.as_deref(), owner(&a)).map(json)
+            ops::create_entry(db, mount, a.str("path"), data.as_deref(), owner(a)).map(json)
         }
         "write_all" => {
             a.allow(&["path", "data"]);
@@ -557,7 +557,7 @@ fn mount_op(op: &str, a: &Args, db: &mut Db, mount: &MountId, via: &str) -> Step
             a.allow(&["path", "type", "data", "uid", "gid", "mode"]);
             let data = a.opt_bytes("data").unwrap_or_default();
             let kind = a.node_type("type");
-            ops::create_special(db, mount, a.str("path"), kind, &data, owner(&a)).map(json)
+            ops::create_special(db, mount, a.str("path"), kind, &data, owner(a)).map(json)
         }
         "set_owner" => {
             a.allow(&["path", "uid", "gid", "mode"]);
