@@ -397,10 +397,15 @@ jobs:
     # wasmtime with the volume on a preopened host directory. `cargo check`
     # proves it compiles; this proves it opens a file, writes, and reads it
     # back through WASI's filesystem, which is the crate's promise.
+    #
+    # The version is a floor, not a preference. Rust 1.100's std ends a
+    # wasip2 process through wasi:cli/exit `exit-with-code`, which wasmtime
+    # 36 still gated as unstable, so a component built by current stable
+    # does not link there. 48 is the next LTS line and has it.
     - name: wasmtime, for the WASI CLI
       uses: bytecodealliance/actions/wasmtime/setup@v1
       with:
-        version: "v36.0.2"
+        version: "v48.0.10"
     - name: The CLI runs as a WASI component
       run: |
         cargo build -p aloelite-cli --target wasm32-wasip2
