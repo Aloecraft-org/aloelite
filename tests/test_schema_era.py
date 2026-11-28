@@ -335,6 +335,33 @@ def test_era2_file_materialises_placement_names_on_open(tmp_path: Path):
     db.close()
 
 
+# The era-3 `volume` table, and the swap that puts a file's volumes into it.
+_ERA3_VOLUME_COLUMNS = (
+    "volume_id, root_node_id, name, created_at, api_version, chunk_size, "
+    "wm_ts, wm_seq, enc_mode, wrapped_key, wrap_nonce"
+)
+_ERA3_VOLUME_SWAP = f"""
+CREATE TABLE volume_era3 (
+  volume_id    TEXT    PRIMARY KEY,
+  root_node_id TEXT    UNIQUE REFERENCES node (node_id),
+  name         TEXT,
+  created_at   INTEGER NOT NULL,
+  api_version  INTEGER NOT NULL DEFAULT 1,
+  chunk_size   INTEGER NOT NULL DEFAULT 1048576,
+  wm_ts        INTEGER NOT NULL DEFAULT 0,
+  wm_seq       INTEGER NOT NULL DEFAULT 0,
+  enc_mode     TEXT    NOT NULL DEFAULT 'none'
+                       CHECK (enc_mode IN ('none', 'convergent', 'random')),
+  wrapped_key  BLOB,
+  wrap_nonce   BLOB
+) STRICT;
+INSERT INTO volume_era3 ({_ERA3_VOLUME_COLUMNS})
+  SELECT {_ERA3_VOLUME_COLUMNS} FROM volume;
+DROP TABLE volume;
+ALTER TABLE volume_era3 RENAME TO volume;
+"""
+
+
 def test_era3_file_gains_the_volume_retention_columns_on_open(tmp_path: Path):
     """Era 3 -> 4 on a file in genuine era-3 shape: no volume.retention_keep,
     no volume.retention_on_delete, and none of the views that read them.
@@ -351,10 +378,18 @@ def test_era3_file_gains_the_volume_retention_columns_on_open(tmp_path: Path):
     ops.write_all(db, mid, "/f", b"1111")
     ops.write_all(db, mid, "/f", b"2222")
     c = db.connection
-    for view in ("purgeable_node", "retained_version", "effective_retention"):
-        c.execute(f"DROP VIEW {view}")
-    c.execute("ALTER TABLE volume DROP COLUMN retention_keep")
-    c.execute("ALTER TABLE volume DROP COLUMN retention_on_delete")
+    # Rebuild `volume` in its era-3 shape. Not ALTER TABLE DROP COLUMN: at the
+    # SQLite floor (3.45) dropping the last column of a table whose DDL
+    # carries comments fails. The derived objects go first so nothing names
+    # the table while it is swapped; the reopen rebuilds every one of them.
+    derived = c.execute(
+        "SELECT type, name FROM sqlite_master WHERE type IN ('view', 'trigger')"
+    ).fetchall()
+    for kind, name in derived:
+        c.execute(f'DROP {kind} "{name}"')
+    c.execute("PRAGMA foreign_keys = OFF")
+    c.executescript(_ERA3_VOLUME_SWAP)
+    c.execute("PRAGMA foreign_keys = ON")
     c.execute("PRAGMA user_version = 3")
     db.close()
 
