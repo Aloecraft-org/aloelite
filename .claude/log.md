@@ -119,3 +119,23 @@ blocks a remount for MOUNT_TTL_MS (5 min); the suite retires it and
 prunes. (4) aloelite-fuse exits 1 with EINVAL after an external
 `fusermount3 -u`. (5) non-root FUSE mounts fail in the cloud container;
 CI runs non-root and is untested here.
+
+## 2026-11-28 one version per fsync (issue #15 follow-up, item 1)
+
+Plan: the owner picked item 1 of three proposed in the thread: batch a
+file's dirty extents into one transaction and version. Add `write_ranges`
+to mount-api.yaml, both engines, the api table (Value::items for the
+browser and plug-in surfaces) and both conformance runners, with three
+scenarios; switch both daemons' flush to it; re-run the postgres suite.
+Stacked on PR #14's branch; it goes out as its own PR once #14 merges.
+
+Done: all of the above. Overlay unit tests in both daemons assert 200
+scattered writes + one flush = one version. A refused flush now keeps
+the extents buffered (it used to commit some and lose the rest in Rust).
+
+Measured (smoke, rust-fuse, before -> after): `pgbench -i` 34 s -> 4.2 s
+plain, 71 s -> 3.9 s convergent; space 27.6x -> 10.2x plain, 24.8x ->
+7.4x convergent. TPC-B unchanged (~1 fsync per transaction already
+meant one version per transaction); that cost is item 3 (in-place or
+delta manifests, smaller chunks). The Python daemon still cannot be
+measured as root (#15).
