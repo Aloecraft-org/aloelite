@@ -705,10 +705,12 @@ def fuse_session(
     mountpoint: Path,
     name: str = "bench",
     impl: str = "python",
+    allow_other: bool = False,
 ) -> Iterator[subprocess.Popen]:
     """A live kernel mount of a fresh volume, torn down on exit.
 
     `impl` selects the daemon: the Python entry point or the Rust binary.
+    `allow_other` lets uids other than ours use the mount.
     Everything else -- flags, volume, PIN plumbing, readiness probe, teardown
     -- is identical, which is what makes the two frontends' rows comparable.
 
@@ -741,6 +743,11 @@ def fuse_session(
     if spec["pin"] is not None:
         env["ALOELITE_BENCH_PIN"] = spec["pin"].decode()
         argv += ["--pin-env", "ALOELITE_BENCH_PIN"]
+    # Off unless a suite needs another uid in, as `postgres` does when the
+    # harness runs as root: initdb refuses root, so the server is another
+    # uid, and FUSE turns other uids away without this.
+    if allow_other:
+        argv.append("--allow-other")
     # Mountpoint LAST: the Rust parser is hand-rolled and takes the first bare
     # token as the mountpoint, so a flag placed after it would be read as one.
     argv.append(str(mountpoint))

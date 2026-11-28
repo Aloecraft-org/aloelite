@@ -117,6 +117,30 @@ def test_second_fd_sees_unflushed_writes(mnt: Path):
         os.close(w)
 
 
+def test_lookup_after_entry_timeout_keeps_unflushed_size(mnt: Path):
+    """Extend a file through an open rw fd, wait out the 1s entry timeout,
+    then open it again BY PATH. The fresh LOOKUP must report the pending
+    size, not the committed one: the kernel adopts the size in a lookup
+    reply, and a committed-only answer shrank i_size under the writer so the
+    new reader was cut short. PostgreSQL 18's initdb copies template files
+    exactly this way, and lost every block after the first."""
+    p = mnt / "grow.bin"
+    with open(p, "wb") as f:
+        f.write(b"a" * 8192)
+    w = os.open(p, os.O_RDWR)
+    try:
+        os.pwrite(w, b"b" * 24576, 8192)
+        time.sleep(1.5)
+        r = os.open(p, os.O_RDONLY)
+        try:
+            assert os.fstat(r).st_size == 32768
+            assert _pread_uncached(r, 65536, 0) == b"a" * 8192 + b"b" * 24576
+        finally:
+            os.close(r)
+    finally:
+        os.close(w)
+
+
 def test_concurrent_rw_handles_do_not_lose_updates(mnt: Path):
     """Two rw fds writing disjoint extents; both survive, gap zero-fills."""
     p = mnt / "two.bin"

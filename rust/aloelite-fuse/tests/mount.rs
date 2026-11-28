@@ -178,6 +178,29 @@ fn a_second_fd_sees_unflushed_writes() {
     assert_eq!(r.read_uncached(0, 70000), vec![b'A'; 60000]);
 }
 
+/// Extend through an open rw fd, wait out the 1 s entry TTL, then open the
+/// file again BY PATH. The fresh LOOKUP must carry the pending size: the
+/// kernel adopts the size in a lookup reply, and a committed-only answer
+/// shrank i_size under the writer so the new reader was cut short.
+/// PostgreSQL 18's initdb copies template files exactly this way.
+#[test]
+fn a_lookup_after_the_entry_ttl_keeps_the_unflushed_size() {
+    let Some(m) = Mounted::start("lookup-ttl") else {
+        return;
+    };
+    let p = m.path("grow.bin");
+    std::fs::write(&p, [b'a'; 8192]).unwrap();
+    let w = Fd::open(&p, libc::O_RDWR);
+    w.write_at(8192, &[b'b'; 24576]);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let r = Fd::open(&p, libc::O_RDONLY);
+    assert_eq!(r.size(), 32768);
+    let mut want = vec![b'a'; 8192];
+    want.extend(std::iter::repeat_n(b'b', 24576));
+    assert_eq!(r.read_uncached(0, 65536), want);
+    drop(w);
+}
+
 #[test]
 fn concurrent_rw_handles_do_not_lose_updates() {
     let Some(m) = Mounted::start("concurrent-rw") else {

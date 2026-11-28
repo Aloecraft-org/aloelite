@@ -94,3 +94,28 @@ Learned: `ruff format --check .` fails on main today on Markdown code
 blocks in README.md, doc/csi_driver.md, doc/volume_manager.md and
 rust/aloelite-extism/README.md (a newer ruff formats Markdown); not from
 this work.
+
+## 2026-11-28 postgres benchmark suite
+
+Plan: the owner asked directly for benchmarks, Postgres first, outside
+the roadmap (I0 Seed still active). One PR on claude/project-thread-j1p9cd:
+a `postgres` suite in a new `apps` group (bench/suites/apps.py) that runs
+a real cluster with PGDATA on each mount and ext4, reports tps, latency,
+space amplification before and after prune, and pg_amcheck after a
+daemon SIGKILL; `fuse_session(allow_other=)`; doc/BENCHMARKS.md section;
+PostgreSQL install step in benchmark.yml.
+
+Done: smoke run here as root, ext4 and rust-fuse in both modes, all
+pg_amcheck clean. Python daemon measured only with a local, uncommitted
+fix (below).
+
+Learned: (1) default retention (NULL, keep all) makes a PGDATA volume
+grow ~27x in a minute, and prune + VACUUM returns none of it; keep-last-1
+brings it to 0.74x. (2) the Python daemon ignores ctx.uid on mkdir/create
+and mounts with default_permissions, so a root daemon serving another
+uid via allow_other breaks initdb; the Rust daemon also records its own
+uid but has no default_permissions. (3) a SIGKILLed daemon's mount row
+blocks a remount for MOUNT_TTL_MS (5 min); the suite retires it and
+prunes. (4) aloelite-fuse exits 1 with EINVAL after an external
+`fusermount3 -u`. (5) non-root FUSE mounts fail in the cloud container;
+CI runs non-root and is untested here.

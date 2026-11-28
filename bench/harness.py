@@ -75,6 +75,11 @@ SCALES: dict[str, dict[str, Any]] = {
         "kill_rounds": 3,
         "concurrency_seconds": 2.0,
         "readers": 2,
+        "pg_scale": 1,
+        "pg_clients": 2,
+        "pg_seconds": 5,
+        "pg_kill_rounds": 1,
+        "pg_modes": ("plain",),
     },
     "ci": {
         "rounds": 3,
@@ -93,6 +98,11 @@ SCALES: dict[str, dict[str, Any]] = {
         "kill_rounds": 12,
         "concurrency_seconds": 10.0,
         "readers": 3,
+        "pg_scale": 5,
+        "pg_clients": 4,
+        "pg_seconds": 30,
+        "pg_kill_rounds": 3,
+        "pg_modes": ("plain", "convergent"),
     },
     "full": {
         "rounds": 5,
@@ -111,6 +121,11 @@ SCALES: dict[str, dict[str, Any]] = {
         "kill_rounds": 200,
         "concurrency_seconds": 120.0,
         "readers": 8,
+        "pg_scale": 50,
+        "pg_clients": 8,
+        "pg_seconds": 300,
+        "pg_kill_rounds": 10,
+        "pg_modes": ("plain", "convergent"),
     },
 }
 
