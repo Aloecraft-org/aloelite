@@ -269,6 +269,11 @@ fn engine_op<S: Surface>(
             a.uint("offset")?,
             &a.bytes("data")?,
         )?),
+        "write_ranges" => {
+            let owned = a.ranges("ranges")?;
+            let ranges: Vec<(u64, &[u8])> = owned.iter().map(|(o, d)| (*o, d.as_slice())).collect();
+            S::record(&ops::write_ranges(db, &mnt()?, &path()?, &ranges)?)
+        }
         "link" => {
             ops::link(db, &mnt()?, &a.str("from")?, &a.str("to")?)?;
             S::unit()

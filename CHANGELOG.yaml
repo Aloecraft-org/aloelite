@@ -85,6 +85,13 @@ releases:
       host path the manifest grants.
     added:
       - |
+        **`write_ranges`: many byte ranges in one atomic commit.** It lands a
+        list of `{offset, data}` ranges as one transaction and one new content
+        version, exactly as if `write_range` had been applied to each in
+        order. It is in `mount-api.yaml`, both engines, the browser and
+        plug-in surfaces, and the conformance suite; `write_range` is now its
+        one-range case.
+      - |
         **New crate: `aloelite-extism`, Aloelite as an Extism plug-in.**
         Seven exports -- `fs_open`, `fs_open_memory`, `fs_open_image`,
         `fs_snapshot`, `fs_call`, `fs_close`, `fs_operations` -- over
@@ -199,6 +206,14 @@ releases:
         shipped with. Releases before 0.5.0 install too, from their
         per-triple tarballs, so `latest` works while 0.4.0 is latest.
     changed:
+      - |
+        **A flush or fsync on a mount commits one version, not one per dirty
+        range.** Both FUSE daemons now hand every dirty extent of a file to a
+        single `write_ranges`. Before, each extent was its own `write_range`:
+        its own transaction, durable commit, rebuilt chunk and version, so a
+        database checkpoint of 1,600 scattered pages took 1,600 commits and
+        left 1,600 versions. A refused flush now also leaves every dirty byte
+        buffered instead of committing some of them.
       - |
         **Release artifacts carry no version, and the checksum manifest is
         `SHA256SUMS.txt`.** Both from `doc/ALIGNMENT.md`, the Aloecraft-wide

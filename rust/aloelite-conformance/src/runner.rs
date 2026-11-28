@@ -215,6 +215,9 @@ enum Arg {
     Str(String),
     Bytes(Vec<u8>),
     Map(BTreeMap<String, String>),
+    /// A list of records, each field resolved like a top-level argument:
+    /// `write_ranges`' `[{offset, data}]`.
+    List(Vec<BTreeMap<String, Arg>>),
 }
 
 fn resolve_arg(v: &Yaml, binds: &HashMap<String, Out>) -> Arg {
@@ -237,6 +240,18 @@ fn resolve_arg(v: &Yaml, binds: &HashMap<String, Out>) -> Arg {
         Yaml::Mapping(m) => Arg::Map(
             m.iter()
                 .map(|(k, v)| (scalar_text(k), scalar_text(v)))
+                .collect(),
+        ),
+        Yaml::Sequence(items) => Arg::List(
+            items
+                .iter()
+                .map(|item| {
+                    item.as_mapping()
+                        .expect("a list argument holds records")
+                        .iter()
+                        .map(|(k, v)| (scalar_text(k), resolve_arg(v, binds)))
+                        .collect()
+                })
                 .collect(),
         ),
         other => panic!("unsupported argument {other:?}"),
@@ -347,6 +362,24 @@ impl Args {
             None => BTreeMap::new(),
             other => panic!("{}: {name} should be a map, got {other:?}", self.at),
         }
+    }
+
+    /// `write_ranges`' ranges, as owned `(offset, data)` pairs.
+    fn ranges(&self, name: &str) -> Vec<(u64, Vec<u8>)> {
+        let Some(Arg::List(items)) = self.get(name) else {
+            panic!("{}: {name} should be a list of records", self.at)
+        };
+        items
+            .iter()
+            .map(|fields| {
+                let el = Args {
+                    at: format!("{}: {name}[]", self.at),
+                    map: fields.clone(),
+                };
+                el.allow(&["offset", "data"]);
+                (el.int("offset") as u64, el.bytes("data"))
+            })
+            .collect()
     }
 
     fn node(&self, name: &str) -> NodeId {
@@ -499,6 +532,12 @@ fn mount_op(op: &str, a: &Args, db: &mut Db, mount: &MountId, via: &str) -> Step
                 &a.bytes("data"),
             )
             .map(json)
+        }
+        "write_ranges" => {
+            a.allow(&["path", "ranges"]);
+            let owned = a.ranges("ranges");
+            let ranges: Vec<(u64, &[u8])> = owned.iter().map(|(o, d)| (*o, d.as_slice())).collect();
+            ops::write_ranges(db, mount, a.str("path"), &ranges).map(json)
         }
         "link" => {
             a.allow(&["src", "dst"]);

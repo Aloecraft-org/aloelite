@@ -40,6 +40,7 @@ impl Value for Msg {
     const WANTED_BYTES: &'static str = "bytes (a msgpack bin, or a str as UTF-8)";
     const WANTED_MAP: &'static str = "a map of strings";
     const WANTED_OBJECT: &'static str = "a map with string keys";
+    const WANTED_LIST: &'static str = "an array";
 
     fn is_absent(&self) -> bool {
         matches!(self.0, Mp::Nil)
@@ -94,6 +95,13 @@ impl Value for Msg {
                 _ => None,
             })
             .collect()
+    }
+
+    fn items(&self) -> Option<Vec<Msg>> {
+        match &self.0 {
+            Mp::Array(xs) => Some(xs.iter().cloned().map(Msg).collect()),
+            _ => None,
+        }
     }
 
     /// The MessagePack type name, which is what a host's encoder chose and

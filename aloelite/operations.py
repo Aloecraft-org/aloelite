@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from . import crypto
@@ -680,24 +681,40 @@ def append(db: Db, mount: MountId, path: str, data: bytes) -> int:
 def write_range(db: Db, mount: MountId, path: str, offset: int, data: bytes) -> int:
     """Atomically overwrite bytes [offset, offset+len(data)) of an entry,
     extending it (zero-filling any gap) when the range passes EOF. Returns
-    the new size.
+    the new size. The one-range case of write_ranges, which documents the
+    chunk accounting.
 
-    Bounded memory and bounded cost: full chunks strictly before the touched
-    window are carried into the new version BY REFERENCE (prefix), as are
-    full chunks strictly after it (suffix — chunk alignment is preserved
-    because an in-place overwrite never shifts bytes). Only the window is
-    read, patched, re-chunked, and staged. The window extends down to the
-    chunk containing the prior EOF when writing at/past it, so a short final
-    chunk is always rebuilt, preserving the uniform-chunks-except-last
-    invariant the ranged reader depends on.
-
-    Each call is one atomic commit = one new content version. Hot
-    random-write entries should carry set_retention(keep=N) and see periodic
-    prune_content (CV-6/CV-7) to bound manifest growth.
+    Each call is one atomic commit = one new content version. A caller with
+    several ranges to land together (a FUSE flush) should pass them to
+    write_ranges, which commits them as ONE version.
     """
-    if offset < 0:
-        raise ValueError("negative offset")
-    if not data:
+    return write_ranges(db, mount, path, [(offset, data)])
+
+
+def write_ranges(db: Db, mount: MountId, path: str, ranges) -> int:
+    """Atomically overwrite several byte ranges of an entry as ONE new
+    content version, as if write_range had been applied to each in order.
+    Returns the new size.
+
+    `ranges` is a sequence of (offset, data) pairs, or of {offset, data}
+    mappings (the spec's shape). Later ranges win where they overlap. Empty
+    data contributes nothing; with nothing to write the entry is untouched
+    and its size is returned.
+
+    Bounded cost: a chunk is rebuilt only if a range touches it, or if it
+    lies between the prior EOF chunk and the new end (a short final chunk
+    is rebuilt and a gap zero-fills). Every other chunk is carried into the
+    new version BY REFERENCE, in contiguous runs. Rebuilt chunks are read,
+    patched and staged one at a time, so memory is one chunk plus the
+    ranges themselves, however far apart they are. Chunk alignment is
+    preserved (an overwrite never shifts bytes), which keeps the
+    uniform-chunks-except-last invariant the ranged reader depends on.
+
+    Hot random-write entries should still carry set_retention(keep=N) and
+    see periodic prune_content (CV-6/CV-7) to bound manifest growth.
+    """
+    pairs = _ranges(ranges)
+    if not pairs:
         m = _require_mount(db, mount, write=True)
         found = resolve(db, m.mount_point, path)
         if found.type is NodeType.CONTAINER:
@@ -716,53 +733,45 @@ def write_range(db: Db, mount: MountId, path: str, offset: int, data: bytes) -> 
         cs = db.chunk_size_of(m.volume)
         meta = db.read_content_meta(found.node)
         src_version, size = meta if meta is not None else (0, 0)
-        end = offset + len(data)
-        new_size = max(size, end)
+        new_size = max(size, max(off + len(d) for off, d in pairs))
         new_version = db.alloc_version(found.node)
-
-        lo = offset // cs
-        hi = (end - 1) // cs
-        # The window reaches down to the chunk containing the prior EOF when
-        # writing at/past it (rebuild a short final chunk; zero-fill a gap).
-        window_lo = min(lo, size // cs)
         src_last = (size - 1) // cs if size > 0 else -1
 
-        if window_lo > 0:
-            db.run(
-                "mutation.copy_chunk_refs_range",
-                {
-                    "node": found.node,
-                    "dst_version": new_version,
-                    "src_version": src_version,
-                    "lo": 0,
-                    "hi": window_lo - 1,
-                },
-            )
-        if src_last > hi:
-            db.run(
-                "mutation.copy_chunk_refs_range",
-                {
-                    "node": found.node,
-                    "dst_version": new_version,
-                    "src_version": src_version,
-                    "lo": hi + 1,
-                    "hi": src_last,
-                },
-            )
+        # depth: which chunks are rebuilt, as merged [lo, hi] index runs
+        spans = [(off // cs, (off + len(d) - 1) // cs) for off, d in pairs]
+        if new_size > size:
+            # rebuild from the chunk holding the prior EOF to the new end
+            spans.append((size // cs, (new_size - 1) // cs))
+        rebuild = _merge_spans(spans)
 
-        base = window_lo * cs
-        buf = bytearray()
-        win_src_hi = min(hi, src_last)
-        if win_src_hi >= window_lo:
-            rows = db.read_chunk_range(found.node, src_version, window_lo, win_src_hi)
-            buf = bytearray(b"".join(d for _, d in rows))
-        if offset - base > len(buf):
-            buf.extend(b"\x00" * (offset - base - len(buf)))
-        buf[offset - base : end - base] = data
-        index = window_lo
-        for chunk in split_chunks(bytes(buf), cs):
-            db.stage_chunk(found.node, new_version, index, chunk)
-            index += 1
+        # depth: carry every untouched run of the source by reference
+        nxt = 0
+        for lo, hi in rebuild:
+            if lo > nxt and nxt <= src_last:
+                _carry(
+                    db, found.node, new_version, src_version, nxt, min(lo - 1, src_last)
+                )
+            nxt = hi + 1
+        if nxt <= src_last:
+            _carry(db, found.node, new_version, src_version, nxt, src_last)
+
+        # depth: rebuild touched chunks one at a time
+        for lo, hi in rebuild:
+            for index in range(lo, hi + 1):
+                start = index * cs
+                length = min(cs, new_size - start)
+                buf = bytearray(length)
+                if index <= src_last:
+                    rows = db.read_chunk_range(found.node, src_version, index, index)
+                    if rows:
+                        old = rows[0][1][:length]
+                        buf[: len(old)] = old
+                stop = start + length
+                for off, d in pairs:
+                    s, e = max(off, start), min(off + len(d), stop)
+                    if s < e:
+                        buf[s - start : e - start] = d[s - off : e - off]
+                db.stage_chunk(found.node, new_version, index, bytes(buf))
         db.rowcount(
             "mutation.update_content",
             {
@@ -773,6 +782,39 @@ def write_range(db: Db, mount: MountId, path: str, offset: int, data: bytes) -> 
             },
         )
     return new_size
+
+
+def _ranges(ranges) -> list[tuple[int, bytes]]:
+    """Normalise write_ranges input to non-empty (offset, bytes) pairs."""
+    out = []
+    for r in ranges:
+        if isinstance(r, Mapping):
+            off, data = r["offset"], r["data"]
+        else:
+            off, data = r
+        if off < 0:
+            raise ValueError("negative offset")
+        if data:
+            out.append((int(off), bytes(data)))
+    return out
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Sorted, merged chunk-index runs; touching runs fold into one."""
+    out: list[tuple[int, int]] = []
+    for lo, hi in sorted(spans):
+        if out and lo <= out[-1][1] + 1:
+            out[-1] = (out[-1][0], max(out[-1][1], hi))
+        else:
+            out.append((lo, hi))
+    return out
+
+
+def _carry(db: Db, node, dst: int, src: int, lo: int, hi: int) -> None:
+    db.run(
+        "mutation.copy_chunk_refs_range",
+        {"node": node, "dst_version": dst, "src_version": src, "lo": lo, "hi": hi},
+    )
 
 
 def truncate(db: Db, mount: MountId, path: str, size: int) -> None:
@@ -1632,6 +1674,7 @@ __all__ = [
     "create_entry",
     "write_all",
     "write_range",
+    "write_ranges",
     "truncate",
     "rename",
     "set_metadata",

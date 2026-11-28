@@ -44,6 +44,7 @@ impl Value for JsArg {
     const WANTED_BYTES: &'static str = "bytes (Uint8Array, ArrayBuffer or string)";
     const WANTED_MAP: &'static str = "an object of strings";
     const WANTED_OBJECT: &'static str = "an object";
+    const WANTED_LIST: &'static str = "an Array";
 
     fn is_omitted(&self) -> bool {
         self.0.is_undefined()
@@ -107,6 +108,11 @@ impl Value for JsArg {
                 })
                 .collect(),
         )
+    }
+
+    fn items(&self) -> Option<Vec<JsArg>> {
+        Array::is_array(&self.0)
+            .then(|| self.0.unchecked_ref::<Array>().iter().map(JsArg).collect())
     }
 
     /// `typeof`, plus the constructor name for objects: what an error

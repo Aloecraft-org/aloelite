@@ -42,8 +42,8 @@ a rising offset and rebuilding the listing per call made a scan cost one
 listing per call.
 
 Writes buffer only the touched byte ranges, reads overlay them on ranged reads
-of committed content, and flush/fsync/ release commit each coalesced extent as
-one atomic engine write_range (unchanged chunks carried by reference). Memory
+of committed content, and flush/fsync/release commit every coalesced extent together
+as one atomic engine write_ranges (unchanged chunks carried by reference). Memory
 is bounded by dirty bytes, never file size. A non-sequential write on a
 *streaming* handle (O_WRONLY|O_TRUNC path) still returns ENOTSUP; open the file
 O_RDWR for random access instead.
@@ -80,10 +80,10 @@ _DIRTY_FLUSH = 32 << 20  # flush a rw handle once dirty bytes reach this
 
 
 class _OpenFile:
-    """Random-access state backed by write_range: buffers only DIRTY byte
+    """Random-access state backed by write_ranges: buffers only DIRTY byte
     extents (sorted, non-overlapping), overlays them on ranged reads of the
-    committed content, and flushes each coalesced extent as one atomic
-    write_range. Memory is bounded by dirty bytes, never file size.
+    committed content, and flushes all of them as one atomic write_ranges
+    (one version). Memory is bounded by dirty bytes, never file size.
 
     Keyed BY INODE and shared by every rw file handle open on that inode
     (refcounted; AloeFuse._files owns the registry). Per-fh instances lost
@@ -152,11 +152,16 @@ class _OpenFile:
         self.size = new_size
 
     def flush(self) -> None:
-        for lo, b in self.extents:
-            self.m.write_range(self.path, lo, bytes(b))
+        # Every dirty extent lands in ONE write_ranges: one transaction and
+        # one new content version per flush/fsync, however scattered the
+        # writes were. One write_range per extent made a version (and a
+        # durable SQLite commit, and a rebuilt chunk) per extent, which is
+        # what made a database's checkpoint cost thousands of commits.
+        if self.extents:
+            self.m.write_ranges(self.path, [(lo, bytes(b)) for lo, b in self.extents])
         self.extents = []
         self.dirty = 0
-        # an extension past committed EOF is realized by write_range; a pure
+        # an extension past committed EOF is realized by write_ranges; a pure
         # ftruncate-style grow with no bytes is handled in truncate()
         # Idempotent: a second flush (another fh's RELEASE) is a no-op.
 
@@ -816,7 +821,7 @@ class AloeFuse(pyfuse3.Operations):
                 # (sh redirects: open, dup2 to stdout, close the original).
                 # So the handle must survive: convert to a random-access
                 # rw handle over the just-committed state; later writes
-                # land as atomic write_ranges, later flushes flush extents.
+                # buffer as extents, and each flush lands them as one write_ranges.
                 h["w"].close()
                 h["of"] = self._openfile(h["inode"], h["path"])
                 h["mode"] = "rw"

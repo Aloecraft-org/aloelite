@@ -91,6 +91,10 @@ pub const OPS: &[Op] = &[
         args: &["mount", "path", "offset", "data"],
     },
     Op {
+        name: "write_ranges",
+        args: &["mount", "path", "ranges"],
+    },
+    Op {
         name: "link",
         args: &["mount", "from", "to"],
     },
